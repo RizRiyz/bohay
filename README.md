@@ -49,6 +49,29 @@ Or build without installing:
 cargo build --release       # ./target/release/bohay
 ```
 
+### Windows
+
+1. **Install Rust** with [rustup](https://rustup.rs). The default toolchain is MSVC — when
+   prompted, install the **Visual Studio C++ Build Tools** (needed for linking). Prefer no C++
+   tools? Use the GNU toolchain instead: `rustup default stable-x86_64-pc-windows-gnu`.
+2. **Use Windows Terminal** (not the old `cmd.exe`/conhost window) so colors, mouse, and the
+   box-drawing borders render correctly. PowerShell or cmd both work as the shell inside panes.
+3. **Build & run** (in PowerShell):
+
+   ```powershell
+   git clone <repo-url> bohay
+   cd bohay
+   cargo install --path .      # installs bohay.exe into %USERPROFILE%\.cargo\bin (on PATH)
+   bohay                       # launch
+   ```
+
+   Or run without installing: `cargo run --release`.
+
+Two things differ on Windows: a node's directory doesn't follow `cd` inside its pane (it stays
+where the pane was opened), and `bohay integration install` (the bash hook) is a no-op — but
+**agent session resume still works** (it reads the agents' own session files). See
+[`docs/16-windows-support.md`](docs/16-windows-support.md).
+
 ## Quick start
 
 ```bash
