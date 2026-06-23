@@ -86,6 +86,9 @@ pub fn run() -> Result<()> {
         }
 
         app.detect_tick(Instant::now());
+        for msg in app.pending_notify.drain(..) {
+            broadcast(&mut clients, ServerMessage::Notify(msg));
+        }
 
         if activity && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
             if size != backend_size {

@@ -162,6 +162,13 @@ fn draw_content(
             for (k, (label, on)) in toggles.into_iter().enumerate() {
                 ctls.push(ctl_row(f, area, k + 1, cursor, label, toggle(on, t), t));
             }
+            // Shell selector (cycles on click / ‹ › keys) — Windows-only; on Unix
+            // panes always use $SHELL, so there's nothing to choose.
+            #[cfg(windows)]
+            {
+                let shell = crate::platform::shell_label(&app.config.shell);
+                ctls.push(ctl_row(f, area, 5, cursor, "Shell", picker(shell, t), t));
+            }
         }
         SettingsTab::Notifications => {
             let n = &app.config.notifications;
@@ -169,6 +176,10 @@ fn draw_content(
                 ("Enabled", toggle(n.enabled, t)),
                 ("Notify on blocked", toggle(n.on_blocked, t)),
                 ("Notify on done", toggle(n.on_done, t)),
+                (
+                    "Test bell",
+                    Line::from(Span::styled("[ Send ]", Style::new().fg(t.accent).bold())),
+                ),
             ];
             for (i, (label, val)) in rows.into_iter().enumerate() {
                 ctls.push(ctl_row(f, area, i, cursor, label, val, t));
@@ -266,6 +277,16 @@ fn ctl_row(
         Rect::new(row.x, row.y, row.width.saturating_sub(2), 1),
     );
     (i, row)
+}
+
+/// A `‹ value ›` picker display (cycled by click / keys; no arrow hit-rects).
+#[cfg(windows)]
+fn picker(value: &str, t: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("‹ ", Style::new().fg(t.overlay1)),
+        Span::styled(value.to_string(), Style::new().fg(t.accent).bold()),
+        Span::styled(" ›", Style::new().fg(t.overlay1)),
+    ])
 }
 
 fn toggle(on: bool, t: &Theme) -> Line<'static> {

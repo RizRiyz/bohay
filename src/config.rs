@@ -19,6 +19,9 @@ pub struct Config {
     pub version: u32,
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Shell keyword for new panes (`default` / `powershell` / `cmd` / literal).
+    #[serde(default = "default_shell_choice")]
+    pub shell: String,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
     #[serde(default)]
@@ -53,6 +56,9 @@ pub struct NotifyConfig {
 fn default_theme() -> String {
     "noir".to_string()
 }
+fn default_shell_choice() -> String {
+    "default".to_string()
+}
 fn default_sidebar_width() -> u16 {
     SIDEBAR_WIDTH_DEFAULT
 }
@@ -68,6 +74,7 @@ impl Default for Config {
         Config {
             version: CONFIG_VERSION,
             theme: default_theme(),
+            shell: default_shell_choice(),
             sidebar_width: default_sidebar_width(),
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),

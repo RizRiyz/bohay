@@ -59,6 +59,13 @@ pub struct SettingsUi {
     pub cursor: usize,
 }
 
+/// Pane-Layout control rows. The Shell picker (row 5) is Windows-only — on Unix
+/// panes always use `$SHELL`, so the row is hidden.
+#[cfg(windows)]
+const LAYOUT_ROWS: usize = 6;
+#[cfg(not(windows))]
+const LAYOUT_ROWS: usize = 5;
+
 impl App {
     pub fn open_settings(&mut self) {
         let cursor = theme_cursor(&self.config.theme);
@@ -76,8 +83,8 @@ impl App {
     pub fn settings_rows(&self, tab: SettingsTab) -> usize {
         match tab {
             SettingsTab::Theme => theme::THEMES.len(),
-            SettingsTab::Layout => 5,
-            SettingsTab::Notifications => 3,
+            SettingsTab::Layout => LAYOUT_ROWS,
+            SettingsTab::Notifications => 4,
             SettingsTab::Modules => 0,
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
         }
@@ -193,7 +200,8 @@ impl App {
         match tab {
             SettingsTab::Theme => self.settings_move(delta), // radio: left/right == up/down
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
-            SettingsTab::Notifications => self.toggle_notify(cursor),
+            SettingsTab::Notifications if cursor < 3 => self.toggle_notify(cursor),
+            SettingsTab::Notifications => {} // the Test row only reacts to Enter/click
             SettingsTab::Integrations => self.settings_activate(cursor),
             SettingsTab::Modules => {}
         }
@@ -208,6 +216,7 @@ impl App {
                 self.apply_theme(theme::THEMES[cursor.min(theme::THEMES.len() - 1)])
             }
             SettingsTab::Layout => self.adjust_layout(cursor, 1),
+            SettingsTab::Notifications if cursor == 3 => self.test_notification(),
             SettingsTab::Notifications => self.toggle_notify(cursor),
             SettingsTab::Integrations => self.install_integration(cursor),
             SettingsTab::Modules => {}
@@ -249,8 +258,24 @@ impl App {
                 self.config.layout.resume_in_new_node = !self.config.layout.resume_in_new_node;
                 config::save(&self.config);
             }
+            #[cfg(windows)]
+            5 => self.cycle_shell(delta),
             _ => {}
         }
+    }
+
+    /// Cycle the configured shell (applies to newly opened panes). Windows-only.
+    #[cfg(windows)]
+    fn cycle_shell(&mut self, delta: i32) {
+        let choices = crate::platform::shell_choices();
+        let n = choices.len() as i32;
+        let cur = choices
+            .iter()
+            .position(|(k, _)| *k == self.config.shell)
+            .unwrap_or(0) as i32;
+        let next = (((cur + delta) % n + n) % n) as usize;
+        self.config.shell = choices[next].0.to_string();
+        config::save(&self.config);
     }
 
     fn apply_gaps(&mut self) {
@@ -266,6 +291,13 @@ impl App {
             _ => {}
         }
         config::save(&self.config);
+    }
+
+    /// Fire a one-off notification so the user can confirm the bell works.
+    /// Bypasses the enabled toggle — it's an explicit manual test.
+    fn test_notification(&mut self) {
+        self.pending_notify
+            .push("bohay — test notification".to_string());
     }
 
     fn install_integration(&mut self, cursor: usize) {

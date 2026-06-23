@@ -68,6 +68,18 @@ pub(crate) fn install_tui_panic_hook() {
     }));
 }
 
+/// Ring the terminal bell and raise a desktop notification. `BEL` (0x07) is the
+/// universal sound; `OSC 9` raises a desktop notification on terminals that
+/// support it (iTerm2, etc.) and is ignored elsewhere.
+pub(crate) fn emit_notification(msg: &str) {
+    use std::io::Write;
+    let safe: String = msg.chars().filter(|c| !c.is_control()).take(120).collect();
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"\x07");
+    let _ = write!(out, "\x1b]9;{safe}\x07");
+    let _ = out.flush();
+}
+
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
     let mut terminal = ratatui::init();
@@ -207,6 +219,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             thread::sleep(Duration::from_millis(16) - since);
         }
         app.detect_tick(Instant::now());
+        for msg in app.pending_notify.drain(..) {
+            emit_notification(&msg);
+        }
         terminal.draw(|f| ui::render(f, &mut app))?;
         last_draw = Instant::now();
     }

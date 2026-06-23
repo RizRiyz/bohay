@@ -58,6 +58,7 @@ fn run_inner(stream: Conn, terminal: &mut DefaultTerminal) -> Result<()> {
     loop {
         match protocol::read_message::<_, ServerMessage>(&mut reader) {
             Ok(ServerMessage::Frame(frame)) => blit(terminal, &frame, truecolor)?,
+            Ok(ServerMessage::Notify(msg)) => crate::emit_notification(&msg),
             Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => break,
             Ok(_) => {}
             Err(_) => break, // server gone

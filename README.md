@@ -55,7 +55,15 @@ cargo build --release       # ./target/release/bohay
    prompted, install the **Visual Studio C++ Build Tools** (needed for linking). Prefer no C++
    tools? Use the GNU toolchain instead: `rustup default stable-x86_64-pc-windows-gnu`.
 2. **Use Windows Terminal** (not the old `cmd.exe`/conhost window) so colors, mouse, and the
-   box-drawing borders render correctly. PowerShell or cmd both work as the shell inside panes.
+   box-drawing borders render correctly. Panes spawn **PowerShell** by default (`pwsh.exe` if
+   installed, otherwise the built-in `powershell.exe`). Switch between PowerShell and Command
+   Prompt any time in **Settings → Pane Layout → Shell** (the choice persists and applies to
+   newly opened panes). For a different shell or a full path, set `BOHAY_SHELL` (it overrides
+   the setting) in your PowerShell `$PROFILE`:
+
+   ```powershell
+   $env:BOHAY_SHELL = "C:\path\to\nu.exe"   # overrides the Settings choice
+   ```
 3. **Build & run** (in PowerShell):
 
    ```powershell
@@ -107,9 +115,11 @@ also fully mouse-driven — click tabs, nodes, agents, panes, the `+`/`✕` butt
 
 **Settings** — click the **⚙** gear in the sidebar (or `Ctrl+Space` then `,`) for a tabbed
 dialog: **Theme** (noir / latte / mono, live preview), **Layout** (sidebar width, gaps, pane
-titles, resume placement), **Notifications**, **Modules**, and **Agents** (install the resume
-hook). Changes apply instantly and persist to `~/.bohay/config.json`. `↑↓` move, `⇥` switch
-tab, `←→` adjust, `⏎` apply, `esc` close.
+titles, resume placement; **on Windows**, also a **Shell** picker — PowerShell / Command
+Prompt — for new panes), **Notifications** (ring the terminal bell + a desktop notification
+when an agent gets blocked or finishes, with a **Test bell** button), **Modules**, and
+**Agents** (install the resume hook). Changes apply instantly and persist to
+`~/.bohay/config.json`. `↑↓` move, `⇥` switch tab, `←→` adjust, `⏎` apply, `esc` close.
 
 ## CLI
 

@@ -112,6 +112,9 @@ pub struct App {
     pub last_cursor: Option<(u16, u16)>,
     /// Foreground client asked to detach (prefix+q). Distinct from quit.
     pub detach_requested: bool,
+    /// Notification messages queued by detection; the loop flushes them to the
+    /// terminal (bell + desktop) and clears.
+    pub pending_notify: Vec<String>,
     /// Downsample RGB → 256-color (for the local path on non-truecolor terms).
     pub downsample: bool,
     /// Throttle for refreshing pane working directories.
@@ -165,18 +168,19 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let name = ws_name(&cwd);
 
+        let config = crate::config::load();
+        crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
+        let theme = crate::ui::theme::by_name(&config.theme);
+        let sidebar_width = config.sidebar_width();
+        let shell = crate::platform::resolve_shell(&config.shell);
+
         let id = PaneId::alloc();
-        let pane = Pane::spawn(id, cols, rows, cwd.clone(), app_tx.clone(), None)?;
+        let pane = Pane::spawn(id, cols, rows, cwd.clone(), app_tx.clone(), None, &shell)?;
         let command = pane.command.clone();
         let mut panes = HashMap::new();
         panes.insert(id, pane);
         let mut status = HashMap::new();
         status.insert(id, PaneStatus::new(command));
-
-        let config = crate::config::load();
-        crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
-        let theme = crate::ui::theme::by_name(&config.theme);
-        let sidebar_width = config.sidebar_width();
 
         Ok(App {
             panes,
@@ -204,6 +208,7 @@ impl App {
             events: api::new_bus(),
             last_cursor: None,
             detach_requested: false,
+            pending_notify: Vec::new(),
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
@@ -248,6 +253,8 @@ impl App {
     }
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
+        let config = crate::config::load();
+        let shell = crate::platform::resolve_shell(&config.shell);
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
         let mut workspaces = Vec::new();
@@ -264,6 +271,7 @@ impl App {
                         ps.cwd.clone(),
                         app_tx.clone(),
                         ps.screen.as_deref(),
+                        &shell,
                     )
                     .ok()?;
                     let cmd = pane.command.clone();
@@ -305,7 +313,6 @@ impl App {
         }
         let active_ws = snap.active_ws.min(workspaces.len() - 1);
 
-        let config = crate::config::load();
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme = crate::ui::theme::by_name(&config.theme);
         let sidebar_width = config.sidebar_width();
@@ -328,6 +335,7 @@ impl App {
             events: api::new_bus(),
             last_cursor: None,
             detach_requested: false,
+            pending_notify: Vec::new(),
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
@@ -408,7 +416,8 @@ impl App {
 
     fn spawn_into(&mut self, cwd: PathBuf) -> Option<PaneId> {
         let id = PaneId::alloc();
-        match Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None) {
+        let shell = crate::platform::resolve_shell(&self.config.shell);
+        match Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None, &shell) {
             Ok(pane) => {
                 let cmd = pane.command.clone();
                 self.panes.insert(id, pane);
@@ -745,6 +754,10 @@ fn git_branch(cwd: &std::path::Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    /// Serializes tests that mutate the global `BOHAY_HOME` env + config files,
+    /// so they don't race on each other's config I/O.
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn key(c: char, m: KeyModifiers) -> AppEvent {
         AppEvent::Key(KeyEvent::new(KeyCode::Char(c), m))
@@ -1116,6 +1129,7 @@ mod tests {
         use ratatui::Terminal;
 
         // Isolate config I/O to a temp dir so this is deterministic.
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("bohay-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var("BOHAY_HOME", &tmp);
@@ -1197,6 +1211,7 @@ mod tests {
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
 
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("bohay-slider-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var("BOHAY_HOME", &tmp);
@@ -1240,6 +1255,91 @@ mod tests {
 
         std::env::remove_var("BOHAY_HOME");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The Shell picker is Windows-only (control row 5 doesn't exist elsewhere).
+    #[cfg(windows)]
+    #[test]
+    fn settings_shell_choice_cycles_and_persists() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.open_settings();
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+        ))); // Layout
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        assert_eq!(app.config.shell, "default");
+        // The Shell row (control index 5) cycles forward on click.
+        let row = app
+            .settings_ctl_rects
+            .iter()
+            .find(|(i, _)| *i == 5)
+            .unwrap()
+            .1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 2,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_ne!(
+            app.config.shell, "default",
+            "clicking the Shell row cycles it"
+        );
+        // …and the choice is persisted.
+        assert_eq!(crate::config::load().shell, app.config.shell);
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn notification_queued_on_blocked_transition() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        // Drive the pane's screen to a permission prompt so detection sees
+        // Blocked. Newlines push it to the bottom rows that detection scans.
+        if let Some(p) = app.panes.get(&id) {
+            if let Ok(mut e) = p.engine.lock() {
+                let mut buf = vec![b'\n'; 30];
+                buf.extend_from_slice(b"Do you want to proceed? (y/n) ");
+                e.advance(&buf);
+            }
+        }
+
+        // Enabled + on_blocked → a transition queues a bell/desktop notification.
+        app.config.notifications.enabled = true;
+        app.config.notifications.on_blocked = true;
+        app.status.get_mut(&id).unwrap().state = State::Idle; // arm the transition
+        app.detect_tick(std::time::Instant::now());
+        assert!(
+            app.pending_notify.iter().any(|m| m.contains("blocked")),
+            "blocked transition queues a notification: {:?}",
+            app.pending_notify
+        );
+
+        // Disabled → nothing is queued, even on the same transition.
+        app.pending_notify.clear();
+        app.config.notifications.enabled = false;
+        app.status.get_mut(&id).unwrap().state = State::Idle; // re-arm
+        app.detect_tick(std::time::Instant::now());
+        assert!(
+            app.pending_notify.is_empty(),
+            "disabled notifications stay silent"
+        );
     }
 }
 
