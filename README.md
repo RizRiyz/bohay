@@ -67,9 +67,15 @@ cargo build --release       # ./target/release/bohay
 
    Or run without installing: `cargo run --release`.
 
-Two things differ on Windows: a node's directory doesn't follow `cd` inside its pane (it stays
-where the pane was opened), and `bohay integration install` (the bash hook) is a no-op — but
-**agent session resume still works** (it reads the agents' own session files). See
+The keybindings are the same on every platform — the `Ctrl+Space` prefix is detected across the
+forms different terminals report it as. One Windows gotcha: if you have multiple input
+languages installed, Windows itself binds `Ctrl+Space` to "switch input method" and may swallow
+it before it reaches the app. If the prefix seems dead, turn that off in **Settings → Time &
+language → Typing → Advanced keyboard settings → Input language hot keys**.
+
+Two other things differ on Windows: a node's directory doesn't follow `cd` inside its pane (it
+stays where the pane was opened), and `bohay integration install` (the bash hook) is a no-op —
+but **agent session resume still works** (it reads the agents' own session files). See
 [`docs/16-windows-support.md`](docs/16-windows-support.md).
 
 ## Quick start

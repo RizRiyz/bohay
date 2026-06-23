@@ -145,14 +145,14 @@ impl App {
         match self.mode {
             Mode::Prefix => {
                 self.mode = Mode::Normal;
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                match key.code {
-                    // Pressing the prefix twice sends a literal Ctrl-Space (NUL).
-                    KeyCode::Char(' ') if ctrl => {
-                        if let Some(p) = self.focused() {
-                            p.send(&[0x00]);
-                        }
+                // Pressing the prefix twice sends a literal Ctrl-Space (NUL).
+                if is_prefix(&key) {
+                    if let Some(p) = self.focused() {
+                        p.send(&[0x00]);
                     }
+                    return;
+                }
+                match key.code {
                     KeyCode::Char('q') | KeyCode::Char('d') => self.detach_requested = true,
                     KeyCode::Char('b') => self.sidebar_visible = !self.sidebar_visible,
                     // Splits: `v` puts the new pane to the right (vertical
@@ -182,7 +182,7 @@ impl App {
                 }
             }
             Mode::Normal => {
-                if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if is_prefix(&key) {
                     self.mode = Mode::Prefix;
                     return;
                 }
@@ -194,6 +194,17 @@ impl App {
             }
         }
     }
+}
+
+/// True if `key` is the prefix chord (Ctrl+Space). Terminals and OSes report
+/// this chord inconsistently — modern Unix terminals send `Char(' ')` + Ctrl,
+/// while the Windows console / some VT terminals send `Char('@')` + Ctrl or a
+/// bare `Null` (the NUL byte Ctrl+Space produces). Accept them all so the prefix
+/// works the same everywhere.
+fn is_prefix(key: &KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    matches!(key.code, KeyCode::Null)
+        || (ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('@')))
 }
 
 /// Encode a crossterm key event into the bytes a terminal program expects.

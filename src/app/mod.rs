@@ -33,7 +33,7 @@ pub const SIDEBAR_WIDTH_DEFAULT: u16 = 26;
 pub const SIDEBAR_WIDTH_MIN: u16 = 18;
 pub const SIDEBAR_WIDTH_MAX: u16 = 44;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Normal,
     Prefix,
@@ -697,6 +697,35 @@ mod tests {
 
     fn key(c: char, m: KeyModifiers) -> AppEvent {
         AppEvent::Key(KeyEvent::new(KeyCode::Char(c), m))
+    }
+
+    #[test]
+    fn prefix_chord_variants() {
+        // Ctrl+Space arrives in different forms across terminals/OSes; each must
+        // enter prefix mode and the next key (here `v`) must then split.
+        let chords = [
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL), // modern Unix
+            KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL), // Ctrl+@ == NUL
+            KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),         // bare NUL byte
+        ];
+        for chord in chords {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            app.handle_event(AppEvent::Key(chord));
+            assert_eq!(
+                app.mode,
+                Mode::Prefix,
+                "chord {:?} should arm the prefix",
+                chord.code
+            );
+            app.handle_event(key('v', KeyModifiers::NONE));
+            assert_eq!(
+                app.layout().len(),
+                2,
+                "prefix+v should split after {:?}",
+                chord.code
+            );
+        }
     }
 
     #[test]
