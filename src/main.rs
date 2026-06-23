@@ -5,6 +5,7 @@
 mod agent;
 mod app;
 mod cli;
+mod config;
 mod detect;
 mod event;
 mod ids;

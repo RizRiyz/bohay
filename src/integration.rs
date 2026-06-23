@@ -71,6 +71,35 @@ pub fn install_claude() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Agents the integration hook supports (for the Settings UI).
+pub const AGENTS: &[&str] = &["claude"];
+
+/// Install the integration hook for `agent` (used by the Settings tab).
+pub fn install(agent: &str) -> Result<()> {
+    match agent {
+        "claude" => install_claude().map(|_| ()),
+        other => Err(anyhow!("no integration for {other}")),
+    }
+}
+
+/// Whether the integration hook is currently installed for `agent`.
+pub fn is_installed(agent: &str) -> bool {
+    if agent != "claude" {
+        return false;
+    }
+    let Ok(s) = fs::read_to_string(claude_config_dir().join("settings.json")) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else {
+        return false;
+    };
+    v.get("hooks")
+        .and_then(|h| h.get("SessionStart"))
+        .and_then(|a| a.as_array())
+        .map(|arr| arr.iter().any(group_mentions_bohay))
+        .unwrap_or(false)
+}
+
 /// Insert a SessionStart command hook pointing at `script`, removing any prior
 /// bohay entry first.
 fn register_hook(settings: &mut Value, script: &str) {

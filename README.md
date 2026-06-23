@@ -100,10 +100,16 @@ All commands are prefixed with **`Ctrl+Space`** (press it, then the key):
 | `z` | zoom the focused pane | `N` | new node (workspace) |
 | `h` `j` `k` `l` | move focus between panes | `D` | close the current node |
 | `b` | toggle the sidebar | `w` | cycle to the next node |
-| `q` / `d` | detach (leave the server running) | | |
+| `q` / `d` | detach (leave the server running) | `,` | open Settings |
 
 Pressing `Ctrl+Space` twice sends a literal `Ctrl+Space` to the focused program. The UI is
 also fully mouse-driven — click tabs, nodes, agents, panes, the `+`/`✕` buttons, and scroll.
+
+**Settings** — click the **⚙** gear in the sidebar (or `Ctrl+Space` then `,`) for a tabbed
+dialog: **Theme** (noir / latte / mono, live preview), **Layout** (sidebar width, gaps, pane
+titles, resume placement), **Notifications**, **Modules**, and **Agents** (install the resume
+hook). Changes apply instantly and persist to `~/.bohay/config.json`. `↑↓` move, `⇥` switch
+tab, `←→` adjust, `⏎` apply, `esc` close.
 
 ## CLI
 

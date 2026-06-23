@@ -23,6 +23,9 @@ use crate::ui::theme::{State, Theme};
 
 mod dispatch;
 mod input;
+mod settings;
+
+pub use settings::{SettingsTab, SettingsUi};
 
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
 
@@ -91,6 +94,10 @@ pub struct App {
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub theme: Theme,
+    /// Persisted user configuration (theme, layout, notifications).
+    pub config: crate::config::Config,
+    /// The open Settings modal, if any (`Some` ⇒ modal captures input).
+    pub settings: Option<SettingsUi>,
     pub mode: Mode,
     pub sidebar_visible: bool,
     /// Sidebar width in columns (customizable; see `set_sidebar_width`).
@@ -143,6 +150,14 @@ pub struct App {
     pub tab_next_rect: Option<Rect>,
     /// The focused pane's ✕ close button, for mouse hit-testing.
     pub pane_close_rect: Option<Rect>,
+    // Settings modal hit-test geometry (populated by render when the modal is open).
+    pub settings_icon_rect: Option<Rect>,
+    pub settings_close_rect: Option<Rect>,
+    pub settings_modal_rect: Option<Rect>,
+    pub settings_tab_rects: Vec<(SettingsTab, Rect)>,
+    pub settings_ctl_rects: Vec<(usize, Rect)>,
+    /// Slider arrows in the modal: (control index, ±1 direction, rect).
+    pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
 }
 
 impl App {
@@ -158,6 +173,11 @@ impl App {
         let mut status = HashMap::new();
         status.insert(id, PaneStatus::new(command));
 
+        let config = crate::config::load();
+        crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
+        let theme = crate::ui::theme::by_name(&config.theme);
+        let sidebar_width = config.sidebar_width();
+
         Ok(App {
             panes,
             status,
@@ -171,10 +191,12 @@ impl App {
                 active_tab: 0,
             }],
             active_ws: 0,
-            theme: Theme::noir(),
+            theme,
+            config,
+            settings: None,
             mode: Mode::Normal,
             sidebar_visible: true,
-            sidebar_width: SIDEBAR_WIDTH_DEFAULT,
+            sidebar_width,
             zoomed: false,
             should_quit: false,
             spinner: 0,
@@ -206,6 +228,12 @@ impl App {
             tab_prev_rect: None,
             tab_next_rect: None,
             pane_close_rect: None,
+            settings_icon_rect: None,
+            settings_close_rect: None,
+            settings_modal_rect: None,
+            settings_tab_rects: Vec::new(),
+            settings_ctl_rects: Vec::new(),
+            settings_arrow_rects: Vec::new(),
         })
     }
 
@@ -276,15 +304,23 @@ impl App {
             return None;
         }
         let active_ws = snap.active_ws.min(workspaces.len() - 1);
+
+        let config = crate::config::load();
+        crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
+        let theme = crate::ui::theme::by_name(&config.theme);
+        let sidebar_width = config.sidebar_width();
+
         Some(App {
             panes,
             status,
             workspaces,
             active_ws,
-            theme: Theme::noir(),
+            theme,
+            config,
+            settings: None,
             mode: Mode::Normal,
             sidebar_visible: true,
-            sidebar_width: SIDEBAR_WIDTH_DEFAULT,
+            sidebar_width,
             zoomed: false,
             should_quit: false,
             spinner: 0,
@@ -316,6 +352,12 @@ impl App {
             tab_prev_rect: None,
             tab_next_rect: None,
             pane_close_rect: None,
+            settings_icon_rect: None,
+            settings_close_rect: None,
+            settings_modal_rect: None,
+            settings_tab_rects: Vec::new(),
+            settings_ctl_rects: Vec::new(),
+            settings_arrow_rects: Vec::new(),
         })
     }
 
@@ -331,6 +373,8 @@ impl App {
     /// settings / a future resize control.
     pub fn set_sidebar_width(&mut self, cols: u16) {
         self.sidebar_width = cols.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+        self.config.sidebar_width = self.sidebar_width;
+        crate::config::save(&self.config);
     }
 
     // ── accessors ───────────────────────────────────────────────────────────
@@ -513,7 +557,14 @@ impl App {
         let tab = Tab {
             layout: TileLayout::new(id),
         };
-        if let Some(wi) = self.workspaces.iter().position(|w| w.cwd == s.cwd) {
+        // Per the Layout setting, reuse the session's own node (or the node at
+        // its cwd); otherwise open it as a tab in the currently active node.
+        let target = if self.config.layout.resume_in_new_node {
+            self.workspaces.iter().position(|w| w.cwd == s.cwd)
+        } else {
+            Some(self.active_ws)
+        };
+        if let Some(wi) = target {
             self.active_ws = wi;
             let ws = &mut self.workspaces[wi];
             ws.tabs.push(tab);
@@ -1056,6 +1107,139 @@ mod tests {
             app.dismissed_sessions.contains("s1"),
             "stays dismissed across rescans"
         );
+    }
+
+    #[test]
+    fn settings_modal_interactions() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        // Isolate config I/O to a temp dir so this is deterministic.
+        let tmp = std::env::temp_dir().join(format!("bohay-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        assert!(app.settings.is_none());
+        app.open_settings();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.settings_tab_rects.len(), 5, "five tabs");
+        assert!(
+            !app.settings_ctl_rects.is_empty(),
+            "theme tab lists palettes"
+        );
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Settings") && text.contains("Theme") && text.contains("Agents"));
+
+        // Moving the selection down live-applies the next theme.
+        assert_eq!(app.config.theme, "noir");
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.config.theme, "latte");
+
+        let click = |app: &mut App, x, y| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        // Click the Layout tab, then toggle "Pane titles" (control row 3).
+        let layout = app
+            .settings_tab_rects
+            .iter()
+            .find(|(t, _)| *t == SettingsTab::Layout)
+            .unwrap()
+            .1;
+        click(&mut app, layout.x + 1, layout.y);
+        assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Layout);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let before = app.config.layout.show_titles;
+        let row = app
+            .settings_ctl_rects
+            .iter()
+            .find(|(i, _)| *i == 3)
+            .unwrap()
+            .1;
+        click(&mut app, row.x + 2, row.y);
+        assert_ne!(
+            app.config.layout.show_titles, before,
+            "click toggles pane titles"
+        );
+
+        // Esc closes.
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.settings.is_none());
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn settings_slider_arrows_step_both_ways() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let tmp = std::env::temp_dir().join(format!("bohay-slider-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.open_settings();
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ))); // → Layout
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let left = app
+            .settings_arrow_rects
+            .iter()
+            .find(|(_, d, _)| *d < 0)
+            .unwrap()
+            .2;
+        let right = app
+            .settings_arrow_rects
+            .iter()
+            .find(|(_, d, _)| *d > 0)
+            .unwrap()
+            .2;
+        let click = |app: &mut App, r: Rect| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: r.x,
+                row: r.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let start = app.sidebar_width;
+        click(&mut app, left);
+        assert!(app.sidebar_width < start, "left arrow decreases width");
+        let low = app.sidebar_width;
+        click(&mut app, right);
+        assert!(app.sidebar_width > low, "right arrow increases width");
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

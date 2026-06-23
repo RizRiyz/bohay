@@ -29,6 +29,14 @@ impl App {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
+        // While the Settings modal is open it owns the mouse: clicks hit the
+        // modal (or dismiss it); everything else is swallowed.
+        if self.settings.is_some() {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                self.handle_settings_click(m.column, m.row);
+            }
+            return;
+        }
         let scroll: i32 = match m.kind {
             MouseEventKind::Down(MouseButton::Left) => 0,
             MouseEventKind::ScrollUp => -3,
@@ -68,6 +76,11 @@ impl App {
             return;
         }
 
+        // The sidebar gear opens Settings.
+        if self.settings_icon_rect.is_some_and(hit) {
+            self.open_settings();
+            return;
+        }
         // Left click: close/add buttons first, then tabs → agents → ws → panes.
         if let Some((i, _)) = self.tab_close_rects.iter().find(|(_, rect)| hit(*rect)) {
             self.close_tab(*i);
@@ -142,6 +155,11 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        // The Settings modal captures all input while open.
+        if self.settings.is_some() {
+            self.handle_settings_key(key);
+            return;
+        }
         match self.mode {
             Mode::Prefix => {
                 self.mode = Mode::Normal;
@@ -155,6 +173,8 @@ impl App {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Char('d') => self.detach_requested = true,
                     KeyCode::Char('b') => self.sidebar_visible = !self.sidebar_visible,
+                    // `,` opens Settings (preferences), like many apps.
+                    KeyCode::Char(',') => self.open_settings(),
                     // Splits: `v` puts the new pane to the right (vertical
                     // divider), `s`/`-` puts it below (horizontal divider).
                     KeyCode::Char('v') => self.split(Axis::Col),
