@@ -16,26 +16,50 @@ struct LineCell {
     right: bool,
 }
 
-fn line_cell_symbol(l: LineCell) -> &'static str {
-    // Heavy box-drawing glyphs: thick strokes render as solid lines on macOS
-    // Terminal.app (the thin `─`/`│` set renders with gaps at large font sizes).
-    match (l.up, l.down, l.left, l.right) {
-        (true, true, true, true) => "╋",
-        (true, true, true, false) => "┫",
-        (true, true, false, true) => "┣",
-        (true, false, true, true) => "┻",
-        (false, true, true, true) => "┳",
-        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => {
-            "┃"
+/// Box-drawing glyph for a cell. The **focused** pane is drawn with **thick**
+/// strokes and the others with **thin/plain** ones, so the active pane clearly
+/// pops. (Thick also renders as solid lines on macOS Terminal.app, where the
+/// thin set can show small gaps at large font sizes — so the focused pane always
+/// looks crisp.)
+fn line_cell_symbol(l: LineCell, thick: bool) -> &'static str {
+    if thick {
+        match (l.up, l.down, l.left, l.right) {
+            (true, true, true, true) => "╋",
+            (true, true, true, false) => "┫",
+            (true, true, false, true) => "┣",
+            (true, false, true, true) => "┻",
+            (false, true, true, true) => "┳",
+            (true, true, false, false)
+            | (true, false, false, false)
+            | (false, true, false, false) => "┃",
+            (false, false, true, true)
+            | (false, false, true, false)
+            | (false, false, false, true) => "━",
+            (false, true, false, true) => "┏",
+            (false, true, true, false) => "┓",
+            (true, false, false, true) => "┗",
+            (true, false, true, false) => "┛",
+            _ => "",
         }
-        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
-            "━"
+    } else {
+        match (l.up, l.down, l.left, l.right) {
+            (true, true, true, true) => "┼",
+            (true, true, true, false) => "┤",
+            (true, true, false, true) => "├",
+            (true, false, true, true) => "┴",
+            (false, true, true, true) => "┬",
+            (true, true, false, false)
+            | (true, false, false, false)
+            | (false, true, false, false) => "│",
+            (false, false, true, true)
+            | (false, false, true, false)
+            | (false, false, false, true) => "─",
+            (false, true, false, true) => "┌",
+            (false, true, true, false) => "┐",
+            (true, false, false, true) => "└",
+            (true, false, true, false) => "┘",
+            _ => "",
         }
-        (false, true, false, true) => "┏",
-        (false, true, true, false) => "┓",
-        (true, false, false, true) => "┗",
-        (true, false, true, false) => "┛",
-        _ => "",
     }
 }
 
@@ -99,11 +123,11 @@ pub(super) fn render_pane_borders(
         if x >= area.right() || y >= area.bottom() {
             continue;
         }
-        let sym = line_cell_symbol(line);
+        let focused = focus_rect.is_some_and(|r| on_perimeter(x, y, r));
+        let sym = line_cell_symbol(line, focused);
         if sym.is_empty() {
             continue;
         }
-        let focused = focus_rect.is_some_and(|r| on_perimeter(x, y, r));
         let color = if focused { t.border_focus } else { t.border };
         let cell = &mut buf[(x, y)];
         cell.set_symbol(sym);
