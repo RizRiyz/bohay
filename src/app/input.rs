@@ -29,6 +29,14 @@ impl App {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
+        // While the Settings modal is open it owns the mouse: clicks hit the
+        // modal (or dismiss it); everything else is swallowed.
+        if self.settings.is_some() {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                self.handle_settings_click(m.column, m.row);
+            }
+            return;
+        }
         let scroll: i32 = match m.kind {
             MouseEventKind::Down(MouseButton::Left) => 0,
             MouseEventKind::ScrollUp => -3,
@@ -68,6 +76,11 @@ impl App {
             return;
         }
 
+        // The sidebar gear opens Settings.
+        if self.settings_icon_rect.is_some_and(hit) {
+            self.open_settings();
+            return;
+        }
         // Left click: close/add buttons first, then tabs → agents → ws → panes.
         if let Some((i, _)) = self.tab_close_rects.iter().find(|(_, rect)| hit(*rect)) {
             self.close_tab(*i);
@@ -142,19 +155,26 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        // The Settings modal captures all input while open.
+        if self.settings.is_some() {
+            self.handle_settings_key(key);
+            return;
+        }
         match self.mode {
             Mode::Prefix => {
                 self.mode = Mode::Normal;
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                match key.code {
-                    // Pressing the prefix twice sends a literal Ctrl-Space (NUL).
-                    KeyCode::Char(' ') if ctrl => {
-                        if let Some(p) = self.focused() {
-                            p.send(&[0x00]);
-                        }
+                // Pressing the prefix twice sends a literal Ctrl-Space (NUL).
+                if is_prefix(&key) {
+                    if let Some(p) = self.focused() {
+                        p.send(&[0x00]);
                     }
+                    return;
+                }
+                match key.code {
                     KeyCode::Char('q') | KeyCode::Char('d') => self.detach_requested = true,
                     KeyCode::Char('b') => self.sidebar_visible = !self.sidebar_visible,
+                    // `,` opens Settings (preferences), like many apps.
+                    KeyCode::Char(',') => self.open_settings(),
                     // Splits: `v` puts the new pane to the right (vertical
                     // divider), `s`/`-` puts it below (horizontal divider).
                     KeyCode::Char('v') => self.split(Axis::Col),
@@ -182,7 +202,7 @@ impl App {
                 }
             }
             Mode::Normal => {
-                if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if is_prefix(&key) {
                     self.mode = Mode::Prefix;
                     return;
                 }
@@ -194,6 +214,17 @@ impl App {
             }
         }
     }
+}
+
+/// True if `key` is the prefix chord (Ctrl+Space). Terminals and OSes report
+/// this chord inconsistently — modern Unix terminals send `Char(' ')` + Ctrl,
+/// while the Windows console / some VT terminals send `Char('@')` + Ctrl or a
+/// bare `Null` (the NUL byte Ctrl+Space produces). Accept them all so the prefix
+/// works the same everywhere.
+fn is_prefix(key: &KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    matches!(key.code, KeyCode::Null)
+        || (ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('@')))
 }
 
 /// Encode a crossterm key event into the bytes a terminal program expects.

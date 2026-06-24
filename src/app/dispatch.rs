@@ -69,6 +69,10 @@ impl App {
         if agent_appeared {
             self.session_dirty = true;
         }
+        let (notify_on, on_blocked, on_done) = {
+            let n = &self.config.notifications;
+            (n.enabled, n.on_blocked, n.on_done)
+        };
         for (id, st, agent) in changes {
             api::publish(
                 &self.events,
@@ -78,6 +82,26 @@ impl App {
                 })
                 .to_string(),
             );
+            // Queue a bell/desktop notification on the configured transitions.
+            let wanted = notify_on
+                && match st {
+                    State::Blocked => on_blocked,
+                    State::Done => on_done,
+                    _ => false,
+                };
+            if wanted {
+                let proj = self
+                    .panes
+                    .get(&id)
+                    .and_then(|p| p.cwd.file_name().and_then(|n| n.to_str()))
+                    .unwrap_or("");
+                let msg = if proj.is_empty() {
+                    format!("{agent} {}", state_str(st))
+                } else {
+                    format!("{agent} {} · {proj}", state_str(st))
+                };
+                self.pending_notify.push(msg);
+            }
         }
     }
 

@@ -16,10 +16,15 @@ portable-pty = "0.9"
 alacritty_terminal = "0.26"
 unicode-width = "0.2"
 anyhow = "1"
-libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = { version = "2", features = ["serde"] }
+# Cross-platform local IPC: Unix-domain sockets on Unix, named pipes on Windows.
+interprocess = "2"
+
+# `libc` (setsid + macOS proc_pidinfo) is only needed on Unix.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

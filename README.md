@@ -32,7 +32,10 @@ the multiplexer.
 
 ## Install
 
-Requires a recent stable Rust toolchain.
+Requires a recent stable Rust toolchain. Runs on **macOS, Linux, and Windows** — the IPC
+layer uses Unix-domain sockets on Unix and named pipes on Windows, and the PTY uses ConPTY on
+Windows. (On Windows, live working-directory tracking and the bash integration hook are not
+available; agent session resume still works.)
 
 ```bash
 git clone <repo-url> bohay
@@ -45,6 +48,43 @@ Or build without installing:
 ```bash
 cargo build --release       # ./target/release/bohay
 ```
+
+### Windows
+
+1. **Install Rust** with [rustup](https://rustup.rs). The default toolchain is MSVC — when
+   prompted, install the **Visual Studio C++ Build Tools** (needed for linking). Prefer no C++
+   tools? Use the GNU toolchain instead: `rustup default stable-x86_64-pc-windows-gnu`.
+2. **Use Windows Terminal** (not the old `cmd.exe`/conhost window) so colors, mouse, and the
+   box-drawing borders render correctly. Panes spawn **PowerShell** by default (`pwsh.exe` if
+   installed, otherwise the built-in `powershell.exe`). Switch between PowerShell and Command
+   Prompt any time in **Settings → Pane Layout → Shell** (the choice persists and applies to
+   newly opened panes). For a different shell or a full path, set `BOHAY_SHELL` (it overrides
+   the setting) in your PowerShell `$PROFILE`:
+
+   ```powershell
+   $env:BOHAY_SHELL = "C:\path\to\nu.exe"   # overrides the Settings choice
+   ```
+3. **Build & run** (in PowerShell):
+
+   ```powershell
+   git clone <repo-url> bohay
+   cd bohay
+   cargo install --path .      # installs bohay.exe into %USERPROFILE%\.cargo\bin (on PATH)
+   bohay                       # launch
+   ```
+
+   Or run without installing: `cargo run --release`.
+
+The keybindings are the same on every platform — the `Ctrl+Space` prefix is detected across the
+forms different terminals report it as. One Windows gotcha: if you have multiple input
+languages installed, Windows itself binds `Ctrl+Space` to "switch input method" and may swallow
+it before it reaches the app. If the prefix seems dead, turn that off in **Settings → Time &
+language → Typing → Advanced keyboard settings → Input language hot keys**.
+
+Two other things differ on Windows: a node's directory doesn't follow `cd` inside its pane (it
+stays where the pane was opened), and `bohay integration install` (the bash hook) is a no-op —
+but **agent session resume still works** (it reads the agents' own session files). See
+[`docs/16-windows-support.md`](docs/16-windows-support.md).
 
 ## Quick start
 
@@ -68,10 +108,18 @@ All commands are prefixed with **`Ctrl+Space`** (press it, then the key):
 | `z` | zoom the focused pane | `N` | new node (workspace) |
 | `h` `j` `k` `l` | move focus between panes | `D` | close the current node |
 | `b` | toggle the sidebar | `w` | cycle to the next node |
-| `q` / `d` | detach (leave the server running) | | |
+| `q` / `d` | detach (leave the server running) | `,` | open Settings |
 
 Pressing `Ctrl+Space` twice sends a literal `Ctrl+Space` to the focused program. The UI is
 also fully mouse-driven — click tabs, nodes, agents, panes, the `+`/`✕` buttons, and scroll.
+
+**Settings** — click the **⚙** gear in the sidebar (or `Ctrl+Space` then `,`) for a tabbed
+dialog: **Theme** (noir / latte / mono, live preview), **Layout** (sidebar width, gaps, pane
+titles, resume placement; **on Windows**, also a **Shell** picker — PowerShell / Command
+Prompt — for new panes), **Notifications** (ring the terminal bell + a desktop notification
+when an agent gets blocked or finishes, with a **Test bell** button), **Modules**, and
+**Agents** (install the resume hook). Changes apply instantly and persist to
+`~/.bohay/config.json`. `↑↓` move, `⇥` switch tab, `←→` adjust, `⏎` apply, `esc` close.
 
 ## CLI
 

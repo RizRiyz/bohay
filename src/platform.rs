@@ -2,6 +2,83 @@
 
 use std::path::PathBuf;
 
+/// The user's home directory, cross-platform (`$HOME`, else `%USERPROFILE%`).
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// Resolve a configured shell `choice` to a concrete command to spawn.
+///
+/// `BOHAY_SHELL` always wins (the explicit escape hatch — set it in your shell
+/// profile). Otherwise the choice (from Settings → Pane Layout → Shell):
+/// `""`/`"default"` picks the platform default; `"powershell"` and `"cmd"` are
+/// Windows shells; anything else is treated as a literal command. The platform
+/// default is the login `SHELL` on Unix and **PowerShell** on Windows
+/// (`pwsh.exe`, then `powershell.exe`), since `COMSPEC` is always `cmd.exe`
+/// regardless of the shell you launched from and so can't reveal PowerShell.
+pub fn resolve_shell(choice: &str) -> String {
+    if let Some(s) = std::env::var_os("BOHAY_SHELL") {
+        if !s.is_empty() {
+            return s.to_string_lossy().into_owned();
+        }
+    }
+    match choice {
+        "" | "default" => platform_default_shell(),
+        "powershell" => find_on_path("pwsh.exe")
+            .or_else(|| find_on_path("pwsh"))
+            .or_else(|| find_on_path("powershell.exe"))
+            .unwrap_or_else(platform_default_shell),
+        "cmd" => std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(windows)]
+fn platform_default_shell() -> String {
+    find_on_path("pwsh.exe")
+        .or_else(|| find_on_path("powershell.exe"))
+        .unwrap_or_else(|| std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()))
+}
+
+#[cfg(not(windows))]
+fn platform_default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+/// Resolve an executable name to its full path by scanning `PATH`.
+fn find_on_path(exe: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(exe))
+        .find(|full| full.is_file())
+        .map(|full| full.to_string_lossy().into_owned())
+}
+
+/// Shell choices offered in Settings, as `(keyword, display label)`. The choice
+/// is **Windows-only** — elsewhere panes always use the login `$SHELL`, so there
+/// is nothing to pick. The keyword is stored in config and passed to
+/// [`resolve_shell`].
+#[cfg(windows)]
+pub fn shell_choices() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("default", "Default"),
+        ("powershell", "PowerShell"),
+        ("cmd", "Command Prompt"),
+    ]
+}
+
+/// Display label for a stored shell keyword (falls back to the keyword itself).
+#[cfg(windows)]
+pub fn shell_label(choice: &str) -> &str {
+    shell_choices()
+        .iter()
+        .find(|(k, _)| *k == choice)
+        .map(|(_, label)| *label)
+        .unwrap_or(choice)
+}
+
 /// The current working directory of a process, or `None` if unavailable.
 /// Used to make a workspace follow where the user actually works.
 #[cfg(target_os = "macos")]
@@ -43,4 +120,30 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn shell_override_is_honored() {
+        // Use a real shell so any concurrent pane spawn still succeeds.
+        std::env::set_var("BOHAY_SHELL", "/bin/sh");
+        // The override wins over any choice (even an explicit one).
+        assert_eq!(super::resolve_shell("default"), "/bin/sh");
+        assert_eq!(super::resolve_shell("zsh"), "/bin/sh");
+        std::env::remove_var("BOHAY_SHELL");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_choices_have_labels() {
+        // Every offered choice resolves to a non-empty label and command.
+        for (keyword, label) in super::shell_choices() {
+            assert!(!label.is_empty());
+            assert_eq!(super::shell_label(keyword), *label);
+        }
+        // An unknown keyword falls back to itself.
+        assert_eq!(super::shell_label("nu"), "nu");
+    }
 }

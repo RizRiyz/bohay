@@ -53,9 +53,7 @@ pub fn config_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("BOHAY_HOME") {
         return PathBuf::from(p);
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = crate::platform::home_dir().unwrap_or_default();
     let name = if cfg!(debug_assertions) {
         ".bohay-dev"
     } else {

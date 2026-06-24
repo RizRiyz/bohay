@@ -2,7 +2,6 @@
 //! frames it streams back onto the real terminal. Holds no app state.
 
 use std::io::BufReader;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 
@@ -15,10 +14,10 @@ use ratatui::crossterm::execute;
 use ratatui::DefaultTerminal;
 
 use crate::ipc::protocol::{self, ClientMessage, FrameData, ServerMessage};
+use crate::ipc::transport::{self, Conn};
 
 pub fn run(sock: &Path) -> Result<()> {
-    let stream =
-        UnixStream::connect(sock).map_err(|_| anyhow!("cannot connect to bohay server"))?;
+    let stream = transport::connect(sock).map_err(|_| anyhow!("cannot connect to bohay server"))?;
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
     crate::install_tui_panic_hook();
@@ -32,10 +31,10 @@ pub fn run(sock: &Path) -> Result<()> {
     result
 }
 
-fn run_inner(stream: UnixStream, terminal: &mut DefaultTerminal) -> Result<()> {
+fn run_inner(stream: Conn, terminal: &mut DefaultTerminal) -> Result<()> {
     let truecolor = protocol::truecolor_supported();
     let size = terminal.size()?;
-    let mut writer = stream.try_clone()?;
+    let mut writer = stream.clone();
     protocol::write_message(
         &mut writer,
         &ClientMessage::Hello {
@@ -59,6 +58,7 @@ fn run_inner(stream: UnixStream, terminal: &mut DefaultTerminal) -> Result<()> {
     loop {
         match protocol::read_message::<_, ServerMessage>(&mut reader) {
             Ok(ServerMessage::Frame(frame)) => blit(terminal, &frame, truecolor)?,
+            Ok(ServerMessage::Notify(msg)) => crate::emit_notification(&msg),
             Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => break,
             Ok(_) => {}
             Err(_) => break, // server gone
@@ -67,7 +67,7 @@ fn run_inner(stream: UnixStream, terminal: &mut DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
-fn input_loop(mut writer: UnixStream) {
+fn input_loop(mut writer: Conn) {
     loop {
         let msg = match read_event() {
             Ok(Event::Key(k)) => ClientMessage::Key(k),

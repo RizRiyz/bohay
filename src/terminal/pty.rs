@@ -35,6 +35,7 @@ impl Pane {
         cwd: PathBuf,
         app_tx: Sender<AppEvent>,
         initial: Option<&str>,
+        shell: &str,
     ) -> Result<Pane> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -44,8 +45,7 @@ impl Pane {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let mut cmd = CommandBuilder::new(&shell);
+        let mut cmd = CommandBuilder::new(shell);
         cmd.cwd(&cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("BOHAY_ENV", "1");
@@ -94,10 +94,10 @@ impl Pane {
             let _ = app_tx.send(AppEvent::PtyExit(id));
         });
 
-        let command = std::path::Path::new(&shell)
+        let command = std::path::Path::new(shell)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(&shell)
+            .unwrap_or(shell)
             .to_string();
 
         Ok(Pane {

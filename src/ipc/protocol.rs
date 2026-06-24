@@ -30,6 +30,8 @@ pub enum ServerMessage {
         error: Option<String>,
     },
     Frame(FrameData),
+    /// Ring the bell + raise a desktop notification on the client's terminal.
+    Notify(String),
     /// Tell the client to detach (server keeps running).
     Detach,
     ServerShutdown {

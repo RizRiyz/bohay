@@ -1,0 +1,339 @@
+//! The Settings modal: a centered, tabbed dialog over a dimmed backdrop, in the
+//! macOS System-Preferences toolbar style. Drawn last (on top of everything)
+//! when open; returns the hit-test rects `render()` stores on the `App`.
+
+use super::*;
+use crate::app::SettingsTab;
+use ratatui::widgets::{Borders, Clear};
+
+pub(super) struct SettingsHits {
+    pub modal: Rect,
+    pub close: Rect,
+    pub tabs: Vec<(SettingsTab, Rect)>,
+    pub ctls: Vec<(usize, Rect)>,
+    pub arrows: Vec<(usize, i32, Rect)>,
+}
+
+pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> SettingsHits {
+    dim_backdrop(f, area, t);
+
+    let w = area.width.saturating_sub(6).clamp(46, 74).min(area.width);
+    let h = area.height.saturating_sub(4).clamp(14, 24).min(area.height);
+    let modal = centered_rect(area, w, h);
+
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    let (tab, cursor) = app
+        .settings
+        .as_ref()
+        .map(|u| (u.tab, u.cursor))
+        .unwrap_or((SettingsTab::Theme, 0));
+
+    // ── title bar ──
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Settings", Style::new().fg(t.text).bold()),
+        ])),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let close = Rect::new(inner.right().saturating_sub(3), inner.y, 3, 1);
+    f.render_widget(
+        Paragraph::new(Span::styled(" ✕ ", Style::new().fg(t.accent).bold())),
+        close,
+    );
+    hline(f, inner.x, inner.y + 1, inner.width, t);
+
+    // ── tab toolbar (Mac-style pills) ──
+    let mut tabs = Vec::new();
+    let mut x = inner.x + 1;
+    let ty = inner.y + 2;
+    for st in SettingsTab::ALL {
+        let label = format!(" {} {} ", st.icon(), st.label());
+        let cw = label.chars().count() as u16;
+        if x + cw > inner.right() {
+            break;
+        }
+        let style = if st == tab {
+            Style::new().fg(t.crust).bg(t.accent).bold()
+        } else {
+            Style::new().fg(t.subtext0)
+        };
+        let rect = Rect::new(x, ty, cw, 1);
+        f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        tabs.push((st, rect));
+        x += cw;
+    }
+    hline(f, inner.x, inner.y + 3, inner.width, t);
+
+    // ── content ──
+    let content = Rect::new(
+        inner.x,
+        inner.y + 4,
+        inner.width,
+        inner.height.saturating_sub(6),
+    );
+    let (ctls, arrows) = draw_content(f, content, tab, cursor, app, t);
+
+    // ── footer hint ──
+    let footer_y = inner.bottom().saturating_sub(1);
+    hline(f, inner.x, footer_y.saturating_sub(1), inner.width, t);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " ↑↓ move   ⇥ tab   ←→ adjust   ⏎ apply   esc close",
+            Style::new().fg(t.overlay0),
+        )),
+        Rect::new(inner.x, footer_y, inner.width, 1),
+    );
+
+    SettingsHits {
+        modal,
+        close,
+        tabs,
+        ctls,
+        arrows,
+    }
+}
+
+type Content = (Vec<(usize, Rect)>, Vec<(usize, i32, Rect)>);
+
+fn draw_content(
+    f: &mut Frame,
+    area: Rect,
+    tab: SettingsTab,
+    cursor: usize,
+    app: &App,
+    t: &Theme,
+) -> Content {
+    let mut ctls = Vec::new();
+    let mut arrows = Vec::new();
+    match tab {
+        SettingsTab::Theme => {
+            for (i, name) in theme::THEMES.iter().enumerate() {
+                let row = Rect::new(area.x, area.y + i as u16, area.width, 1);
+                if row.y >= area.bottom() {
+                    break;
+                }
+                let sel = i == cursor;
+                if sel {
+                    fill_bg(f, row, t.sel_bg);
+                }
+                let pal = theme::by_name(name);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(if sel { " ▸ " } else { "   " }, Style::new().fg(t.accent)),
+                        Span::styled(
+                            format!("{name:<7}"),
+                            Style::new().fg(if sel { t.text } else { t.subtext1 }),
+                        ),
+                        Span::styled("███  ", Style::new().fg(pal.accent)),
+                        Span::styled(theme::describe(name), Style::new().fg(t.overlay0)),
+                    ])),
+                    row,
+                );
+                ctls.push((i, row));
+            }
+        }
+        SettingsTab::Layout => {
+            let l = &app.config.layout;
+            // Index 0 is a real range (clickable ‹ › arrows); the rest are 0/1.
+            let row = slider_row(
+                f,
+                area,
+                cursor == 0,
+                "Sidebar width",
+                app.sidebar_width.to_string(),
+                t,
+                &mut arrows,
+            );
+            ctls.push((0, row));
+            let toggles = [
+                ("Column gap", l.col_gap == 1),
+                ("Row gap", l.row_gap == 1),
+                ("Pane titles", l.show_titles),
+                ("Resume in new node", l.resume_in_new_node),
+            ];
+            for (k, (label, on)) in toggles.into_iter().enumerate() {
+                ctls.push(ctl_row(f, area, k + 1, cursor, label, toggle(on, t), t));
+            }
+            // Shell selector (cycles on click / ‹ › keys) — Windows-only; on Unix
+            // panes always use $SHELL, so there's nothing to choose.
+            #[cfg(windows)]
+            {
+                let shell = crate::platform::shell_label(&app.config.shell);
+                ctls.push(ctl_row(f, area, 5, cursor, "Shell", picker(shell, t), t));
+            }
+        }
+        SettingsTab::Notifications => {
+            let n = &app.config.notifications;
+            let rows = [
+                ("Enabled", toggle(n.enabled, t)),
+                ("Notify on blocked", toggle(n.on_blocked, t)),
+                ("Notify on done", toggle(n.on_done, t)),
+                (
+                    "Test bell",
+                    Line::from(Span::styled("[ Send ]", Style::new().fg(t.accent).bold())),
+                ),
+            ];
+            for (i, (label, val)) in rows.into_iter().enumerate() {
+                ctls.push(ctl_row(f, area, i, cursor, label, val, t));
+            }
+        }
+        SettingsTab::Integrations => {
+            for (i, agent) in crate::integration::AGENTS.iter().enumerate() {
+                let val = if crate::integration::is_installed(agent) {
+                    Line::from(Span::styled("installed ", Style::new().fg(t.mint)))
+                } else {
+                    Line::from(Span::styled(
+                        "[ Install ]",
+                        Style::new().fg(t.accent).bold(),
+                    ))
+                };
+                ctls.push(ctl_row(f, area, i, cursor, agent, val, t));
+            }
+        }
+        SettingsTab::Modules => {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "   No modules installed.",
+                    Style::new().fg(t.overlay0),
+                )),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+        }
+    }
+    (ctls, arrows)
+}
+
+/// The `‹ value ›` slider row (always control index 0). Records the two arrow
+/// cells as decrement/increment targets so the left arrow decreases and the
+/// right increases.
+fn slider_row(
+    f: &mut Frame,
+    area: Rect,
+    sel: bool,
+    label: &str,
+    value: String,
+    t: &Theme,
+    arrows: &mut Vec<(usize, i32, Rect)>,
+) -> Rect {
+    let row = Rect::new(area.x, area.y, area.width, 1);
+    if sel {
+        fill_bg(f, row, t.sel_bg);
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {label}"),
+            Style::new().fg(if sel { t.text } else { t.subtext1 }),
+        )),
+        row,
+    );
+    // Place "‹ value ›" two cells in from the right edge so positions are exact.
+    let w = format!("‹ {value} ›").chars().count() as u16;
+    let sx = row.right().saturating_sub(2 + w);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("‹", Style::new().fg(t.accent).bold()),
+            Span::styled(format!(" {value} "), Style::new().fg(t.text).bold()),
+            Span::styled("›", Style::new().fg(t.accent).bold()),
+        ])),
+        Rect::new(sx, row.y, w, 1),
+    );
+    arrows.push((0, -1, Rect::new(sx, row.y, 2, 1)));
+    arrows.push((0, 1, Rect::new(sx + w.saturating_sub(2), row.y, 2, 1)));
+    row
+}
+
+/// A label + right-aligned value control row, highlighted when selected.
+fn ctl_row(
+    f: &mut Frame,
+    area: Rect,
+    i: usize,
+    cursor: usize,
+    label: &str,
+    value: Line<'static>,
+    t: &Theme,
+) -> (usize, Rect) {
+    let row = Rect::new(area.x, area.y + i as u16, area.width, 1);
+    let sel = i == cursor;
+    if sel {
+        fill_bg(f, row, t.sel_bg);
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {label}"),
+            Style::new().fg(if sel { t.text } else { t.subtext1 }),
+        )),
+        row,
+    );
+    f.render_widget(
+        Paragraph::new(value).alignment(Alignment::Right),
+        Rect::new(row.x, row.y, row.width.saturating_sub(2), 1),
+    );
+    (i, row)
+}
+
+/// A `‹ value ›` picker display (cycled by click / keys; no arrow hit-rects).
+#[cfg(windows)]
+fn picker(value: &str, t: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("‹ ", Style::new().fg(t.overlay1)),
+        Span::styled(value.to_string(), Style::new().fg(t.accent).bold()),
+        Span::styled(" ›", Style::new().fg(t.overlay1)),
+    ])
+}
+
+fn toggle(on: bool, t: &Theme) -> Line<'static> {
+    if on {
+        Line::from(Span::styled("[✓]", Style::new().fg(t.accent).bold()))
+    } else {
+        Line::from(Span::styled("[ ]", Style::new().fg(t.overlay1)))
+    }
+}
+
+fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
+}
+
+/// Dim the whole frame toward `crust` so the dialog reads as focused.
+fn dim_backdrop(f: &mut Frame, area: Rect, t: &Theme) {
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buf[(x, y)];
+            cell.set_fg(t.overlay0);
+            cell.set_bg(t.crust);
+        }
+    }
+}
+
+fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
+    let buf = f.buffer_mut();
+    for i in 0..w {
+        buf[(x + i, y)]
+            .set_symbol("─")
+            .set_style(Style::new().fg(t.surface1).bg(t.surface0));
+    }
+}
+
+fn fill_bg(f: &mut Frame, rect: Rect, color: ratatui::style::Color) {
+    let buf = f.buffer_mut();
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            buf[(x, y)].set_bg(color);
+        }
+    }
+}

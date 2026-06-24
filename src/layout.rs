@@ -196,34 +196,44 @@ fn collect(node: &Node, area: Rect, out: &mut Vec<PaneInfo>) {
     }
 }
 
-/// Gap between split children. Left/right panes get a one-column gap; top/bottom
-/// panes sit directly against each other (the lower pane's title-border almost
-/// touches the upper pane's bottom border).
-const GAP_COL: u16 = 1;
-const GAP_ROW: u16 = 0;
+/// Gap (in cells) between split children — configurable via Settings (Pane
+/// Layout). Defaults: a one-column gap between left/right panes, none between
+/// top/bottom. Stored as atomics so the recursive split math can read them
+/// without threading config through every call.
+use std::sync::atomic::{AtomicU16, Ordering};
+static GAP_COL: AtomicU16 = AtomicU16::new(1);
+static GAP_ROW: AtomicU16 = AtomicU16::new(0);
+
+/// Set the inter-pane gaps (from `config.layout`). Clamped to 0..=1.
+pub fn set_gaps(col: u16, row: u16) {
+    GAP_COL.store(col.min(1), Ordering::Relaxed);
+    GAP_ROW.store(row.min(1), Ordering::Relaxed);
+}
 
 fn split_rect(area: Rect, axis: Axis, ratio: f32) -> (Rect, Rect) {
+    let gap_col = GAP_COL.load(Ordering::Relaxed);
+    let gap_row = GAP_ROW.load(Ordering::Relaxed);
     match axis {
         Axis::Col => {
-            let avail = area.width.saturating_sub(GAP_COL);
+            let avail = area.width.saturating_sub(gap_col);
             let w1 = ((avail as f32) * ratio)
                 .round()
                 .clamp(1.0, (avail.saturating_sub(1)).max(1) as f32) as u16;
             let w2 = avail.saturating_sub(w1);
             (
                 Rect::new(area.x, area.y, w1, area.height),
-                Rect::new(area.x + w1 + GAP_COL, area.y, w2, area.height),
+                Rect::new(area.x + w1 + gap_col, area.y, w2, area.height),
             )
         }
         Axis::Row => {
-            let avail = area.height.saturating_sub(GAP_ROW);
+            let avail = area.height.saturating_sub(gap_row);
             let h1 = ((avail as f32) * ratio)
                 .round()
                 .clamp(1.0, (avail.saturating_sub(1)).max(1) as f32) as u16;
             let h2 = avail.saturating_sub(h1);
             (
                 Rect::new(area.x, area.y, area.width, h1),
-                Rect::new(area.x, area.y + h1 + GAP_ROW, area.width, h2),
+                Rect::new(area.x, area.y + h1 + gap_row, area.width, h2),
             )
         }
     }

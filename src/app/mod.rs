@@ -23,6 +23,9 @@ use crate::ui::theme::{State, Theme};
 
 mod dispatch;
 mod input;
+mod settings;
+
+pub use settings::{SettingsTab, SettingsUi};
 
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
 
@@ -33,7 +36,7 @@ pub const SIDEBAR_WIDTH_DEFAULT: u16 = 26;
 pub const SIDEBAR_WIDTH_MIN: u16 = 18;
 pub const SIDEBAR_WIDTH_MAX: u16 = 44;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Normal,
     Prefix,
@@ -91,6 +94,10 @@ pub struct App {
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub theme: Theme,
+    /// Persisted user configuration (theme, layout, notifications).
+    pub config: crate::config::Config,
+    /// The open Settings modal, if any (`Some` ⇒ modal captures input).
+    pub settings: Option<SettingsUi>,
     pub mode: Mode,
     pub sidebar_visible: bool,
     /// Sidebar width in columns (customizable; see `set_sidebar_width`).
@@ -105,6 +112,9 @@ pub struct App {
     pub last_cursor: Option<(u16, u16)>,
     /// Foreground client asked to detach (prefix+q). Distinct from quit.
     pub detach_requested: bool,
+    /// Notification messages queued by detection; the loop flushes them to the
+    /// terminal (bell + desktop) and clears.
+    pub pending_notify: Vec<String>,
     /// Downsample RGB → 256-color (for the local path on non-truecolor terms).
     pub downsample: bool,
     /// Throttle for refreshing pane working directories.
@@ -143,6 +153,14 @@ pub struct App {
     pub tab_next_rect: Option<Rect>,
     /// The focused pane's ✕ close button, for mouse hit-testing.
     pub pane_close_rect: Option<Rect>,
+    // Settings modal hit-test geometry (populated by render when the modal is open).
+    pub settings_icon_rect: Option<Rect>,
+    pub settings_close_rect: Option<Rect>,
+    pub settings_modal_rect: Option<Rect>,
+    pub settings_tab_rects: Vec<(SettingsTab, Rect)>,
+    pub settings_ctl_rects: Vec<(usize, Rect)>,
+    /// Slider arrows in the modal: (control index, ±1 direction, rect).
+    pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
 }
 
 impl App {
@@ -150,8 +168,14 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let name = ws_name(&cwd);
 
+        let config = crate::config::load();
+        crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
+        let theme = crate::ui::theme::by_name(&config.theme);
+        let sidebar_width = config.sidebar_width();
+        let shell = crate::platform::resolve_shell(&config.shell);
+
         let id = PaneId::alloc();
-        let pane = Pane::spawn(id, cols, rows, cwd.clone(), app_tx.clone(), None)?;
+        let pane = Pane::spawn(id, cols, rows, cwd.clone(), app_tx.clone(), None, &shell)?;
         let command = pane.command.clone();
         let mut panes = HashMap::new();
         panes.insert(id, pane);
@@ -171,10 +195,12 @@ impl App {
                 active_tab: 0,
             }],
             active_ws: 0,
-            theme: Theme::noir(),
+            theme,
+            config,
+            settings: None,
             mode: Mode::Normal,
             sidebar_visible: true,
-            sidebar_width: SIDEBAR_WIDTH_DEFAULT,
+            sidebar_width,
             zoomed: false,
             should_quit: false,
             spinner: 0,
@@ -182,6 +208,7 @@ impl App {
             events: api::new_bus(),
             last_cursor: None,
             detach_requested: false,
+            pending_notify: Vec::new(),
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
@@ -206,6 +233,12 @@ impl App {
             tab_prev_rect: None,
             tab_next_rect: None,
             pane_close_rect: None,
+            settings_icon_rect: None,
+            settings_close_rect: None,
+            settings_modal_rect: None,
+            settings_tab_rects: Vec::new(),
+            settings_ctl_rects: Vec::new(),
+            settings_arrow_rects: Vec::new(),
         })
     }
 
@@ -220,6 +253,8 @@ impl App {
     }
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
+        let config = crate::config::load();
+        let shell = crate::platform::resolve_shell(&config.shell);
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
         let mut workspaces = Vec::new();
@@ -236,6 +271,7 @@ impl App {
                         ps.cwd.clone(),
                         app_tx.clone(),
                         ps.screen.as_deref(),
+                        &shell,
                     )
                     .ok()?;
                     let cmd = pane.command.clone();
@@ -276,15 +312,22 @@ impl App {
             return None;
         }
         let active_ws = snap.active_ws.min(workspaces.len() - 1);
+
+        crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
+        let theme = crate::ui::theme::by_name(&config.theme);
+        let sidebar_width = config.sidebar_width();
+
         Some(App {
             panes,
             status,
             workspaces,
             active_ws,
-            theme: Theme::noir(),
+            theme,
+            config,
+            settings: None,
             mode: Mode::Normal,
             sidebar_visible: true,
-            sidebar_width: SIDEBAR_WIDTH_DEFAULT,
+            sidebar_width,
             zoomed: false,
             should_quit: false,
             spinner: 0,
@@ -292,6 +335,7 @@ impl App {
             events: api::new_bus(),
             last_cursor: None,
             detach_requested: false,
+            pending_notify: Vec::new(),
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
@@ -316,6 +360,12 @@ impl App {
             tab_prev_rect: None,
             tab_next_rect: None,
             pane_close_rect: None,
+            settings_icon_rect: None,
+            settings_close_rect: None,
+            settings_modal_rect: None,
+            settings_tab_rects: Vec::new(),
+            settings_ctl_rects: Vec::new(),
+            settings_arrow_rects: Vec::new(),
         })
     }
 
@@ -331,6 +381,8 @@ impl App {
     /// settings / a future resize control.
     pub fn set_sidebar_width(&mut self, cols: u16) {
         self.sidebar_width = cols.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+        self.config.sidebar_width = self.sidebar_width;
+        crate::config::save(&self.config);
     }
 
     // ── accessors ───────────────────────────────────────────────────────────
@@ -364,7 +416,8 @@ impl App {
 
     fn spawn_into(&mut self, cwd: PathBuf) -> Option<PaneId> {
         let id = PaneId::alloc();
-        match Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None) {
+        let shell = crate::platform::resolve_shell(&self.config.shell);
+        match Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None, &shell) {
             Ok(pane) => {
                 let cmd = pane.command.clone();
                 self.panes.insert(id, pane);
@@ -513,7 +566,14 @@ impl App {
         let tab = Tab {
             layout: TileLayout::new(id),
         };
-        if let Some(wi) = self.workspaces.iter().position(|w| w.cwd == s.cwd) {
+        // Per the Layout setting, reuse the session's own node (or the node at
+        // its cwd); otherwise open it as a tab in the currently active node.
+        let target = if self.config.layout.resume_in_new_node {
+            self.workspaces.iter().position(|w| w.cwd == s.cwd)
+        } else {
+            Some(self.active_ws)
+        };
+        if let Some(wi) = target {
             self.active_ws = wi;
             let ws = &mut self.workspaces[wi];
             ws.tabs.push(tab);
@@ -695,8 +755,41 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    /// Serializes tests that mutate the global `BOHAY_HOME` env + config files,
+    /// so they don't race on each other's config I/O.
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn key(c: char, m: KeyModifiers) -> AppEvent {
         AppEvent::Key(KeyEvent::new(KeyCode::Char(c), m))
+    }
+
+    #[test]
+    fn prefix_chord_variants() {
+        // Ctrl+Space arrives in different forms across terminals/OSes; each must
+        // enter prefix mode and the next key (here `v`) must then split.
+        let chords = [
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL), // modern Unix
+            KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL), // Ctrl+@ == NUL
+            KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),         // bare NUL byte
+        ];
+        for chord in chords {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            app.handle_event(AppEvent::Key(chord));
+            assert_eq!(
+                app.mode,
+                Mode::Prefix,
+                "chord {:?} should arm the prefix",
+                chord.code
+            );
+            app.handle_event(key('v', KeyModifiers::NONE));
+            assert_eq!(
+                app.layout().len(),
+                2,
+                "prefix+v should split after {:?}",
+                chord.code
+            );
+        }
     }
 
     #[test]
@@ -1026,6 +1119,226 @@ mod tests {
         assert!(
             app.dismissed_sessions.contains("s1"),
             "stays dismissed across rescans"
+        );
+    }
+
+    #[test]
+    fn settings_modal_interactions() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        // Isolate config I/O to a temp dir so this is deterministic.
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        assert!(app.settings.is_none());
+        app.open_settings();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.settings_tab_rects.len(), 5, "five tabs");
+        assert!(
+            !app.settings_ctl_rects.is_empty(),
+            "theme tab lists palettes"
+        );
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Settings") && text.contains("Theme") && text.contains("Agents"));
+
+        // Moving the selection down live-applies the next theme.
+        assert_eq!(app.config.theme, "noir");
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.config.theme, "latte");
+
+        let click = |app: &mut App, x, y| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        // Click the Layout tab, then toggle "Pane titles" (control row 3).
+        let layout = app
+            .settings_tab_rects
+            .iter()
+            .find(|(t, _)| *t == SettingsTab::Layout)
+            .unwrap()
+            .1;
+        click(&mut app, layout.x + 1, layout.y);
+        assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Layout);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let before = app.config.layout.show_titles;
+        let row = app
+            .settings_ctl_rects
+            .iter()
+            .find(|(i, _)| *i == 3)
+            .unwrap()
+            .1;
+        click(&mut app, row.x + 2, row.y);
+        assert_ne!(
+            app.config.layout.show_titles, before,
+            "click toggles pane titles"
+        );
+
+        // Esc closes.
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.settings.is_none());
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn settings_slider_arrows_step_both_ways() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-slider-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.open_settings();
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ))); // → Layout
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let left = app
+            .settings_arrow_rects
+            .iter()
+            .find(|(_, d, _)| *d < 0)
+            .unwrap()
+            .2;
+        let right = app
+            .settings_arrow_rects
+            .iter()
+            .find(|(_, d, _)| *d > 0)
+            .unwrap()
+            .2;
+        let click = |app: &mut App, r: Rect| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: r.x,
+                row: r.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let start = app.sidebar_width;
+        click(&mut app, left);
+        assert!(app.sidebar_width < start, "left arrow decreases width");
+        let low = app.sidebar_width;
+        click(&mut app, right);
+        assert!(app.sidebar_width > low, "right arrow increases width");
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The Shell picker is Windows-only (control row 5 doesn't exist elsewhere).
+    #[cfg(windows)]
+    #[test]
+    fn settings_shell_choice_cycles_and_persists() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.open_settings();
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+        ))); // Layout
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        assert_eq!(app.config.shell, "default");
+        // The Shell row (control index 5) cycles forward on click.
+        let row = app
+            .settings_ctl_rects
+            .iter()
+            .find(|(i, _)| *i == 5)
+            .unwrap()
+            .1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 2,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_ne!(
+            app.config.shell, "default",
+            "clicking the Shell row cycles it"
+        );
+        // …and the choice is persisted.
+        assert_eq!(crate::config::load().shell, app.config.shell);
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn notification_queued_on_blocked_transition() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        // Drive the pane's screen to a permission prompt so detection sees
+        // Blocked. Newlines push it to the bottom rows that detection scans.
+        if let Some(p) = app.panes.get(&id) {
+            if let Ok(mut e) = p.engine.lock() {
+                let mut buf = vec![b'\n'; 30];
+                buf.extend_from_slice(b"Do you want to proceed? (y/n) ");
+                e.advance(&buf);
+            }
+        }
+
+        // Enabled + on_blocked → a transition queues a bell/desktop notification.
+        app.config.notifications.enabled = true;
+        app.config.notifications.on_blocked = true;
+        app.status.get_mut(&id).unwrap().state = State::Idle; // arm the transition
+        app.detect_tick(std::time::Instant::now());
+        assert!(
+            app.pending_notify.iter().any(|m| m.contains("blocked")),
+            "blocked transition queues a notification: {:?}",
+            app.pending_notify
+        );
+
+        // Disabled → nothing is queued, even on the same transition.
+        app.pending_notify.clear();
+        app.config.notifications.enabled = false;
+        app.status.get_mut(&id).unwrap().state = State::Idle; // re-arm
+        app.detect_tick(std::time::Instant::now());
+        assert!(
+            app.pending_notify.is_empty(),
+            "disabled notifications stay silent"
         );
     }
 }

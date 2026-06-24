@@ -17,6 +17,7 @@ use crate::ui::theme::{State, Theme};
 
 mod borders;
 mod panes;
+mod settings;
 mod sidebar;
 mod status;
 mod tabbar;
@@ -90,9 +91,36 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // then the dot+path+close titles ON each top border row.
     if bordered {
         borders::render_pane_borders(f, &rects, focus, &t);
-        panes::draw_pane_titles(f, &rects, focus, app, &t);
+        if app.config.layout.show_titles {
+            panes::draw_pane_titles(f, &rects, focus, app, &t);
+        }
     }
     status::draw_status(f, status, app, &t);
+
+    // The Settings modal draws last, on top of everything, and owns the cursor.
+    let settings_hits = app
+        .settings
+        .is_some()
+        .then(|| settings::draw_settings(f, area, app, &t));
+    if let Some(h) = &settings_hits {
+        app.settings_modal_rect = Some(h.modal);
+        app.settings_close_rect = Some(h.close);
+        app.settings_tab_rects = h.tabs.clone();
+        app.settings_ctl_rects = h.ctls.clone();
+        app.settings_arrow_rects = h.arrows.clone();
+    } else {
+        app.settings_modal_rect = None;
+        app.settings_close_rect = None;
+        app.settings_tab_rects.clear();
+        app.settings_ctl_rects.clear();
+        app.settings_arrow_rects.clear();
+    }
+
+    let cursor = if settings_hits.is_some() {
+        None
+    } else {
+        cursor
+    };
     if let Some(p) = cursor {
         f.set_cursor_position(p);
     }
@@ -166,8 +194,8 @@ fn pane_state(app: &App, id: PaneId) -> State {
 /// Collapse `$HOME` to `~` and truncate from the left to fit `max` columns.
 fn short_path(p: &Path, max: u16) -> String {
     let mut s = p.display().to_string();
-    if let Ok(home) = std::env::var("HOME") {
-        if let Some(rest) = s.strip_prefix(&home) {
+    if let Some(home) = crate::platform::home_dir() {
+        if let Some(rest) = s.strip_prefix(home.to_string_lossy().as_ref()) {
             s = format!("~{rest}");
         }
     }

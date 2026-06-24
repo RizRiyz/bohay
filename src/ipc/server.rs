@@ -2,9 +2,9 @@
 //! buffer, and streams frames to attached clients over the binary socket.
 //! Input arrives from clients; the JSON API also runs here. See docs/03, docs/08.
 
+use crate::ipc::transport::{self, Conn};
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread;
@@ -86,6 +86,9 @@ pub fn run() -> Result<()> {
         }
 
         app.detect_tick(Instant::now());
+        for msg in app.pending_notify.drain(..) {
+            broadcast(&mut clients, ServerMessage::Notify(msg));
+        }
 
         if activity && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
             if size != backend_size {
@@ -150,14 +153,13 @@ fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
+    let listener = match transport::bind(&path) {
         Ok(l) => l,
         Err(_) => return,
     };
     thread::spawn(move || {
         let mut next_id = 1u64;
-        for stream in listener.incoming().flatten() {
+        for stream in transport::incoming(&listener) {
             let id = next_id;
             next_id += 1;
             let app_tx = app_tx.clone();
@@ -166,11 +168,8 @@ fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>) {
     });
 }
 
-fn handle_client(id: u64, stream: UnixStream, app_tx: Sender<AppEvent>) {
-    let mut reader = match stream.try_clone() {
-        Ok(r) => BufReader::new(r),
-        Err(_) => return,
-    };
+fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>) {
+    let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
 
     let (cols, rows) = match protocol::read_message::<_, ClientMessage>(&mut reader) {

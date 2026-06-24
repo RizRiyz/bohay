@@ -75,9 +75,7 @@ fn safe_id(id: &str) -> bool {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
+    crate::platform::home_dir().unwrap_or_default()
 }
 
 fn claude_base() -> PathBuf {
@@ -99,7 +97,13 @@ fn claude_project_dir(base: &Path, cwd: &Path) -> PathBuf {
     let enc: String = cwd
         .to_string_lossy()
         .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | '.') {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect();
     base.join("projects").join(enc)
 }

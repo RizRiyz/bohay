@@ -2,7 +2,6 @@
 //! the session socket, send one JSON request, and print the reply. See docs/08.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -68,7 +67,7 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     let (method, params) = parse(args)?;
     let path = crate::persist::socket_path();
-    let mut stream = UnixStream::connect(&path)
+    let mut stream = crate::ipc::transport::connect(&path)
         .map_err(|_| anyhow!("no bohay server running (socket: {})", path.display()))?;
 
     let req = json!({ "id": "1", "method": method, "params": params });

@@ -111,6 +111,22 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
             Span::styled("  v0.1", Style::new().fg(t.overlay0)),
         ]),
     );
+    // Settings gear — a pill button at the right of the brand row (inverts on
+    // hover), so it reads as a clear, tappable control rather than a tiny glyph.
+    let gear = Rect::new(area.right().saturating_sub(4), area.y + 1, 3, 1);
+    let gear_hover = app
+        .hover
+        .is_some_and(|(c, r)| c >= gear.x && c < gear.right() && r == gear.y);
+    let (fg, bg) = if gear_hover {
+        (t.crust, t.accent)
+    } else {
+        (t.accent, t.surface1)
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(" ⚙ ", Style::new().fg(fg).bg(bg).bold())),
+        gear,
+    );
+    app.settings_icon_rect = Some(gear);
 
     // Two stacked halves: NODES (top) and AGENTS (bottom), with a divider.
     let body_top = area.y + 3;

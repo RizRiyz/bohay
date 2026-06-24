@@ -5,6 +5,7 @@
 mod agent;
 mod app;
 mod cli;
+mod config;
 mod detect;
 mod event;
 mod ids;
@@ -17,7 +18,6 @@ mod terminal;
 mod ui;
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -68,6 +68,18 @@ pub(crate) fn install_tui_panic_hook() {
     }));
 }
 
+/// Ring the terminal bell and raise a desktop notification. `BEL` (0x07) is the
+/// universal sound; `OSC 9` raises a desktop notification on terminals that
+/// support it (iTerm2, etc.) and is ignored elsewhere.
+pub(crate) fn emit_notification(msg: &str) {
+    use std::io::Write;
+    let safe: String = msg.chars().filter(|c| !c.is_control()).take(120).collect();
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"\x07");
+    let _ = write!(out, "\x1b]9;{safe}\x07");
+    let _ = out.flush();
+}
+
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
     let mut terminal = ratatui::init();
@@ -93,23 +105,32 @@ fn autodetect_and_attach() -> Result<()> {
 }
 
 fn server_running(sock: &Path) -> bool {
-    UnixStream::connect(sock).is_ok()
+    ipc::transport::connect(sock).is_ok()
 }
 
 fn spawn_server() -> Result<()> {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("server")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // Detach into its own session so it survives the client exiting.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+    // Detach so the server survives the client exiting.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — no console, own group.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
     }
     cmd.spawn()?;
     Ok(())
@@ -126,7 +147,7 @@ fn wait_for_socket(sock: &Path) -> Result<()> {
 }
 
 fn server_stop() -> Result<()> {
-    match UnixStream::connect(persist::socket_path()) {
+    match ipc::transport::connect(&persist::socket_path()) {
         Ok(mut s) => {
             writeln!(s, r#"{{"id":"1","method":"server.stop","params":{{}}}}"#)?;
             let mut line = String::new();
@@ -198,6 +219,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             thread::sleep(Duration::from_millis(16) - since);
         }
         app.detect_tick(Instant::now());
+        for msg in app.pending_notify.drain(..) {
+            emit_notification(&msg);
+        }
         terminal.draw(|f| ui::render(f, &mut app))?;
         last_draw = Instant::now();
     }
@@ -283,7 +307,6 @@ mod tests {
     #[test]
     fn api_serves_requests() {
         use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixStream;
 
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -299,7 +322,7 @@ mod tests {
         });
 
         let send = |req: &str| -> String {
-            let mut s = UnixStream::connect(&path).unwrap();
+            let mut s = ipc::transport::connect(&path).unwrap();
             writeln!(s, "{req}").unwrap();
             let mut line = String::new();
             BufReader::new(s).read_line(&mut line).unwrap();

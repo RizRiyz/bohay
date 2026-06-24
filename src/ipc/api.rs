@@ -4,13 +4,14 @@
 //! streams from a simple broadcast bus. See docs/08.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use serde_json::{json, Value};
+
+use crate::ipc::transport::{self, Conn};
 
 /// A request handed to the app loop, with a channel to send the reply back.
 pub struct ApiRequest {
@@ -51,13 +52,12 @@ pub fn start_server(path: PathBuf, api_tx: Sender<ApiRequest>, bus: EventBus) {
     }
     // Best-effort stale-socket reclaim (single-instance dev; proper detection
     // arrives with the M2 server).
-    let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
+    let listener = match transport::bind(&path) {
         Ok(l) => l,
         Err(_) => return,
     };
     thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        for stream in transport::incoming(&listener) {
             let api_tx = api_tx.clone();
             let bus = bus.clone();
             thread::spawn(move || handle_conn(stream, api_tx, bus));
@@ -65,11 +65,8 @@ pub fn start_server(path: PathBuf, api_tx: Sender<ApiRequest>, bus: EventBus) {
     });
 }
 
-fn handle_conn(stream: UnixStream, api_tx: Sender<ApiRequest>, bus: EventBus) {
-    let mut writer = match stream.try_clone() {
-        Ok(w) => w,
-        Err(_) => return,
-    };
+fn handle_conn(stream: Conn, api_tx: Sender<ApiRequest>, bus: EventBus) {
+    let mut writer = stream.clone();
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
