@@ -91,6 +91,45 @@ pub struct PullRequest {
     pub repo: String,
 }
 
+/// Full detail for one pull request (`gh pr view --json …`), shown in the PR
+/// detail panel. Richer than the list-row [`PullRequest`].
+#[derive(Clone)]
+pub struct PrDetail {
+    pub number: u64,
+    pub title: String,
+    pub state: String, // OPEN / CLOSED / MERGED
+    pub is_draft: bool,
+    pub author: String,
+    pub base: String, // baseRefName
+    pub head: String, // headRefName
+    pub body: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+    pub commits: u64,
+    pub comments: u64,
+    pub mergeable: String,       // MERGEABLE / CONFLICTING / UNKNOWN
+    pub review_decision: String, // APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED / ""
+    pub reviews: Vec<Review>,    // latest decision per reviewer
+    pub check_runs: Vec<Check>,  // individual CI checks
+    pub labels: Vec<String>,
+    pub updated_at: String, // ISO timestamp from gh (we show the date)
+}
+
+/// One reviewer's latest decision on a PR.
+#[derive(Clone)]
+pub struct Review {
+    pub author: String,
+    pub state: String, // APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED
+}
+
+/// One CI check on a PR (from `statusCheckRollup`), normalized to a name + bucket.
+#[derive(Clone)]
+pub struct Check {
+    pub name: String,
+    pub bucket: Checks, // Passing / Failing / Pending
+}
+
 /// A GitHub issue (GIT-2).
 #[derive(Clone)]
 pub struct Issue {
@@ -111,4 +150,21 @@ pub struct Commit {
     pub when: String,  // relative date
     pub refs: String,  // decorations (HEAD -> main, tag: …)
     pub graph: String, // graph prefix from `git log --graph`, if any
+}
+
+/// A git worktree — one checkout of a repo (docs/18 WT). `is_main` marks the
+/// primary worktree (the original clone), which can't be removed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Worktree {
+    pub path: std::path::PathBuf,
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_main: bool,
+}
+
+/// A node's worktree grouping. All checkouts of one repo share a `common_dir`
+/// (the git common `.git`), so the sidebar groups them under one parent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorktreeMembership {
+    pub common_dir: std::path::PathBuf,
 }

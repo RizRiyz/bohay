@@ -7,7 +7,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::model::{Checks, Issue, PullRequest};
+use super::model::{Check, Checks, Issue, PrDetail, PullRequest, Review};
 use super::Scope;
 
 /// Availability of the `gh` CLI for this session.
@@ -186,6 +186,31 @@ fn names(v: Option<&Value>, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Bucket one check item. Status contexts use `state`; check runs use `status` +
+/// `conclusion`.
+fn bucket_one(c: &Value) -> Checks {
+    let state = c.get("state").and_then(Value::as_str).unwrap_or("");
+    let status = c.get("status").and_then(Value::as_str).unwrap_or("");
+    let concl = c.get("conclusion").and_then(Value::as_str).unwrap_or("");
+    let s = if !state.is_empty() {
+        state
+    } else if !concl.is_empty() {
+        concl
+    } else {
+        status
+    };
+    match s {
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            Checks::Failing
+        }
+        "PENDING" | "IN_PROGRESS" | "QUEUED" | "EXPECTED" | "REQUESTED" | "WAITING" => {
+            Checks::Pending
+        }
+        "" => Checks::None,
+        _ => Checks::Passing,
+    }
+}
+
 /// Collapse `statusCheckRollup` into one state. A failure wins, then pending.
 fn rollup(v: Option<&Value>) -> Checks {
     let Some(arr) = v.and_then(Value::as_array) else {
@@ -196,23 +221,9 @@ fn rollup(v: Option<&Value>) -> Checks {
     }
     let mut pending = false;
     for c in arr {
-        // status contexts use `state`; check runs use `status` + `conclusion`.
-        let state = c.get("state").and_then(Value::as_str).unwrap_or("");
-        let status = c.get("status").and_then(Value::as_str).unwrap_or("");
-        let concl = c.get("conclusion").and_then(Value::as_str).unwrap_or("");
-        let s = if !state.is_empty() {
-            state
-        } else if !concl.is_empty() {
-            concl
-        } else {
-            status
-        };
-        match s {
-            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
-            | "STARTUP_FAILURE" => return Checks::Failing,
-            "PENDING" | "IN_PROGRESS" | "QUEUED" | "EXPECTED" | "REQUESTED" | "WAITING" => {
-                pending = true
-            }
+        match bucket_one(c) {
+            Checks::Failing => return Checks::Failing,
+            Checks::Pending => pending = true,
             _ => {}
         }
     }
@@ -221,6 +232,94 @@ fn rollup(v: Option<&Value>) -> Checks {
     } else {
         Checks::Passing
     }
+}
+
+const PR_DETAIL_FIELDS: &str = "number,title,state,isDraft,author,baseRefName,headRefName,body,additions,deletions,changedFiles,commits,comments,mergeable,reviewDecision,reviews,statusCheckRollup,labels,updatedAt";
+
+/// Full detail for one PR — the detail panel (`gh pr view <n> --json …`).
+pub fn pr_detail(cwd: &Path, number: u64) -> Result<PrDetail, String> {
+    let raw = run_gh(
+        cwd,
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            PR_DETAIL_FIELDS,
+        ],
+    )?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("parse gh: {e}"))?;
+    Ok(parse_pr_detail(&v))
+}
+
+fn parse_pr_detail(v: &Value) -> PrDetail {
+    let count = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .map(|a| a.len() as u64)
+            .unwrap_or(0)
+    };
+    PrDetail {
+        number: v.get("number").and_then(Value::as_u64).unwrap_or(0),
+        title: str_at(v, "title"),
+        state: str_at(v, "state"),
+        is_draft: v.get("isDraft").and_then(Value::as_bool).unwrap_or(false),
+        author: login(v.get("author")),
+        base: str_at(v, "baseRefName"),
+        head: str_at(v, "headRefName"),
+        body: str_at(v, "body"),
+        additions: v.get("additions").and_then(Value::as_u64).unwrap_or(0),
+        deletions: v.get("deletions").and_then(Value::as_u64).unwrap_or(0),
+        changed_files: v.get("changedFiles").and_then(Value::as_u64).unwrap_or(0),
+        commits: count("commits"),
+        comments: count("comments"),
+        mergeable: str_at(v, "mergeable"),
+        review_decision: str_at(v, "reviewDecision"),
+        reviews: parse_reviews(v.get("reviews")),
+        check_runs: parse_checks(v.get("statusCheckRollup")),
+        labels: names(v.get("labels"), "name"),
+        updated_at: str_at(v, "updatedAt"),
+    }
+}
+
+/// Latest decision per reviewer (gh returns reviews chronologically, so a later
+/// review supersedes an earlier one).
+fn parse_reviews(v: Option<&Value>) -> Vec<Review> {
+    let Some(arr) = v.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Review> = Vec::new();
+    for r in arr {
+        let author = login(r.get("author"));
+        if author.is_empty() {
+            continue;
+        }
+        let state = str_at(r, "state");
+        if let Some(prev) = out.iter_mut().find(|x| x.author == author) {
+            prev.state = state;
+        } else {
+            out.push(Review { author, state });
+        }
+    }
+    out
+}
+
+fn parse_checks(v: Option<&Value>) -> Vec<Check> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|c| Check {
+                    name: c
+                        .get("name")
+                        .or_else(|| c.get("context"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("check")
+                        .to_string(),
+                    bucket: bucket_one(c),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Open a PR (or issue) in the browser.
@@ -259,5 +358,47 @@ mod tests {
         assert!(matches!(rollup(Some(&v)), Checks::Pending));
         let v: Value = serde_json::from_str("[]").unwrap();
         assert!(matches!(rollup(Some(&v)), Checks::None));
+    }
+
+    #[test]
+    fn parses_pr_detail_with_per_check_and_deduped_reviews() {
+        let v: Value = serde_json::from_str(
+            r#"{
+                "number":42,"title":"Wire up auth","state":"OPEN","isDraft":false,
+                "author":{"login":"alice"},"baseRefName":"main","headRefName":"feat/auth",
+                "body":"Adds login.\n\nSee the RFC.","additions":120,"deletions":8,
+                "changedFiles":5,"commits":[{},{},{}],"comments":[{}],
+                "mergeable":"MERGEABLE","reviewDecision":"CHANGES_REQUESTED",
+                "reviews":[
+                    {"author":{"login":"bob"},"state":"COMMENTED"},
+                    {"author":{"login":"bob"},"state":"APPROVED"},
+                    {"author":{"login":"carol"},"state":"CHANGES_REQUESTED"}
+                ],
+                "statusCheckRollup":[
+                    {"name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+                    {"name":"e2e","status":"COMPLETED","conclusion":"FAILURE"},
+                    {"context":"ci/lint","state":"PENDING"}
+                ],
+                "labels":[{"name":"auth"}],"updatedAt":"2026-06-25T10:30:00Z"
+            }"#,
+        )
+        .unwrap();
+        let d = parse_pr_detail(&v);
+        assert_eq!(d.number, 42);
+        assert_eq!(d.base, "main");
+        assert_eq!(d.head, "feat/auth");
+        assert_eq!(d.commits, 3);
+        assert_eq!(d.comments, 1);
+        assert_eq!(d.changed_files, 5);
+        // Reviews collapse to the latest decision per author (bob's APPROVED wins).
+        assert_eq!(d.reviews.len(), 2);
+        let bob = d.reviews.iter().find(|r| r.author == "bob").unwrap();
+        assert_eq!(bob.state, "APPROVED");
+        // Per-check buckets are individual, not a rollup.
+        assert_eq!(d.check_runs.len(), 3);
+        assert!(matches!(d.check_runs[0].bucket, Checks::Passing));
+        assert!(matches!(d.check_runs[1].bucket, Checks::Failing));
+        assert!(matches!(d.check_runs[2].bucket, Checks::Pending));
+        assert_eq!(d.check_runs[2].name, "ci/lint");
     }
 }

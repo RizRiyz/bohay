@@ -4,7 +4,7 @@
 //! ratatui, themed with the existing palette.
 
 use super::*;
-use crate::git::model::{Checks, PullRequest};
+use crate::git::model::{Checks, PrDetail, PullRequest};
 use crate::git::{
     filtered_branches, filtered_commits, filtered_issues, filtered_prs, GitView, Load, Section,
 };
@@ -33,6 +33,12 @@ pub(super) fn render(
         area.width.saturating_sub(2),
         footer_y.saturating_sub(area.y + 3),
     );
+    // The PR detail panel (GIT-6) overlays the section body when open; it scrolls
+    // as a block like Flow/Status.
+    if g.open_pr.is_some() {
+        g.scroll = draw_pr_detail(f, body, g, t);
+        return tab_rects;
+    }
     // Flow / Status scroll as a block: they return the clamped scroll offset,
     // which we write back so the wheel/keys settle at the content's end.
     match g.section {
@@ -136,6 +142,199 @@ fn check_glyph(c: Checks, t: &Theme) -> (&'static str, Color) {
         Checks::Pending => ("●", t.amber),
         Checks::None => ("—", t.overlay0),
     }
+}
+
+/// The PR detail panel (GIT-6): description, branches, per-check CI, individual
+/// reviews, mergeability, and stats. Scrolls as a block; returns the clamped
+/// scroll offset (like Flow/Status).
+fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
+    let d = match &g.detail {
+        Load::Loading => {
+            message(f, area, "loading pull request…", t.overlay0);
+            return 0;
+        }
+        Load::Error(e) => {
+            message(f, area, &format!("gh: {e}"), t.coral);
+            return 0;
+        }
+        Load::Loaded(d) => d,
+        Load::Idle => return 0,
+    };
+    let head = |title: &str| {
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::new().fg(t.subtext1).bold(),
+        ))
+    };
+    let mut rows: Vec<Line> = Vec::new();
+
+    // Title + branches + badge.
+    let (badge, bcol) = detail_badge(d, t);
+    rows.push(Line::from(vec![
+        Span::styled(format!("#{}  ", d.number), Style::new().fg(t.subtext0)),
+        Span::styled(d.title.clone(), Style::new().fg(t.text).bold()),
+    ]));
+    // `updatedAt` is an ISO timestamp; show just the date.
+    let updated = d.updated_at.split('T').next().unwrap_or("");
+    let mut byline = vec![
+        Span::styled(
+            format!("{} → {}", d.head, d.base),
+            Style::new().fg(t.accent),
+        ),
+        Span::styled(format!("  by {}", d.author), Style::new().fg(t.subtext0)),
+    ];
+    if !updated.is_empty() {
+        byline.push(Span::styled(
+            format!("  · updated {updated}"),
+            Style::new().fg(t.subtext0),
+        ));
+    }
+    byline.push(Span::styled(
+        format!("   [{badge}]"),
+        Style::new().fg(bcol).bold(),
+    ));
+    rows.push(Line::from(byline));
+    // Stats + mergeability.
+    let mut stats = vec![
+        Span::styled(format!("+{} ", d.additions), Style::new().fg(t.green)),
+        Span::styled(format!("-{}", d.deletions), Style::new().fg(t.coral)),
+        Span::styled(
+            format!(
+                "  · {} files · {} commits · {} comments",
+                d.changed_files, d.commits, d.comments
+            ),
+            Style::new().fg(t.subtext0),
+        ),
+    ];
+    match d.mergeable.as_str() {
+        "MERGEABLE" => stats.push(Span::styled("  · mergeable", Style::new().fg(t.green))),
+        "CONFLICTING" => stats.push(Span::styled("  · conflicts", Style::new().fg(t.coral))),
+        _ => {}
+    }
+    rows.push(Line::from(stats));
+    rows.push(Line::from(""));
+
+    // Per-check CI.
+    if !d.check_runs.is_empty() {
+        rows.push(head("Checks"));
+        for c in &d.check_runs {
+            let (gly, col) = check_glyph(c.bucket, t);
+            rows.push(Line::from(vec![
+                Span::styled(format!("   {gly}  "), Style::new().fg(col)),
+                Span::styled(c.name.clone(), Style::new().fg(t.text)),
+            ]));
+        }
+        rows.push(Line::from(""));
+    }
+
+    // Individual reviews.
+    if !d.reviews.is_empty() {
+        rows.push(head("Reviews"));
+        for r in &d.reviews {
+            let (gly, col, label) = review_glyph(&r.state, t);
+            rows.push(Line::from(vec![
+                Span::styled(format!("   {gly}  "), Style::new().fg(col)),
+                Span::styled(pad(&r.author, 18), Style::new().fg(t.text)),
+                Span::styled(label.to_string(), Style::new().fg(col)),
+            ]));
+        }
+        rows.push(Line::from(""));
+    }
+
+    // Labels.
+    if !d.labels.is_empty() {
+        rows.push(Line::from(vec![
+            Span::styled("Labels  ", Style::new().fg(t.subtext1).bold()),
+            Span::styled(d.labels.join(", "), Style::new().fg(t.amber)),
+        ]));
+        rows.push(Line::from(""));
+    }
+
+    // Description (word-wrapped).
+    rows.push(head("Description"));
+    if d.body.trim().is_empty() {
+        rows.push(Line::from(Span::styled(
+            "   (no description)",
+            Style::new().fg(t.overlay0),
+        )));
+    } else {
+        let wrap_w = area.width.saturating_sub(6) as usize;
+        for raw in d.body.replace('\r', "").lines() {
+            for wl in wrap(raw, wrap_w) {
+                rows.push(Line::from(Span::styled(
+                    format!("   {wl}"),
+                    Style::new().fg(t.subtext0),
+                )));
+            }
+        }
+    }
+
+    // Render from the top with the scroll offset.
+    let avail = area.height as usize;
+    let scroll = g.scroll.min(rows.len().saturating_sub(avail));
+    let mut y = area.y;
+    for line in rows.into_iter().skip(scroll).take(avail) {
+        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+        y += 1;
+    }
+    scroll
+}
+
+/// Big state badge for the detail header.
+fn detail_badge(d: &PrDetail, t: &Theme) -> (&'static str, Color) {
+    if d.state == "MERGED" {
+        ("Merged", t.accent)
+    } else if d.state == "CLOSED" {
+        ("Closed", t.coral)
+    } else if d.is_draft {
+        ("Draft", t.overlay0)
+    } else {
+        match d.review_decision.as_str() {
+            "APPROVED" => ("Approved", t.green),
+            "CHANGES_REQUESTED" => ("Changes requested", t.coral),
+            "REVIEW_REQUIRED" => ("Review required", t.amber),
+            _ => ("Open", t.subtext0),
+        }
+    }
+}
+
+fn review_glyph(state: &str, t: &Theme) -> (&'static str, Color, &'static str) {
+    match state {
+        "APPROVED" => ("✓", t.green, "approved"),
+        "CHANGES_REQUESTED" => ("✗", t.coral, "changes requested"),
+        "COMMENTED" => ("○", t.subtext0, "commented"),
+        "DISMISSED" => ("—", t.overlay0, "dismissed"),
+        _ => ("·", t.subtext0, ""),
+    }
+}
+
+/// Greedy word-wrap to `width` columns (whole words; over-long words pass
+/// through and get clipped by the terminal). A blank input yields one blank line
+/// so paragraph breaks survive.
+fn wrap(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if line.is_empty() {
+            line = word.to_string();
+        } else if line.chars().count() + 1 + word.chars().count() <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut line));
+            line = word.to_string();
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 fn draw_issues(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
@@ -347,13 +546,28 @@ fn draw_footer(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
         );
         return;
     }
+    // The PR detail panel owns the footer while it's open.
+    if g.open_pr.is_some() {
+        let pairs = [
+            ("esc", "back"),
+            ("M", "merge"),
+            ("a", "approve"),
+            ("R", "ready"),
+            ("c", "checkout"),
+            ("d", "diff"),
+            ("o", "open"),
+            ("r", "refresh"),
+        ];
+        f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
+        return;
+    }
     // Per-section hints as (key, label) pairs — the shared `hint_line` colors
     // the keys with the theme accent and the labels in light text.
     let scope = g.scope.label();
     let pairs: Vec<(&str, &str)> = match g.section {
         Section::Prs => vec![
             ("j/k", "move"),
-            ("⏎", "checkout"),
+            ("⏎", "details"),
             ("d", "diff"),
             ("o", "open"),
             ("m", scope),

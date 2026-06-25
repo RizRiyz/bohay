@@ -6,10 +6,12 @@ bohay is a client/server terminal multiplexer that runs inside your existing ter
 single static Rust binary. It gives you persistent panes, tabs, and workspaces that survive
 detach; a live sidebar showing every agent's state (blocked / working / done / idle); a
 mouse-native split/resize UI; agent session resume; a built-in **git tab** (click a branch for
-PRs, issues, branches, the commit flow, and a repo overview); **static workspaces** opened via a
-folder picker; fully **remappable keybindings** (arrows + a `?` cheat-sheet); a tabbed settings
-menu (themes, notifications, layout, keys); an extension system (**modules**); and a local socket
-API that lets the agents themselves drive the multiplexer.
+PRs, issues, branches, the commit flow, and a repo overview); **git worktrees as nodes**;
+**remote sessions over plain SSH**; an agent API to **`wait`** on output/status and **`attach`**
+into one pane; **static workspaces** opened via a folder picker; fully **remappable keybindings**
+(arrows + a `?` cheat-sheet); a tabbed settings menu (themes, notifications, layout, keys); an
+extension system (**modules**); and a local socket API that lets the agents themselves drive the
+multiplexer.
 
 ```
 ┌ NODES ─────────────┐ │  1    ✕   +
@@ -111,7 +113,8 @@ All commands are prefixed with **`Ctrl+Space`** (press it, then the key):
 | `z` | zoom the focused pane | `D` | close the current node |
 | `b` | toggle the sidebar | `w` / `W` | next / previous node |
 | `g` | open the git tab | `a` | agents: all / active |
-| `q` / `d` | detach (leave the server running) | `,` | open Settings |
+| `G` | new git worktree (branch prompt) | `,` | open Settings |
+| `q` / `d` | detach (leave the server running) | | |
 
 Pressing `Ctrl+Space` twice sends a literal `Ctrl+Space` to the focused program. The UI is
 also fully mouse-driven — click tabs, nodes, agents, panes, the `+`/`✕` buttons, and scroll.
@@ -162,16 +165,71 @@ Full surface (`bohay help`):
 nodes (spaces):   node list | node new | node focus <i> | node close [<i>]
 tabs:             tab list  | tab new  | tab focus <n>   | tab close [<n>]
 panes / agents:   pane list | pane split [<id>] [--down] | pane focus <id>
-                  pane run/send/read/close [<id>] | agent list
+                  pane run/send/read/status/close [<id>] | agent list
 sessions:         agent sessions | agent resume <id>     # resumable agent sessions
+wait / attach:    wait output <id> --match <text> [--timeout <s>]   # block until output
+                  wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
+                  attach <id>             # open the TUI into one fullscreen pane
+worktrees:        worktree list | create <branch> | open <path> | remove <path>
 appearance:       ui sidebar --width <n> | ui sidebar --hide|--show
 events:           events                  # stream status changes
 modules:          module search|list|info|link|install|run|pane|log|…   # see below
+remote:           --remote <host> [ssh args]   # attach to a session over plain ssh
 server:           server stop             # stop the server and all panes
 ```
 
 When a command runs inside a bohay pane, the target pane defaults to that pane (via the
 injected `$BOHAY_PANE_ID`), so `bohay pane split` "just works" without an explicit id.
+
+### Remote sessions over SSH
+
+Run a session on another machine and drive it from your laptop — **no port-forwarding, no
+`~/.ssh/config` edits**:
+
+```bash
+bohay --remote my-server            # attach to a bohay session on my-server over ssh
+bohay --remote my-server -p 2222    # extra ssh args (port, key, …) pass straight through
+```
+
+It bridges the remote session's socket through a plain `ssh` pipe. Detach with `Ctrl+Space d`
+and reattach whenever — your panes and agents keep running on the server. Only the **cells that
+changed** are sent each frame (a keystroke is ~20 bytes, a line of output ~100), so it stays
+snappy even over a slow link. The remote machine just needs `bohay` on its `PATH`.
+
+### Let an agent (or script) wait, then attach
+
+Block until something happens, then continue — **exit code 0** when the condition is met,
+**2** on timeout. Great for chaining agents or scripting:
+
+```bash
+bohay wait output 7 --match "Build succeeded" --timeout 120   # wait for text in pane 7
+bohay wait agent-status 7 --status done --timeout 300         # wait for the agent to finish
+bohay attach 7                                                 # open the TUI into pane 7, fullscreen
+```
+
+`bohay attach <id>` opens straight into one fullscreen pane (Esc/detach returns to normal). It
+composes with remote: `bohay --remote box attach 7`.
+
+### Git worktrees as nodes
+
+Work on several branches of one repo at once. Two ways to make one — both ask for a branch name,
+then create a git worktree under `~/.bohay/worktrees/<repo>/<branch>` (nested per repo, with a
+numeric suffix if that path is taken) and open it as its own node:
+
+- In a repo node, press **`Ctrl+Space G`**.
+- In the folder picker (the **`+`** button / `Ctrl+Space N`), browse to any repo and choose the
+  **"Open with new worktree"** row — it appears (next to "Open this folder") only when the folder
+  you're on is a git repo. Click it or press ⏎ (the `w` key also works).
+
+The sidebar **nests all checkouts of one repo together** (the parent on top, each worktree
+indented below `└`). From the CLI:
+
+```bash
+bohay worktree create feature/login     # new worktree + node for a (new or existing) branch
+bohay worktree list                     # the repo's worktrees
+bohay worktree open ~/code/other-wt     # open an existing worktree as a node
+bohay worktree remove ~/.bohay/worktrees/myapp/feature-login  # remove it (the branch is kept)
+```
 
 ## Modules (extensions)
 

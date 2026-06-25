@@ -158,6 +158,112 @@ impl App {
         }
     }
 
+    // ── PR detail panel (GIT-6) ───────────────────────────────────────────────
+
+    /// The PR number under the cursor in the PRs list (only in that section).
+    fn git_selected_pr(&self) -> Option<u64> {
+        let g = self.active_git()?;
+        if g.section != Section::Prs {
+            return None;
+        }
+        match &g.prs {
+            Load::Loaded(v) => filtered_prs(v, &g.filter).nth(g.cursor).map(|p| p.number),
+            _ => None,
+        }
+    }
+
+    /// Fetch full detail for `number` and show the detail panel.
+    fn fetch_pr_detail(&mut self, number: u64) {
+        let Some(g) = self.active_git() else {
+            return;
+        };
+        let (id, root) = (g.id, g.repo_root.clone());
+        if let Some(g) = self.active_git_mut() {
+            g.open_pr = Some(number);
+            g.detail = Load::Loading;
+            g.scroll = 0;
+        }
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(AppEvent::GitData {
+                view: id,
+                payload: GitPayload::PrDetail(Box::new(github::pr_detail(&root, number))),
+            });
+        });
+    }
+
+    /// `⏎` on a PR row: open the detail panel for it.
+    fn git_open_pr_detail(&mut self) {
+        if let Some(n) = self.git_selected_pr() {
+            self.fetch_pr_detail(n);
+        }
+    }
+
+    /// `r` inside the panel: re-fetch the open PR.
+    fn git_refresh_detail(&mut self) {
+        if let Some(n) = self.active_git().and_then(|g| g.open_pr) {
+            self.fetch_pr_detail(n);
+        }
+    }
+
+    /// Close the PR detail panel (back to the list).
+    fn git_close_pr_detail(&mut self) {
+        if let Some(g) = self.active_git_mut() {
+            g.open_pr = None;
+            g.detail = Load::Idle;
+            g.scroll = 0;
+        }
+    }
+
+    /// A PR action (run in the node's terminal pane so the user sees output and
+    /// can answer any prompt — `gh pr merge` is interactive, which is the safe
+    /// "confirm before merging" path).
+    fn pr_action(&mut self, kind: &str) {
+        let Some(n) = self.active_git().and_then(|g| g.open_pr) else {
+            return;
+        };
+        let cmd = match kind {
+            "checkout" => format!("gh pr checkout {n}"),
+            "diff" => format!("gh pr diff {n}"),
+            "merge" => format!("gh pr merge {n}"),
+            "approve" => format!("gh pr review {n} --approve"),
+            "ready" => format!("gh pr ready {n}"),
+            _ => return,
+        };
+        self.git_run_in_pane(cmd);
+    }
+
+    /// `o` inside the panel: open the PR on GitHub.
+    fn pr_detail_web(&self) {
+        let Some(g) = self.active_git() else {
+            return;
+        };
+        let Some(n) = g.open_pr else {
+            return;
+        };
+        let root = g.repo_root.clone();
+        std::thread::spawn(move || {
+            let _ = github::view_web(&root, "pr", n);
+        });
+    }
+
+    /// Key handling while the PR detail panel is open.
+    fn handle_pr_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.git_close_pr_detail(),
+            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
+            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
+            KeyCode::Char('r') => self.git_refresh_detail(),
+            KeyCode::Char('o') => self.pr_detail_web(),
+            KeyCode::Char('d') => self.pr_action("diff"),
+            KeyCode::Char('c') | KeyCode::Enter => self.pr_action("checkout"),
+            KeyCode::Char('M') => self.pr_action("merge"),
+            KeyCode::Char('a') => self.pr_action("approve"),
+            KeyCode::Char('R') => self.pr_action("ready"),
+            _ => {}
+        }
+    }
+
     /// Switch the active git tab to a clicked view-selector section.
     pub fn git_click_section(&mut self, section: Section) {
         if let Some(g) = self.active_git_mut() {
@@ -213,6 +319,11 @@ impl App {
                 g.cursor = 0;
                 return;
             }
+        }
+        // The PR detail panel captures keys while open.
+        if self.active_git().is_some_and(|g| g.open_pr.is_some()) {
+            self.handle_pr_detail_key(key);
+            return;
         }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
@@ -296,6 +407,13 @@ impl App {
     /// or the scroll offset in Flow/Status (clamped to content during render).
     /// Drives both `j`/`k` and the mouse wheel.
     pub fn git_scroll(&mut self, delta: i32) {
+        // The PR detail panel scrolls as a block.
+        if self.active_git().is_some_and(|g| g.open_pr.is_some()) {
+            if let Some(g) = self.active_git_mut() {
+                g.scroll = (g.scroll as i64 + delta as i64).max(0) as usize;
+            }
+            return;
+        }
         if self.git_section_uses_cursor() {
             self.git_move(delta);
         } else if let Some(g) = self.active_git_mut() {
@@ -374,6 +492,11 @@ impl App {
     /// issue → view. Branch checkout is direct (fast + refresh); the rest run in
     /// the node's terminal pane (GIT-3).
     fn git_activate(&mut self) {
+        // A PR row opens the rich detail panel (GIT-6).
+        if self.active_git().map(|g| g.section) == Some(Section::Prs) {
+            self.git_open_pr_detail();
+            return;
+        }
         // Branch checkout is handled directly so we can refresh in place.
         let branch = self.active_git().and_then(|g| match g.section {
             Section::Branches => match &g.branches {

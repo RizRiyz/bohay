@@ -2,7 +2,7 @@
 //! Browse the filesystem, pick an existing folder, or create a new one.
 
 use super::*;
-use crate::app::FolderPicker;
+use crate::app::{FolderPicker, Row};
 use ratatui::widgets::{Borders, Clear};
 
 /// Draw the picker over a dimmed backdrop; returns the clickable row rects
@@ -64,12 +64,13 @@ pub(super) fn draw_picker(
         );
     } else {
         // Key hints: the shortcut in the theme accent, the label in light text —
-        // over the modal's own background (no black bar).
+        // over the modal's own background (no black bar). `⏎` acts on the
+        // highlighted row (open folder / open with worktree / `..` / descend).
         f.render_widget(
             Paragraph::new(hint_line(
                 &[
                     ("↑↓", "move"),
-                    ("⏎", "open"),
+                    ("⏎", "select"),
                     ("←", "up"),
                     ("n", "new folder"),
                     ("esc", "cancel"),
@@ -98,11 +99,12 @@ pub(super) fn draw_picker(
             fill_bg(f, row_rect, t.sel_bg);
         }
         // (icon, label, color). Folders navigate; files are dimmed + inert.
-        let (icon, label, fg) = match i {
-            0 => ("✓", "Open this folder".to_string(), t.accent),
-            1 => ("↑", "..".to_string(), t.subtext0),
-            _ => {
-                let e = &p.entries[i - 2];
+        let (icon, label, fg) = match p.row(i) {
+            Row::OpenFolder => ("✓", "Open this folder".to_string(), t.accent),
+            Row::OpenWorktree => ("⎇", "Open with new worktree".to_string(), t.accent),
+            Row::Up => ("↑", "..".to_string(), t.subtext0),
+            Row::Entry(idx) => {
+                let e = &p.entries[idx];
                 if e.is_dir {
                     ("▪", format!("{}/", e.name), t.text)
                 } else {
@@ -135,6 +137,57 @@ fn trunc_tail(s: &str, max: usize) -> String {
     }
     let tail: String = s.chars().skip(n - max.saturating_sub(1)).collect();
     format!("…{tail}")
+}
+
+/// A tiny input modal: the new-worktree branch prompt (docs/18 WT). `error` is
+/// shown in red (e.g. the branch is already checked out) so a failed create is
+/// never a silent no-op.
+pub(super) fn draw_worktree_prompt(
+    f: &mut Frame,
+    area: Rect,
+    buf: &str,
+    error: Option<&str>,
+    t: &Theme,
+) {
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
+    let modal = centered_rect(area, w, 6);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " New git worktree",
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" branch: ", Style::new().fg(t.subtext0)),
+            Span::styled(buf.to_string(), Style::new().fg(t.accent).bold()),
+            Span::styled("▏", Style::new().fg(t.accent)),
+        ])),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
+    // Bottom line: the error (red) if the last create failed, else the key hints.
+    let bottom = inner.bottom().saturating_sub(1);
+    if let Some(e) = error {
+        let e = trunc_tail(e, inner.width.saturating_sub(2) as usize);
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" {e}"), Style::new().fg(t.coral))),
+            Rect::new(inner.x, bottom, inner.width, 1),
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(hint_line(&[("⏎", "create"), ("esc", "cancel")], t)),
+            Rect::new(inner.x, bottom, inner.width, 1),
+        );
+    }
 }
 
 // ── local render helpers (each modal module keeps its own, as elsewhere) ──

@@ -3,7 +3,7 @@
 //! Input arrives from clients; the JSON API also runs here. See docs/03, docs/08.
 
 use crate::ipc::transport::{self, Conn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TrySendError};
@@ -44,15 +44,38 @@ pub fn run() -> Result<()> {
     let mut terminal = Terminal::new(TestBackend::new(size.0, size.1))?;
     let mut last_draw = Instant::now();
     let mut last_save = Instant::now();
+    // The last frame broadcast. We send only the *diff* against it (or skip an
+    // identical frame), so an idle session sends nothing and a busy one sends
+    // just the changed cells — cheap over a Unix socket, and crucial over SSH.
+    // Reset to `None` when a client attaches so the fresh client gets a full frame.
+    let mut last_frame: Option<protocol::FrameData> = None;
+    // Clients whose bounded frame channel was full when a diff went out — they
+    // dropped it, so they're resynced with a full frame next round (a dropped
+    // diff would otherwise desync them; a dropped *full* frame is self-healing).
+    let mut behind: HashSet<u64> = HashSet::new();
 
     loop {
         let mut activity = match rx.recv_timeout(FRAME_INTERVAL) {
-            Ok(ev) => apply(ev, &mut app, &mut clients, &mut foreground, &mut size),
+            Ok(ev) => apply(
+                ev,
+                &mut app,
+                &mut clients,
+                &mut foreground,
+                &mut size,
+                &mut last_frame,
+            ),
             Err(RecvTimeoutError::Timeout) => false,
             Err(RecvTimeoutError::Disconnected) => break,
         };
         while let Ok(ev) = rx.try_recv() {
-            activity |= apply(ev, &mut app, &mut clients, &mut foreground, &mut size);
+            activity |= apply(
+                ev,
+                &mut app,
+                &mut clients,
+                &mut foreground,
+                &mut size,
+                &mut last_frame,
+            );
         }
         while let Ok(req) = api_rx.try_recv() {
             let resp = app.handle_api(&req);
@@ -98,7 +121,36 @@ pub fn run() -> Result<()> {
             terminal.draw(|f| ui::render(f, &mut app))?;
             let buf = terminal.backend().buffer().clone();
             let frame = protocol::frame_from_buffer(&buf, app.last_cursor);
-            broadcast(&mut clients, ServerMessage::Frame(frame));
+            // A full frame is needed for everyone on the first frame and on a
+            // resize (the diff would be meaningless against different dims).
+            let full_for_all = last_frame
+                .as_ref()
+                .is_none_or(|p| p.width != frame.width || p.height != frame.height);
+            // Otherwise compute the sparse diff (None ⇒ nothing changed).
+            let diff_msg = match &last_frame {
+                Some(prev) if !full_for_all => {
+                    let runs = protocol::diff_runs(prev, &frame);
+                    if runs.is_empty() && prev.cursor == frame.cursor {
+                        None
+                    } else {
+                        Some(ServerMessage::FrameDiff(protocol::FrameDiff {
+                            width: frame.width,
+                            height: frame.height,
+                            runs,
+                            cursor: frame.cursor,
+                        }))
+                    }
+                }
+                _ => None,
+            };
+            send_frame(
+                &mut clients,
+                &mut behind,
+                &frame,
+                diff_msg.as_ref(),
+                full_for_all,
+            );
+            last_frame = Some(frame);
             last_draw = Instant::now();
         }
     }
@@ -114,6 +166,7 @@ fn apply(
     clients: &mut Clients,
     foreground: &mut Option<u64>,
     size: &mut (u16, u16),
+    last_frame: &mut Option<protocol::FrameData>,
 ) -> bool {
     match ev {
         AppEvent::ClientConnected {
@@ -125,6 +178,9 @@ fn apply(
             clients.insert(id, frames);
             *foreground = Some(id);
             *size = (cols.max(1), rows.max(1));
+            // Force a full frame so the new client (which diffs from nothing)
+            // gets the complete screen.
+            *last_frame = None;
             true
         }
         AppEvent::ClientDetach { id } => {
@@ -147,6 +203,44 @@ fn apply(
 
 fn broadcast(clients: &mut Clients, msg: ServerMessage) {
     clients.retain(|_, tx| !matches!(tx.try_send(msg.clone()), Err(TrySendError::Disconnected(_))));
+}
+
+/// Send each client a `FrameDiff` (cheap) — or a full `Frame` if it's behind or
+/// everyone needs one (first frame / resize). A client whose bounded channel is
+/// full dropped its update and is marked `behind` for a full-frame resync.
+fn send_frame(
+    clients: &mut Clients,
+    behind: &mut HashSet<u64>,
+    frame: &protocol::FrameData,
+    diff_msg: Option<&ServerMessage>,
+    full_for_all: bool,
+) {
+    let mut dead = Vec::new();
+    for (id, tx) in clients.iter() {
+        let send_full = full_for_all || behind.contains(id);
+        let result = if send_full {
+            Some(tx.try_send(ServerMessage::Frame(frame.clone())))
+        } else {
+            // Up-to-date client + nothing changed ⇒ send nothing.
+            diff_msg.map(|d| tx.try_send(d.clone()))
+        };
+        match result {
+            None => {}
+            Some(Ok(())) => {
+                if send_full {
+                    behind.remove(id);
+                }
+            }
+            Some(Err(TrySendError::Full(_))) => {
+                behind.insert(*id);
+            }
+            Some(Err(TrySendError::Disconnected(_))) => dead.push(*id),
+        }
+    }
+    for id in dead {
+        clients.remove(&id);
+    }
+    behind.retain(|id| clients.contains_key(id));
 }
 
 fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>) {

@@ -5,6 +5,13 @@ use super::*;
 
 impl App {
     pub fn handle_event(&mut self, ev: AppEvent) {
+        // Closing the last node empties `workspaces` and sets `should_quit`; the
+        // loop drains the rest of the event batch before it checks that flag, so
+        // ignore events here once there's nothing left to act on (`layout()`
+        // would otherwise index an empty `workspaces`).
+        if self.workspaces.is_empty() {
+            return;
+        }
         match ev {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
@@ -235,6 +242,11 @@ impl App {
         // The folder picker captures all input while open.
         if self.picker.is_some() {
             self.handle_picker_key(key);
+            return;
+        }
+        // The new-worktree branch prompt captures all input while open.
+        if self.worktree_prompt.is_some() {
+            self.handle_worktree_prompt_key(key);
             return;
         }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the

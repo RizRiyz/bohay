@@ -115,6 +115,11 @@ impl App {
     // ── api dispatch ──────────────────────────────────────────────────────────
 
     pub fn handle_api(&mut self, req: &ApiRequest) -> String {
+        // No active session (the last node was closed and the app is quitting) —
+        // most methods reach `layout()`, which would index an empty `workspaces`.
+        if self.workspaces.is_empty() {
+            return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
+        }
         match self.dispatch(&req.method, &req.params) {
             Ok(result) => json!({ "id": req.id, "result": result }).to_string(),
             Err((code, message)) => {
@@ -204,6 +209,19 @@ impl App {
                 self.close_pane(id);
                 Ok(json!({"type":"ok"}))
             }
+            // A **global** single-pane status lookup (any node) — `pane.list` is
+            // scoped to the active node, so `bohay wait agent-status` polls this.
+            "pane.status" => {
+                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let (agent, status) = self
+                    .status
+                    .get(&id)
+                    .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
+                    .unwrap_or_else(|| (String::new(), "unknown".to_string()));
+                Ok(
+                    json!({"type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status}),
+                )
+            }
             "pane.report_session" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
                 let agent = p
@@ -285,6 +303,14 @@ impl App {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
                 self.focus_pane_global(id);
                 Ok(json!({"type":"ok"}))
+            }
+            // `attach.pane` (docs/18 WA-2): focus a pane and zoom it, so a client
+            // attaching next opens straight into that fullscreen terminal.
+            "attach.pane" => {
+                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                self.focus_pane_global(id);
+                self.zoomed = true;
+                Ok(json!({"type":"ok","pane": id.0.to_string()}))
             }
             "agent.list" => {
                 let focus = self.layout().focus;
@@ -537,6 +563,51 @@ impl App {
                 self.open_git_tab(node);
                 Ok(json!({"type":"ok","git": self.active_is_git()}))
             }
+            // ── worktrees (docs/18 WT-3) ──
+            "worktree.list" => {
+                let cwd = self.git_node_cwd(p);
+                let v = crate::git::local::worktrees(&cwd).map_err(git_err)?;
+                let arr: Vec<Value> = v
+                    .iter()
+                    .map(|w| {
+                        json!({"path": w.path.display().to_string(), "branch": w.branch, "head": w.head, "main": w.is_main})
+                    })
+                    .collect();
+                Ok(json!({"type":"worktree_list","worktrees":arr}))
+            }
+            "worktree.create" => {
+                let branch = p.get("branch").and_then(|v| v.as_str()).unwrap_or("");
+                let repo = self.git_node_cwd(p);
+                let path = self.create_worktree(&repo, branch).map_err(git_err)?;
+                Ok(json!({"type":"ok","path": path.display().to_string()}))
+            }
+            "worktree.open" => {
+                let path = param_path(p)?;
+                self.create_workspace_at(path);
+                Ok(json!({"type":"ok"}))
+            }
+            "worktree.remove" => {
+                let path = param_path(p)?;
+                // Run from the repo's **main** worktree — git refuses to remove a
+                // worktree from inside it, and the active node may be unrelated.
+                let repo = crate::git::local::worktrees(&path)
+                    .ok()
+                    .and_then(|wts| wts.into_iter().find(|w| w.is_main).map(|w| w.path))
+                    .unwrap_or_else(|| self.ws().cwd.clone());
+                crate::git::local::worktree_remove(&repo, &path).map_err(git_err)?;
+                // Tidy the now-possibly-empty `worktrees/<repo>/` parent — but only
+                // under our managed dir, and `remove_dir` only succeeds if empty.
+                if let Some(parent) = path.parent() {
+                    if parent.starts_with(crate::persist::config_dir().join("worktrees")) {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                }
+                // Close the node opened at this worktree, if any.
+                if let Some(i) = self.workspaces.iter().position(|w| w.cwd == path) {
+                    self.close_workspace(i);
+                }
+                Ok(json!({"type":"ok"}))
+            }
             other => Err((
                 "invalid_request".to_string(),
                 format!("unknown method: {other}"),
@@ -574,6 +645,14 @@ fn not_found() -> (String, String) {
 
 fn git_err(e: String) -> (String, String) {
     ("git_error".to_string(), e)
+}
+
+/// Required `path` string param → a `PathBuf`.
+fn param_path(p: &Value) -> Result<PathBuf, (String, String)> {
+    p.get("path")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .ok_or_else(|| ("invalid_request".to_string(), "path required".to_string()))
 }
 
 fn module_err(e: String) -> (String, String) {

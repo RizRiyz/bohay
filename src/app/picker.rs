@@ -1,9 +1,10 @@
 //! The folder picker — a modal to open (or create) a folder as a new **static
 //! workspace** (node). The "+" button opens it: browse the filesystem, pick an
-//! existing folder, or make a new one. This is the front door for nodes and the
-//! basis for the planned worktree feature.
+//! existing folder, or make a new one (which opens immediately). When the browsed
+//! folder is a git repo it offers a second action row, **"Open with new
+//! worktree"** (`w` also triggers it). The front door for nodes and worktrees.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::*;
 
@@ -20,18 +21,55 @@ pub struct FolderPicker {
     pub path: PathBuf,
     /// Folders + files in `path`, dirs first then files (dotfiles excluded).
     pub entries: Vec<Entry>,
-    /// Cursor into the row list: 0 = "use this folder", 1 = "..", 2+ = entries.
+    /// Cursor into the row list (see [`Row`] / [`FolderPicker::row`]).
     pub cursor: usize,
     /// When making a new folder, the name being typed.
     pub creating: Option<String>,
     /// Last filesystem error (e.g. permission denied), shown in the modal.
     pub error: Option<String>,
+    /// Whether the browsed folder is a git repo — adds the "Open with new
+    /// worktree" row (and the `w` accelerator). Recomputed when the path changes.
+    pub is_repo: bool,
+}
+
+/// A selectable row in the picker. The action rows lead; the directory entries
+/// follow. The "open with worktree" row only exists when the folder is a repo.
+pub enum Row {
+    /// Open the browsed folder as a node.
+    OpenFolder,
+    /// Create a git worktree of the browsed repo (then open it).
+    OpenWorktree,
+    /// `..` — go to the parent directory.
+    Up,
+    /// `entries[idx]`.
+    Entry(usize),
 }
 
 impl FolderPicker {
-    /// Selectable rows: "use this folder" + ".." + the entries.
+    /// Number of action rows before the directory entries: "open" + (optional)
+    /// "open with worktree" + "..".
+    fn leading(&self) -> usize {
+        if self.is_repo {
+            3
+        } else {
+            2
+        }
+    }
+
+    /// Total selectable rows.
     pub fn row_count(&self) -> usize {
-        2 + self.entries.len()
+        self.leading() + self.entries.len()
+    }
+
+    /// Classify the row at index `i`.
+    pub fn row(&self, i: usize) -> Row {
+        match (i, self.is_repo) {
+            (0, _) => Row::OpenFolder,
+            (1, true) => Row::OpenWorktree,
+            (1, false) => Row::Up,
+            (2, true) => Row::Up,
+            _ => Row::Entry(i - self.leading()),
+        }
     }
 }
 
@@ -51,6 +89,7 @@ impl App {
             cursor: 0,
             creating: None,
             error: None,
+            is_repo: false,
         });
         self.picker_refresh();
     }
@@ -84,6 +123,23 @@ impl App {
             });
             p.entries = entries;
             p.cursor = p.cursor.min(p.row_count().saturating_sub(1));
+            p.is_repo = crate::git::local::is_repo(&p.path);
+        }
+    }
+
+    /// The "Open with new worktree" row (or `w`): create a git worktree of the
+    /// browsed repo. Hands off to the branch prompt (targeting this folder), so
+    /// the flow matches `Ctrl+Space G`.
+    fn picker_make_worktree(&mut self) {
+        let repo = self
+            .picker
+            .as_ref()
+            .filter(|p| p.is_repo)
+            .map(|p| p.path.clone());
+        if let Some(repo) = repo {
+            self.picker = None;
+            self.worktree_repo = Some(repo);
+            self.worktree_prompt = Some(String::new());
         }
     }
 
@@ -122,6 +178,7 @@ impl App {
                     p.error = None;
                 }
             }
+            KeyCode::Char('w') => self.picker_make_worktree(),
             KeyCode::Esc | KeyCode::Char('q') => self.close_folder_picker(),
             _ => {}
         }
@@ -150,17 +207,15 @@ impl App {
         self.picker_refresh();
     }
 
-    /// Browse into the highlighted subdirectory.
+    /// Browse into the highlighted subdirectory (only folder entries navigate).
     fn picker_descend(&mut self) {
-        let target = self.picker.as_ref().and_then(|p| match p.cursor {
-            0 => None,                                   // "use this folder"
-            1 => p.path.parent().map(Path::to_path_buf), // ".."
-            // Only folders are navigable; a file row does nothing.
-            i => p
+        let target = self.picker.as_ref().and_then(|p| match p.row(p.cursor) {
+            Row::Entry(idx) => p
                 .entries
-                .get(i - 2)
+                .get(idx)
                 .filter(|e| e.is_dir)
                 .map(|e| p.path.join(&e.name)),
+            _ => None,
         });
         if let Some(t) = target {
             if let Some(p) = self.picker.as_mut() {
@@ -171,18 +226,21 @@ impl App {
         }
     }
 
-    /// `⏎` — contextual: open the browsed folder, go up, or descend.
+    /// `⏎` / click — contextual on the highlighted row.
     pub fn picker_activate(&mut self) {
-        match self.picker.as_ref().map(|p| p.cursor) {
-            Some(0) => {
-                // Open the current folder as a new static workspace.
+        let Some(row) = self.picker.as_ref().map(|p| p.row(p.cursor)) else {
+            return;
+        };
+        match row {
+            // Open the current folder as a new static workspace.
+            Row::OpenFolder => {
                 if let Some(p) = self.picker.take() {
                     self.create_workspace_at(p.path);
                 }
             }
-            Some(1) => self.picker_up(),
-            Some(_) => self.picker_descend(),
-            None => {}
+            Row::OpenWorktree => self.picker_make_worktree(),
+            Row::Up => self.picker_up(),
+            Row::Entry(_) => self.picker_descend(),
         }
     }
 
@@ -205,25 +263,67 @@ impl App {
             return;
         };
         let new = p.path.join(&name);
-        match std::fs::create_dir(&new) {
-            Ok(()) => {
-                p.path = new;
-                p.cursor = 0;
-                p.creating = None;
-                p.error = None;
-            }
-            Err(e) => {
-                p.error = Some(e.to_string());
-                return;
-            }
+        if let Err(e) = std::fs::create_dir(&new) {
+            p.error = Some(e.to_string());
+            return;
         }
-        self.picker_refresh();
+        // Open the brand-new folder as a node straight away — making a folder from
+        // the workspace picker means "use this as my workspace", so don't make the
+        // user then hunt for "open this folder".
+        self.picker = None;
+        self.create_workspace_at(new);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_adds_an_open_with_worktree_row_that_shifts_the_indices() {
+        let mut p = FolderPicker {
+            path: PathBuf::from("/x"),
+            entries: vec![Entry {
+                name: "a".into(),
+                is_dir: true,
+            }],
+            cursor: 0,
+            creating: None,
+            error: None,
+            is_repo: false,
+        };
+        // Plain folder: [Open] [..] [a]
+        assert_eq!(p.row_count(), 3);
+        assert!(matches!(p.row(0), Row::OpenFolder));
+        assert!(matches!(p.row(1), Row::Up));
+        assert!(matches!(p.row(2), Row::Entry(0)));
+
+        // Git repo: the worktree row appears at 1 and pushes the rest down.
+        p.is_repo = true;
+        assert_eq!(p.row_count(), 4);
+        assert!(matches!(p.row(0), Row::OpenFolder));
+        assert!(matches!(p.row(1), Row::OpenWorktree));
+        assert!(matches!(p.row(2), Row::Up));
+        assert!(matches!(p.row(3), Row::Entry(0)));
+    }
+
+    #[test]
+    fn selecting_the_worktree_row_opens_the_branch_prompt() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.picker = Some(FolderPicker {
+            path: PathBuf::from("/tmp/some-repo"),
+            entries: Vec::new(),
+            cursor: 1, // the "Open with new worktree" row
+            creating: None,
+            error: None,
+            is_repo: true,
+        });
+        app.picker_activate(); // ⏎ / click on that row
+        assert!(app.picker.is_none(), "picker closes");
+        assert!(app.worktree_prompt.is_some(), "branch prompt opens");
+        assert_eq!(app.worktree_repo, Some(PathBuf::from("/tmp/some-repo")));
+    }
 
     #[test]
     fn picker_browses_and_opens_a_folder() {
@@ -246,19 +346,28 @@ mod tests {
         assert!(entries.iter().any(|e| e.name == "readme.txt" && !e.is_dir));
         assert!(entries[0].is_dir, "directories are listed before files");
 
-        // Make a new folder, then open the browsed folder as a workspace.
+        // Cursor 0 = "use this folder" → opens the browsed folder as a node.
+        app.picker.as_mut().unwrap().cursor = 0;
+        app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.picker.is_none(), "picker closed after opening");
+        assert_eq!(app.workspaces.len(), nodes_before + 1, "a node was created");
+        assert_eq!(app.workspaces.last().unwrap().cwd, tmp);
+
+        // Reopen and make a new folder: it opens as a node immediately (one step).
+        app.open_folder_picker();
+        app.picker.as_mut().unwrap().path = tmp.clone();
+        app.picker_refresh();
         app.handle_picker_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         for c in "fresh".chars() {
             app.handle_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(tmp.join("fresh").is_dir(), "new folder created");
-
-        // Cursor 0 = "use this folder" → opens it as a node.
-        app.picker.as_mut().unwrap().cursor = 0;
-        app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.picker.is_none(), "picker closed after opening");
-        assert_eq!(app.workspaces.len(), nodes_before + 1, "a node was created");
+        assert!(
+            app.picker.is_none(),
+            "new folder opens as a node (no second Enter)"
+        );
+        assert_eq!(app.workspaces.len(), nodes_before + 2);
         assert_eq!(app.workspaces.last().unwrap().cwd, tmp.join("fresh"));
 
         let _ = std::fs::remove_dir_all(&tmp);
