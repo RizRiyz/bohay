@@ -43,6 +43,13 @@ fn main() -> Result<()> {
         Some("server") if args.get(2).map(String::as_str) == Some("stop") => return server_stop(),
         Some("server") => return ipc::server::run(),
         Some("client") => return ipc::client::run(&persist::client_socket_path()),
+        // Remote attach (docs/18 RA): the bridge runs on the remote host (via
+        // ssh); `--remote <host>` launches it from the local side.
+        Some("remote-client-bridge") => return remote_client_bridge(),
+        Some("--remote") => return remote_attach(&args),
+        // `attach <id>` (docs/18 WA-2): focus + zoom the pane, then open the TUI
+        // straight into that fullscreen terminal.
+        Some("attach") => return attach_cmd(&args),
         Some("integration") => std::process::exit(integration::run(&args)?),
         Some("--local") => return run_local(),
         Some(_) if cli::is_cli(&args) => {
@@ -107,6 +114,69 @@ fn autodetect_and_attach() -> Result<()> {
         wait_for_socket(&sock)?;
     }
     ipc::client::run(&sock)
+}
+
+/// Remote bridge role (docs/18 RA-1), run *on the remote host* by ssh. Ensure a
+/// server is up, then pump this process's stdin/stdout to/from the local socket
+/// so the `bohay --remote` client on the other end of the ssh pipe drives it.
+fn remote_client_bridge() -> Result<()> {
+    let sock = persist::client_socket_path();
+    if !server_running(&sock) {
+        spawn_server()?;
+        wait_for_socket(&sock)?;
+    }
+    ipc::client::remote_bridge(&sock)
+}
+
+/// `bohay attach <id>` (docs/18 WA-2): focus + zoom the pane (one round-trip via
+/// `attach.pane`), then attach the client so it opens straight into that
+/// fullscreen terminal. Composes with `--remote` for a remote fullscreen attach.
+fn attach_cmd(args: &[String]) -> Result<()> {
+    let sock = persist::client_socket_path();
+    if !server_running(&sock) {
+        spawn_server()?;
+        wait_for_socket(&sock)?;
+    }
+    if let Some(id) = args.get(2).filter(|s| s.parse::<u32>().is_ok()) {
+        let _ = cli::request_attach(id); // best-effort; still attaches if it fails
+    }
+    ipc::client::run(&sock)
+}
+
+/// `bohay --remote <host> [ssh args]` (docs/18 RA-2): bridge a remote session's
+/// socket through plain ssh and attach to it locally. No port-forwarding, no
+/// `~/.ssh/config` edits — keepalive options are passed on argv only.
+fn remote_attach(args: &[String]) -> Result<()> {
+    let host = args
+        .get(2)
+        .ok_or_else(|| anyhow!("usage: bohay --remote <host> [ssh args]"))?;
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3");
+    // Any extra args (e.g. `-p 2222`, `-i key`) go to ssh, before the host.
+    for extra in args.iter().skip(3) {
+        cmd.arg(extra);
+    }
+    cmd.arg(host)
+        .arg("bohay")
+        .arg("remote-client-bridge")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped()); // stderr inherited so ssh can prompt for auth
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("failed to launch ssh: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("no ssh stdout"))?;
+    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no ssh stdin"))?;
+    let result = ipc::client::attach(stdout, stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }
 
 fn server_running(sock: &Path) -> bool {

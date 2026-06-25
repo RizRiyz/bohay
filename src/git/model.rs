@@ -112,3 +112,20 @@ pub struct Commit {
     pub refs: String,  // decorations (HEAD -> main, tag: …)
     pub graph: String, // graph prefix from `git log --graph`, if any
 }
+
+/// A git worktree — one checkout of a repo (docs/18 WT). `is_main` marks the
+/// primary worktree (the original clone), which can't be removed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Worktree {
+    pub path: std::path::PathBuf,
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_main: bool,
+}
+
+/// A node's worktree grouping. All checkouts of one repo share a `common_dir`
+/// (the git common `.git`), so the sidebar groups them under one parent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorktreeMembership {
+    pub common_dir: std::path::PathBuf,
+}

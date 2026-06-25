@@ -2,6 +2,7 @@
 //! the session socket, send one JSON request, and print the reply. See docs/08.
 
 use std::io::{BufRead, BufReader, Write};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -21,6 +22,8 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "events"
                 | "module"
                 | "git"
+                | "worktree"
+                | "wait"
                 | "help"
         )
     )
@@ -54,10 +57,14 @@ panes / agents:
   pane run [<id>] <cmd...>   run a command in a pane
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
+  pane status [<id>]         print a pane's agent status (any node)
   pane close [<id>]          close a pane
   agent list                 list every agent across all nodes/tabs
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
+  wait output <id> --match <text> [--timeout <s>]    block until output appears
+  wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
+  attach <id>                open the TUI into a single fullscreen pane
 
 appearance:
   ui sidebar --width <n>     set the sidebar width (columns)
@@ -85,8 +92,17 @@ git (docs/17):
   git log [--limit N]        recent commits
   git open [<node>]          open the git tab for a node
 
+worktrees (docs/18):
+  worktree list              list the current repo's worktrees
+  worktree create <branch>   create a worktree + node for <branch>
+  worktree open <path>       open an existing worktree as a node
+  worktree remove <path>     remove a worktree (its branch is kept)
+
 events:
   events                     stream live status changes
+
+remote (docs/18):
+  --remote <host> [ssh args] attach to a bohay session on <host> over plain ssh
 
 server:
   server stop                stop the server (and all panes)
@@ -110,6 +126,11 @@ pub fn run(args: &[String]) -> Result<i32> {
         && args.get(2).map(String::as_str) == Some("search")
     {
         return module_search(args);
+    }
+    // `wait` (docs/18 WA-1) is a client-side poll/stream loop, not a one-shot
+    // request — it exits 0 on the condition, 2 on timeout.
+    if args.get(1).map(String::as_str) == Some("wait") {
+        return wait_cmd(args);
     }
     let (method, params) = parse(args)?;
     let path = crate::persist::socket_path();
@@ -221,6 +242,153 @@ fn module_search(args: &[String]) -> Result<i32> {
         hits.len()
     );
     Ok(0)
+}
+
+/// What a `bohay wait …` invocation is waiting for (parsed from argv).
+#[derive(Debug, PartialEq)]
+enum WaitFor {
+    /// `wait output <id> --match <text>`: the pane's recent output contains `text`.
+    Output { needle: String },
+    /// `wait agent-status <id> --status <s>`: the pane's agent reaches `status`.
+    AgentStatus { status: String },
+}
+
+#[derive(Debug, PartialEq)]
+struct WaitSpec {
+    pane: String,
+    condition: WaitFor,
+    timeout: Option<f64>,
+}
+
+/// Parse `bohay wait output|agent-status <id> …` into a [`WaitSpec`] (pure, so
+/// it's unit-tested). The pane id is the first numeric positional, else
+/// `$BOHAY_PANE_ID`.
+fn parse_wait(args: &[String]) -> Result<WaitSpec> {
+    let kind = args.get(2).map(String::as_str).unwrap_or("");
+    let pane = args
+        .get(3)
+        .filter(|s| s.parse::<u32>().is_ok())
+        .cloned()
+        .or_else(|| std::env::var("BOHAY_PANE_ID").ok())
+        .ok_or_else(|| anyhow!("wait needs a pane id (or $BOHAY_PANE_ID)"))?;
+    let timeout = flag(args, "--timeout").and_then(|s| s.parse::<f64>().ok());
+    let condition = match kind {
+        "output" => WaitFor::Output {
+            needle: flag(args, "--match").ok_or_else(|| {
+                anyhow!("usage: bohay wait output <id> --match <text> [--timeout <s>]")
+            })?,
+        },
+        "agent-status" => WaitFor::AgentStatus {
+            status: flag(args, "--status").ok_or_else(|| {
+                anyhow!("usage: bohay wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]")
+            })?,
+        },
+        _ => return Err(anyhow!("usage: bohay wait output|agent-status <id> …")),
+    };
+    Ok(WaitSpec {
+        pane,
+        condition,
+        timeout,
+    })
+}
+
+/// `bohay wait …` — block until the condition holds (exit 0) or the timeout
+/// elapses (exit 2). Built entirely on existing API methods + the event stream.
+fn wait_cmd(args: &[String]) -> Result<i32> {
+    let spec = parse_wait(args)?;
+    let deadline = spec
+        .timeout
+        .map(|t| Instant::now() + Duration::from_secs_f64(t));
+    match spec.condition {
+        WaitFor::Output { needle } => loop {
+            let v = send_request("pane.read", json!({ "pane": spec.pane }))?;
+            let text = v
+                .get("result")
+                .and_then(|r| r.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            if text.contains(&needle) {
+                return Ok(0);
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(2);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        },
+        WaitFor::AgentStatus { status } => wait_status_stream(&spec.pane, &status, deadline),
+    }
+}
+
+/// Current agent status of `pane` (global lookup via `pane.status`).
+fn pane_status(pane: &str) -> Result<Option<String>> {
+    let v = send_request("pane.status", json!({ "pane": pane }))?;
+    Ok(v.get("result")
+        .and_then(|r| r.get("status"))
+        .and_then(|x| x.as_str())
+        .map(String::from))
+}
+
+/// Block until `pane`'s agent reaches `target` (exit 0), or `deadline` passes
+/// (exit 2). Subscribes to the event stream **first**, then polls the current
+/// status — so a transition that happens between the poll and the subscribe is
+/// never missed (it's already buffered on the stream).
+fn wait_status_stream(pane: &str, target: &str, deadline: Option<Instant>) -> Result<i32> {
+    let path = crate::persist::socket_path();
+    let stream =
+        crate::ipc::transport::connect(&path).map_err(|_| anyhow!("no bohay server running"))?;
+    let mut writer = stream.clone();
+    writeln!(
+        writer,
+        "{}",
+        json!({"id":"1","method":"events.subscribe","params":{}})
+    )?;
+    let reader = BufReader::new(stream);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (pane_s, target_s) = (pane.to_string(), target.to_string());
+    std::thread::spawn(move || {
+        for line in reader.lines() {
+            let Ok(l) = line else { break };
+            if let Ok(v) = serde_json::from_str::<Value>(&l) {
+                let is_status =
+                    v.get("event").and_then(|e| e.as_str()) == Some("pane.agent_status_changed");
+                let data = v.get("data");
+                let p = data.and_then(|d| d.get("pane")).and_then(|x| x.as_str());
+                let s = data.and_then(|d| d.get("status")).and_then(|x| x.as_str());
+                if is_status && p == Some(pane_s.as_str()) && s == Some(target_s.as_str()) {
+                    let _ = tx.send(());
+                    break;
+                }
+            }
+        }
+    });
+
+    // Now that we're listening, an initial poll handles the already-there case.
+    if pane_status(pane)?.as_deref() == Some(target) {
+        return Ok(0);
+    }
+
+    match deadline {
+        Some(d) => {
+            let now = Instant::now();
+            if d <= now {
+                return Ok(2);
+            }
+            match rx.recv_timeout(d - now) {
+                Ok(()) => Ok(0),
+                Err(_) => Ok(2),
+            }
+        }
+        None => {
+            let _ = rx.recv();
+            Ok(0)
+        }
+    }
+}
+
+/// Focus + zoom a pane via `attach.pane` (docs/18 WA-2). Used by `bohay attach`.
+pub fn request_attach(pane: &str) -> Result<()> {
+    send_request("attach.pane", json!({ "pane": pane })).map(|_| ())
 }
 
 /// One request/response over the control socket.
@@ -351,6 +519,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("pane.send_input".into(), with_pane(obj))
         }
         ("pane", "read") => ("pane.read".into(), with_pane(serde_json::Map::new())),
+        ("pane", "status") => ("pane.status".into(), with_pane(serde_json::Map::new())),
         ("pane", "close") => ("pane.close".into(), with_pane(serde_json::Map::new())),
         ("pane", "report") => {
             let mut obj = serde_json::Map::new();
@@ -447,6 +616,11 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("git", "open") => ("git.open".into(), one("node", arg0())),
         ("git", _) => ("git.status".into(), json!({})),
 
+        ("worktree", "create") => ("worktree.create".into(), one("branch", arg0())),
+        ("worktree", "open") => ("worktree.open".into(), one("path", arg0())),
+        ("worktree", "remove") => ("worktree.remove".into(), one("path", arg0())),
+        ("worktree", _) => ("worktree.list".into(), json!({})),
+
         _ => return Err(anyhow!("unknown command. Try `bohay help`.")),
     })
 }
@@ -521,6 +695,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_wait() {
+        std::env::remove_var("BOHAY_PANE_ID");
+        let s = parse_wait(&argv("bohay wait output 3 --match done --timeout 5")).unwrap();
+        assert_eq!(s.pane, "3");
+        assert_eq!(s.timeout, Some(5.0));
+        assert_eq!(
+            s.condition,
+            WaitFor::Output {
+                needle: "done".into()
+            }
+        );
+
+        let s = parse_wait(&argv("bohay wait agent-status 7 --status blocked")).unwrap();
+        assert_eq!(s.pane, "7");
+        assert_eq!(s.timeout, None);
+        assert_eq!(
+            s.condition,
+            WaitFor::AgentStatus {
+                status: "blocked".into()
+            }
+        );
+
+        // missing --match is an error
+        assert!(parse_wait(&argv("bohay wait output 3")).is_err());
+        // pane id falls back to $BOHAY_PANE_ID
+        std::env::set_var("BOHAY_PANE_ID", "9");
+        let s = parse_wait(&argv("bohay wait output --match hi")).unwrap();
+        assert_eq!(s.pane, "9");
+        std::env::remove_var("BOHAY_PANE_ID");
+    }
+
+    #[test]
     fn maps_git_commands() {
         let (m, _) = parse(&argv("bohay git status")).unwrap();
         assert_eq!(m, "git.status");
@@ -534,5 +740,20 @@ mod tests {
         let (m, p) = parse(&argv("bohay git open 2")).unwrap();
         assert_eq!(m, "git.open");
         assert_eq!(p.get("node").and_then(|v| v.as_str()), Some("2"));
+    }
+
+    #[test]
+    fn maps_worktree_commands() {
+        let (m, _) = parse(&argv("bohay worktree list")).unwrap();
+        assert_eq!(m, "worktree.list");
+        let (m, p) = parse(&argv("bohay worktree create feature/x")).unwrap();
+        assert_eq!(m, "worktree.create");
+        assert_eq!(p.get("branch").and_then(|v| v.as_str()), Some("feature/x"));
+        let (m, p) = parse(&argv("bohay worktree open /tmp/wt")).unwrap();
+        assert_eq!(m, "worktree.open");
+        assert_eq!(p.get("path").and_then(|v| v.as_str()), Some("/tmp/wt"));
+        let (m, p) = parse(&argv("bohay worktree remove /tmp/wt")).unwrap();
+        assert_eq!(m, "worktree.remove");
+        assert_eq!(p.get("path").and_then(|v| v.as_str()), Some("/tmp/wt"));
     }
 }

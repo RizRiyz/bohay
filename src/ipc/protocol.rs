@@ -29,7 +29,11 @@ pub enum ServerMessage {
         version: u32,
         error: Option<String>,
     },
+    /// A full frame — sent first, on resize, and to a freshly-attached client.
     Frame(FrameData),
+    /// Only the cells that changed since the last frame (docs/18 — the wire-level
+    /// diff that keeps remote attach over SSH cheap; also cuts local serialization).
+    FrameDiff(FrameDiff),
     /// Ring the bell + raise a desktop notification on the client's terminal.
     Notify(String),
     /// Tell the client to detach (server keeps running).
@@ -39,7 +43,7 @@ pub enum ServerMessage {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct FrameData {
     pub width: u16,
     pub height: u16,
@@ -48,12 +52,86 @@ pub struct FrameData {
     pub cursor: Option<(u16, u16)>,
 }
 
+/// A sparse update sent instead of a full `FrameData` when the dimensions are
+/// unchanged: a list of [`DiffRun`]s (contiguous, same-style changed cells) plus
+/// the cursor. The run encoding shares one color/style across a stretch of text
+/// (the classic run-based terminal-update technique), so a line of output costs
+/// a couple of bytes per char, not the ~10 a per-cell diff would.
 #[derive(Serialize, Deserialize, Clone)]
+pub struct FrameDiff {
+    pub width: u16,
+    pub height: u16,
+    pub runs: Vec<DiffRun>,
+    pub cursor: Option<(u16, u16)>,
+}
+
+/// A maximal run of adjacent changed cells that share `fg`/`bg`/`mods`. `symbols`
+/// holds one entry per cell (kept separate, not concatenated, so grapheme/wide
+/// cells survive the round-trip).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DiffRun {
+    pub start: u32,
+    pub fg: u32,
+    pub bg: u32,
+    pub mods: u16,
+    pub symbols: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct CellData {
     pub symbol: String,
     pub fg: u32,
     pub bg: u32,
     pub mods: u16,
+}
+
+/// Changed cells of `new` vs `old` (assumed same dimensions), coalesced into
+/// same-style runs.
+pub fn diff_runs(old: &FrameData, new: &FrameData) -> Vec<DiffRun> {
+    let mut runs: Vec<DiffRun> = Vec::new();
+    for (i, (a, b)) in old.cells.iter().zip(&new.cells).enumerate() {
+        if a == b {
+            continue;
+        }
+        let i = i as u32;
+        // Extend the previous run if this cell is contiguous and same-style.
+        if let Some(run) = runs.last_mut() {
+            if run.start + run.symbols.len() as u32 == i
+                && run.fg == b.fg
+                && run.bg == b.bg
+                && run.mods == b.mods
+            {
+                run.symbols.push(b.symbol.clone());
+                continue;
+            }
+        }
+        runs.push(DiffRun {
+            start: i,
+            fg: b.fg,
+            bg: b.bg,
+            mods: b.mods,
+            symbols: vec![b.symbol.clone()],
+        });
+    }
+    runs
+}
+
+/// Apply a `FrameDiff` to `frame` in place (the client reconstructs the full
+/// frame so its blit path is unchanged).
+pub fn apply_diff(frame: &mut FrameData, diff: &FrameDiff) {
+    frame.width = diff.width;
+    frame.height = diff.height;
+    frame.cursor = diff.cursor;
+    for run in &diff.runs {
+        for (k, sym) in run.symbols.iter().enumerate() {
+            if let Some(slot) = frame.cells.get_mut(run.start as usize + k) {
+                slot.symbol = sym.clone();
+                slot.fg = run.fg;
+                slot.bg = run.bg;
+                slot.mods = run.mods;
+            }
+        }
+    }
 }
 
 // ── framing ─────────────────────────────────────────────────────────────────
@@ -242,6 +320,119 @@ mod tests {
     }
 
     #[test]
+    fn diff_and_apply_roundtrip() {
+        let cell = |s: &str| CellData {
+            symbol: s.into(),
+            fg: 0,
+            bg: 0,
+            mods: 0,
+        };
+        let old = FrameData {
+            width: 3,
+            height: 1,
+            cells: vec![cell("a"), cell("b"), cell("c")],
+            cursor: Some((0, 0)),
+        };
+        let mut new = old.clone();
+        new.cells[1] = cell("X"); // one cell changed
+        new.cursor = Some((1, 0));
+
+        let runs = diff_runs(&old, &new);
+        assert_eq!(runs.len(), 1, "one run for the single changed cell");
+        assert_eq!(runs[0].start, 1);
+        assert_eq!(runs[0].symbols, vec!["X".to_string()]);
+
+        // Applying the diff to `old` reconstructs `new` exactly.
+        let mut rebuilt = old.clone();
+        apply_diff(
+            &mut rebuilt,
+            &FrameDiff {
+                width: new.width,
+                height: new.height,
+                runs,
+                cursor: new.cursor,
+            },
+        );
+        assert!(rebuilt == new, "diff reconstructs the new frame");
+    }
+
+    #[test]
+    fn diff_coalesces_adjacent_same_style_into_one_run() {
+        let c = |s: &str, fg: u32| CellData {
+            symbol: s.into(),
+            fg,
+            bg: 0,
+            mods: 0,
+        };
+        let old = FrameData {
+            width: 5,
+            height: 1,
+            cells: vec![c(" ", 0), c(" ", 0), c(" ", 0), c(" ", 0), c(" ", 0)],
+            cursor: None,
+        };
+        let mut new = old.clone();
+        // "hi" same color at 1..3, then a different-color "X" at 3.
+        new.cells[1] = c("h", 7);
+        new.cells[2] = c("i", 7);
+        new.cells[3] = c("X", 9);
+        let runs = diff_runs(&old, &new);
+        assert_eq!(
+            runs.len(),
+            2,
+            "same-style cells coalesce; a new style breaks"
+        );
+        assert_eq!(runs[0].start, 1);
+        assert_eq!(runs[0].symbols, vec!["h".to_string(), "i".to_string()]);
+        assert_eq!(runs[1].symbols, vec!["X".to_string()]);
+    }
+
+    #[test]
+    fn client_reconstructs_a_frame_then_diff_stream_over_the_wire() {
+        // Models exactly what a client receives: a full Frame, then a FrameDiff —
+        // both serialized + deserialized, then applied like the client does.
+        let cell = |s: &str, fg: u32| CellData {
+            symbol: s.into(),
+            fg,
+            bg: 0,
+            mods: 0,
+        };
+        let f1 = FrameData {
+            width: 2,
+            height: 2,
+            cells: vec![cell("a", 1), cell("b", 2), cell("c", 3), cell("d", 4)],
+            cursor: Some((0, 0)),
+        };
+        let mut f2 = f1.clone();
+        f2.cells[3] = cell("Z", 9);
+        f2.cursor = Some((1, 1));
+
+        // Server side: full frame, then a diff.
+        let frame_msg = ServerMessage::Frame(f1.clone());
+        let diff_msg = ServerMessage::FrameDiff(FrameDiff {
+            width: f2.width,
+            height: f2.height,
+            runs: diff_runs(&f1, &f2),
+            cursor: f2.cursor,
+        });
+        let mut wire = Vec::new();
+        write_message(&mut wire, &frame_msg).unwrap();
+        write_message(&mut wire, &diff_msg).unwrap();
+
+        // Client side: read both, reconstruct.
+        let mut r = &wire[..];
+        let mut current = match read_message::<_, ServerMessage>(&mut r).unwrap() {
+            ServerMessage::Frame(f) => f,
+            _ => panic!("first message must be a full Frame"),
+        };
+        if let ServerMessage::FrameDiff(d) = read_message::<_, ServerMessage>(&mut r).unwrap() {
+            apply_diff(&mut current, &d);
+        } else {
+            panic!("expected a FrameDiff");
+        }
+        assert!(current == f2, "client reconstructs f2 from Frame + Diff");
+    }
+
+    #[test]
     fn downsample_to_256() {
         // near-black → a dark index (grayscale or cube corner), always Indexed.
         match to_256(Color::Rgb(0x11, 0x11, 0x16)) {
@@ -255,5 +446,89 @@ mod tests {
         // Already-indexed and reset pass through unchanged.
         assert_eq!(to_256(Color::Indexed(5)), Color::Indexed(5));
         assert_eq!(to_256(Color::Reset), Color::Reset);
+    }
+}
+
+#[cfg(test)]
+mod size_probe {
+    use super::*;
+    use ratatui::style::Color;
+
+    fn cell(s: &str, fg: Color) -> CellData {
+        CellData {
+            symbol: s.into(),
+            fg: pack(fg),
+            bg: pack(Color::Reset),
+            mods: 0,
+        }
+    }
+    fn full_frame(w: u16, h: u16) -> FrameData {
+        let mut cells = Vec::new();
+        for _ in 0..(w as usize * h as usize) {
+            cells.push(cell(" ", Color::Reset));
+        }
+        FrameData {
+            width: w,
+            height: h,
+            cells,
+            cursor: Some((0, 0)),
+        }
+    }
+    fn ser(m: &ServerMessage) -> usize {
+        let mut b = Vec::new();
+        write_message(&mut b, m).unwrap();
+        b.len()
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_wire_sizes() {
+        let f0 = full_frame(120, 32);
+        let full = ser(&ServerMessage::Frame(f0.clone()));
+        // simulate typing one char
+        let mut f1 = f0.clone();
+        f1.cells[100] = cell("a", Color::Rgb(200, 255, 26));
+        f1.cursor = Some((1, 0));
+        let d1 = ser(&ServerMessage::FrameDiff(FrameDiff {
+            width: 120,
+            height: 32,
+            runs: diff_runs(&f0, &f1),
+            cursor: f1.cursor,
+        }));
+        // simulate a line of output: 40 chars, same color
+        let mut f2 = f0.clone();
+        for i in 0..40 {
+            f2.cells[200 + i] = cell("x", Color::Rgb(200, 255, 26));
+        }
+        let d2 = ser(&ServerMessage::FrameDiff(FrameDiff {
+            width: 120,
+            height: 32,
+            runs: diff_runs(&f0, &f2),
+            cursor: Some((40, 1)),
+        }));
+        // a full-screen redraw of same-colored text (worst streaming case)
+        let mut f3 = f0.clone();
+        for c in f3.cells.iter_mut() {
+            *c = cell("#", Color::Rgb(200, 255, 26));
+        }
+        let d3 = ser(&ServerMessage::FrameDiff(FrameDiff {
+            width: 120,
+            height: 32,
+            runs: diff_runs(&f0, &f3),
+            cursor: Some((0, 0)),
+        }));
+        println!("FULL frame (120x32)      : {full} bytes");
+        println!(
+            "DIFF, 1 char typed       : {d1} bytes  ({}x smaller)",
+            full / d1.max(1)
+        );
+        println!(
+            "DIFF, 40-char line       : {d2} bytes  ({}x smaller)",
+            full / d2.max(1)
+        );
+        println!(
+            "DIFF, full-screen redraw : {d3} bytes  ({}x smaller)",
+            full / d3.max(1)
+        );
     }
 }

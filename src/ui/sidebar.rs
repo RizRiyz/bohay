@@ -183,16 +183,26 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
         } else {
             Style::new().fg(t.subtext1)
         };
+        // Worktree grouping (docs/18 WT-4): a node sharing its repo's common dir
+        // with an earlier node is a sibling checkout — nest it with a connector.
+        let is_member = ws.worktree.as_ref().is_some_and(|m| {
+            app.workspaces[..i]
+                .iter()
+                .any(|w| w.worktree.as_ref().map(|o| &o.common_dir) == Some(&m.common_dir))
+        });
+        let indent: u16 = if is_member { 2 } else { 0 };
         // Row 1: state dot + node name + git branch (dot aligned with "NODES").
-        let mut line1 = vec![
-            Span::styled(st.dot(), Style::new().fg(st.color(t))),
-            Span::raw(" "),
-            Span::styled(ws.name.clone(), name_style),
-        ];
+        let mut line1: Vec<Span> = Vec::new();
+        if is_member {
+            line1.push(Span::styled("└ ", Style::new().fg(t.overlay0)));
+        }
+        line1.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
+        line1.push(Span::raw(" "));
+        line1.push(Span::styled(ws.name.clone(), name_style));
         if let Some(b) = &ws.branch {
             // Record the branch text as a clickable rect (opens the git tab).
             let name_w = ws.name.chars().count() as u16;
-            let bx = cx + 2 + name_w;
+            let bx = cx + 2 + indent + name_w;
             let bw = 2 + b.chars().count() as u16;
             if bx < area.right() {
                 let bw = bw.min(area.right().saturating_sub(bx));
@@ -213,12 +223,17 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
             }
         }
         line_at(f, y, Line::from(line1));
-        // Row 2: the project path, indented under the name.
+        // Row 2: the project path, indented under the name (extra for members).
+        let pad = 2 + indent as usize;
         line_at(
             f,
             y + 1,
             Line::from(Span::styled(
-                format!("  {}", short_path(&ws.cwd, cw.saturating_sub(2))),
+                format!(
+                    "{}{}",
+                    " ".repeat(pad),
+                    short_path(&ws.cwd, cw.saturating_sub(pad as u16))
+                ),
                 Style::new().fg(if active { t.subtext0 } else { t.overlay0 }),
             )),
         );

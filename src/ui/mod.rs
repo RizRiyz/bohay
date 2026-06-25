@@ -140,12 +140,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if app.help_open {
         help::draw_help(f, area, app, &t);
     }
+    // The new-worktree branch prompt (docs/18 WT).
+    if let Some(buf) = &app.worktree_prompt {
+        picker::draw_worktree_prompt(f, area, buf, app.worktree_error.as_deref(), &t);
+    }
 
-    let cursor = if settings_hits.is_some() || picker_open || app.help_open {
-        None
-    } else {
-        cursor
-    };
+    let cursor =
+        if settings_hits.is_some() || picker_open || app.help_open || app.worktree_prompt.is_some()
+        {
+            None
+        } else {
+            cursor
+        };
     if let Some(p) = cursor {
         f.set_cursor_position(p);
     }

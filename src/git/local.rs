@@ -2,10 +2,10 @@
 //! No new dependency (same spirit as `module/discovery.rs`). Every function
 //! returns owned data or a short error string; the caller renders it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::model::{BranchInfo, Commit, Contributor, FileChange, RepoInfo, RepoStatus};
+use super::model::{BranchInfo, Commit, Contributor, FileChange, RepoInfo, RepoStatus, Worktree};
 
 /// Run `git <args>` in `cwd`, returning stdout (trimmed of a trailing newline).
 fn run(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -25,6 +25,74 @@ pub fn is_repo(cwd: &Path) -> bool {
     run(cwd, &["rev-parse", "--is-inside-work-tree"])
         .map(|s| s.trim() == "true")
         .unwrap_or(false)
+}
+
+// ── worktrees (docs/18 WT-1) ────────────────────────────────────────────────
+
+/// The git **common dir** for `cwd` (the shared `.git`), absolute. All worktrees
+/// of one repo share this, so it's the grouping key.
+pub fn common_dir(cwd: &Path) -> Option<PathBuf> {
+    let raw = run(cwd, &["rev-parse", "--git-common-dir"]).ok()?;
+    let p = PathBuf::from(raw.trim());
+    let abs = if p.is_absolute() { p } else { cwd.join(p) };
+    Some(std::fs::canonicalize(&abs).unwrap_or(abs))
+}
+
+/// All worktrees of the repo containing `cwd` (`git worktree list --porcelain`).
+pub fn worktrees(cwd: &Path) -> Result<Vec<Worktree>, String> {
+    Ok(parse_worktrees(&run(
+        cwd,
+        &["worktree", "list", "--porcelain"],
+    )?))
+}
+
+fn parse_worktrees(raw: &str) -> Vec<Worktree> {
+    let mut out: Vec<Worktree> = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut head = String::new();
+    let mut branch: Option<String> = None;
+    let flush = |path: &mut Option<PathBuf>,
+                 head: &mut String,
+                 branch: &mut Option<String>,
+                 out: &mut Vec<Worktree>| {
+        if let Some(p) = path.take() {
+            let is_main = out.is_empty(); // the main worktree is listed first
+            out.push(Worktree {
+                path: p,
+                branch: branch.take(),
+                head: std::mem::take(head),
+                is_main,
+            });
+        }
+    };
+    for line in raw.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            // A new block; flush the previous one (handles missing blank lines).
+            flush(&mut path, &mut head, &mut branch, &mut out);
+            path = Some(PathBuf::from(p));
+        } else if let Some(h) = line.strip_prefix("HEAD ") {
+            head = h.to_string();
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        }
+        // `bare`, `detached`, `locked`, … are ignored (branch stays None).
+    }
+    flush(&mut path, &mut head, &mut branch, &mut out);
+    out
+}
+
+/// `git worktree add` — create a worktree at `path` on `branch` (new branch from
+/// HEAD, or check out the branch if it already exists).
+pub fn worktree_add(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
+    let ps = path.to_string_lossy().to_string();
+    run(repo, &["worktree", "add", "-b", branch, &ps])
+        .or_else(|_| run(repo, &["worktree", "add", &ps, branch]))
+        .map(|_| ())
+}
+
+/// `git worktree remove <path>` — detach a worktree (its branch is untouched).
+pub fn worktree_remove(repo: &Path, path: &Path) -> Result<(), String> {
+    run(repo, &["worktree", "remove", &path.to_string_lossy()]).map(|_| ())
 }
 
 /// Branch + ahead/behind + working-tree changes + stashes.
@@ -282,5 +350,73 @@ mod tests {
         assert_eq!(c[0].name, "Ada");
         assert_eq!(c[0].email, "ada@x.com");
         assert_eq!(c[0].commits, 8);
+    }
+
+    #[test]
+    fn parses_worktree_porcelain() {
+        let out = "\
+worktree /repo/main
+HEAD aaaa1111
+branch refs/heads/main
+
+worktree /repo/../wt-feature
+HEAD bbbb2222
+branch refs/heads/feature
+
+worktree /repo/detached
+HEAD cccc3333
+detached
+";
+        let wts = parse_worktrees(out);
+        assert_eq!(wts.len(), 3);
+        assert!(wts[0].is_main, "first listed worktree is the main one");
+        assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert_eq!(wts[1].branch.as_deref(), Some("feature"));
+        assert!(!wts[1].is_main);
+        assert_eq!(wts[2].branch, None, "detached worktree has no branch");
+        assert_eq!(wts[2].head, "cccc3333");
+    }
+
+    #[test]
+    fn worktree_and_repo_share_common_dir() {
+        // A repo and a worktree of it resolve to the same git common dir — the
+        // grouping key the sidebar nests on (docs/18 WT).
+        let base = std::env::temp_dir().join(format!("bohay-wtcommon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        let wt = base.join("wt");
+        git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+        );
+
+        let a = common_dir(&repo);
+        let b = common_dir(&wt);
+        assert!(a.is_some(), "repo has a common dir");
+        assert_eq!(a, b, "the worktree shares the repo's common dir");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

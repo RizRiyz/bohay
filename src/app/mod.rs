@@ -30,7 +30,7 @@ mod picker;
 mod settings;
 
 pub use keys::Cmd;
-pub use picker::FolderPicker;
+pub use picker::{FolderPicker, Row};
 pub use settings::{SettingsTab, SettingsUi};
 
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
@@ -74,6 +74,9 @@ pub struct Workspace {
     pub branch: Option<String>,
     /// Ahead/behind upstream, set when this node's git tab fetches status (docs/17).
     pub git_ahead_behind: Option<(u32, u32)>,
+    /// Worktree grouping (docs/18 WT): present for any node inside a git repo;
+    /// nodes sharing a `common_dir` are checkouts of one repo and group together.
+    pub worktree: Option<crate::git::WorktreeMembership>,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
 }
@@ -134,6 +137,15 @@ pub struct App {
     pub picker_rects: Vec<(usize, Rect)>,
     /// Whether the keyboard-shortcut cheat-sheet overlay is open (`Ctrl+Space ?`).
     pub help_open: bool,
+    /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
+    /// open, holding the branch being typed.
+    pub worktree_prompt: Option<String>,
+    /// The repo the pending worktree is created in — the active node's folder
+    /// (`Ctrl+Space G`) or the folder browsed in the picker (`w`).
+    pub worktree_repo: Option<PathBuf>,
+    /// The last worktree-create error (e.g. branch already checked out), shown in
+    /// the prompt so a failed create isn't silent. Cleared when the user edits.
+    pub worktree_error: Option<String>,
     pub mode: Mode,
     pub sidebar_visible: bool,
     /// Sidebar width in columns (customizable; see `set_sidebar_width`).
@@ -238,6 +250,7 @@ impl App {
             status,
             workspaces: vec![Workspace {
                 name,
+                worktree: worktree_membership(&cwd),
                 cwd,
                 branch: None,
                 git_ahead_behind: None,
@@ -252,6 +265,9 @@ impl App {
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
+            worktree_prompt: None,
+            worktree_repo: None,
+            worktree_error: None,
             mode: Mode::Normal,
             sidebar_visible: true,
             sidebar_width,
@@ -397,6 +413,7 @@ impl App {
             let active_tab = ws.active_tab.min(tabs.len() - 1);
             workspaces.push(Workspace {
                 name: ws.name,
+                worktree: worktree_membership(&ws.cwd),
                 cwd: ws.cwd,
                 branch: None,
                 git_ahead_behind: None,
@@ -425,6 +442,9 @@ impl App {
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
+            worktree_prompt: None,
+            worktree_repo: None,
+            worktree_error: None,
             mode: Mode::Normal,
             sidebar_visible: true,
             sidebar_width,
@@ -575,6 +595,7 @@ impl App {
         if let Some(id) = self.spawn_into(cwd.clone()) {
             self.workspaces.push(Workspace {
                 name,
+                worktree: worktree_membership(&cwd),
                 cwd,
                 branch,
                 git_ahead_behind: None,
@@ -587,6 +608,103 @@ impl App {
                 "node.created",
                 serde_json::json!({"node": node.to_string()}),
             );
+        }
+    }
+
+    /// Create a git worktree for `branch` off `repo` and open it as a node
+    /// (docs/18 WT). Laid out **nested by repo** —
+    /// `~/.bohay/worktrees/<repo>/<branch>` — so checkouts don't clutter the repo
+    /// and stay readable, with a numeric suffix if that path is taken (two repos
+    /// of the same name, or `feat/x` vs `feat-x` both slugging to `feat-x`).
+    /// Returns the new worktree path.
+    pub fn create_worktree(
+        &mut self,
+        repo: &std::path::Path,
+        branch: &str,
+    ) -> Result<PathBuf, String> {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            return Err("a branch name is required".into());
+        }
+        if !crate::git::local::is_repo(repo) {
+            return Err("not a git repository".into());
+        }
+        // Nest under the **main** worktree's name, so every checkout of one repo
+        // groups under a single folder even when you branch off another worktree.
+        let repo_name = crate::git::local::worktrees(repo)
+            .ok()
+            .and_then(|wts| {
+                wts.into_iter()
+                    .find(|w| w.is_main)
+                    .map(|w| ws_name(&w.path))
+            })
+            .unwrap_or_else(|| ws_name(repo));
+        let base = persist::config_dir().join("worktrees").join(repo_name);
+        let _ = std::fs::create_dir_all(&base);
+        // `git worktree add` requires the target not to exist, so pick the first
+        // free `<branch>` / `<branch>-2` / `<branch>-3` … under the repo folder.
+        let slug = branch.replace(['/', ' '], "-");
+        let mut path = base.join(&slug);
+        let mut n = 2;
+        while path.exists() {
+            path = base.join(format!("{slug}-{n}"));
+            n += 1;
+        }
+        crate::git::local::worktree_add(repo, &path, branch)?;
+        self.create_workspace_at(path.clone());
+        Ok(path)
+    }
+
+    /// Open the new-worktree branch prompt (`Ctrl+Space G`) for the active node,
+    /// if it's a git repo (worktrees only make sense inside one).
+    pub fn open_worktree_prompt(&mut self) {
+        let cwd = self.ws().cwd.clone();
+        if crate::git::local::is_repo(&cwd) {
+            self.worktree_repo = Some(cwd);
+            self.worktree_prompt = Some(String::new());
+        }
+    }
+
+    /// Key handling while the new-worktree prompt is open.
+    pub fn handle_worktree_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.worktree_prompt = None;
+                self.worktree_repo = None;
+                self.worktree_error = None;
+            }
+            KeyCode::Enter => {
+                let branch = self.worktree_prompt.clone().unwrap_or_default();
+                if let Some(repo) = self.worktree_repo.clone() {
+                    match self.create_worktree(&repo, &branch) {
+                        Ok(_) => {
+                            // Success: close the prompt; the new node is focused.
+                            self.worktree_prompt = None;
+                            self.worktree_repo = None;
+                            self.worktree_error = None;
+                        }
+                        // Failure (branch already checked out, dirty tree, empty
+                        // name…): keep the prompt open and show why, so it's never
+                        // a silent no-op.
+                        Err(e) => self.worktree_error = Some(e),
+                    }
+                } else {
+                    self.worktree_prompt = None;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(b) = self.worktree_prompt.as_mut() {
+                    b.pop();
+                }
+                self.worktree_error = None;
+            }
+            KeyCode::Char(c) => {
+                if let Some(b) = self.worktree_prompt.as_mut() {
+                    b.push(c);
+                }
+                self.worktree_error = None;
+            }
+            _ => {}
         }
     }
 
@@ -701,6 +819,7 @@ impl App {
                 cwd: s.cwd.clone(),
                 branch,
                 git_ahead_behind: None,
+                worktree: worktree_membership(&s.cwd),
                 tabs: vec![tab],
                 active_tab: 0,
             });
@@ -848,6 +967,13 @@ fn ws_name(cwd: &std::path::Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("workspace")
         .to_string()
+}
+
+/// Worktree grouping for a node at `cwd` (docs/18 WT): its git common dir, if
+/// `cwd` is inside a repo. Nodes that share one group together in the sidebar.
+fn worktree_membership(cwd: &std::path::Path) -> Option<crate::git::WorktreeMembership> {
+    crate::git::local::common_dir(cwd)
+        .map(|common_dir| crate::git::WorktreeMembership { common_dir })
 }
 
 /// Re-spawn a saved module pane if its module is still installed + runnable;
@@ -1057,6 +1183,87 @@ mod tests {
         app.handle_event(key('X', KeyModifiers::NONE)); // close the tab's only pane → tab drops
         assert_eq!(app.ws().tabs.len(), 1);
         assert!(app.panes.len() < before);
+    }
+
+    #[test]
+    fn picker_w_creates_a_worktree_only_on_a_repo() {
+        let mk = |path: &str, is_repo: bool| crate::app::FolderPicker {
+            path: std::path::PathBuf::from(path),
+            entries: Vec::new(),
+            cursor: 0,
+            creating: None,
+            error: None,
+            is_repo,
+        };
+
+        // On a git repo: `w` closes the picker and opens the branch prompt,
+        // targeting the browsed folder.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.picker = Some(mk("/tmp/some-repo", true));
+        app.handle_picker_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert!(app.picker.is_none(), "picker closes");
+        assert!(app.worktree_prompt.is_some(), "branch prompt opens");
+        assert_eq!(
+            app.worktree_repo,
+            Some(std::path::PathBuf::from("/tmp/some-repo"))
+        );
+
+        // On a plain folder: `w` is inert.
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let mut app2 = App::new(80, 24, tx2).unwrap();
+        app2.picker = Some(mk("/tmp/plain", false));
+        app2.handle_picker_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert!(app2.picker.is_some(), "non-repo: picker stays open");
+        assert!(app2.worktree_prompt.is_none(), "non-repo: no prompt");
+    }
+
+    #[test]
+    fn worktree_prompt_surfaces_errors_instead_of_silently_failing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // A non-repo target → create_worktree fails at the is_repo check.
+        app.worktree_repo = Some(std::path::PathBuf::from("/definitely/not/a/repo"));
+        app.worktree_prompt = Some("feature".to_string());
+
+        app.handle_worktree_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.worktree_error.is_some(),
+            "the failure is shown, not swallowed"
+        );
+        assert!(
+            app.worktree_prompt.is_some(),
+            "prompt stays open so you can retry"
+        );
+        assert!(
+            app.worktree_repo.is_some(),
+            "target repo is retained for the retry"
+        );
+
+        // Editing the branch clears the stale error.
+        app.handle_worktree_prompt_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.worktree_error.is_none(), "editing clears the error");
+
+        // Esc tears the whole prompt down.
+        app.handle_worktree_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_prompt.is_none() && app.worktree_repo.is_none());
+    }
+
+    #[test]
+    fn closing_last_pane_quits_and_ignores_further_events() {
+        // Closing the last pane empties `workspaces` and sets `should_quit`; the
+        // server loop drains the rest of the event batch before checking that
+        // flag, so late events must be no-ops, not panics on an empty Vec.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        app.handle_event(AppEvent::PtyExit(id)); // the only pane's shell exits
+        assert!(app.should_quit, "closing the last pane quits the session");
+        assert!(app.workspaces.is_empty());
+        // Late events in the same batch must not panic.
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('c', KeyModifiers::NONE));
+        app.handle_event(AppEvent::PtyExit(id));
     }
 
     #[test]

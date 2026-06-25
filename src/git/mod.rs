@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use github::GhState;
 pub use model::Checks;
+pub use model::WorktreeMembership;
 use model::{BranchInfo, Commit, Issue, PullRequest, RepoInfo, RepoStatus};
 
 /// Which section of the git tab is shown.
