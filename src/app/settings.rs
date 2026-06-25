@@ -11,15 +11,17 @@ pub enum SettingsTab {
     Theme,
     Layout,
     Notifications,
+    Keys,
     Modules,
     Integrations,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 5] = [
+    pub const ALL: [SettingsTab; 6] = [
         SettingsTab::Theme,
         SettingsTab::Layout,
         SettingsTab::Notifications,
+        SettingsTab::Keys,
         SettingsTab::Modules,
         SettingsTab::Integrations,
     ];
@@ -29,6 +31,7 @@ impl SettingsTab {
             SettingsTab::Theme => "◑",
             SettingsTab::Layout => "▦",
             SettingsTab::Notifications => "◔",
+            SettingsTab::Keys => "⌨",
             SettingsTab::Modules => "❏",
             SettingsTab::Integrations => "⌁",
         }
@@ -39,6 +42,7 @@ impl SettingsTab {
             SettingsTab::Theme => "Theme",
             SettingsTab::Layout => "Layout",
             SettingsTab::Notifications => "Notify",
+            SettingsTab::Keys => "Keys",
             SettingsTab::Modules => "Modules",
             SettingsTab::Integrations => "Agents",
         }
@@ -57,6 +61,8 @@ impl SettingsTab {
 pub struct SettingsUi {
     pub tab: SettingsTab,
     pub cursor: usize,
+    /// In the Keys tab: capturing the next key press to rebind `cursor`'s command.
+    pub capturing: bool,
 }
 
 /// Pane-Layout control rows. The Shell picker (row 5) is Windows-only — on Unix
@@ -72,6 +78,7 @@ impl App {
         self.settings = Some(SettingsUi {
             tab: SettingsTab::Theme,
             cursor,
+            capturing: false,
         });
     }
 
@@ -85,25 +92,51 @@ impl App {
             SettingsTab::Theme => theme::THEMES.len(),
             SettingsTab::Layout => LAYOUT_ROWS,
             SettingsTab::Notifications => 4,
+            SettingsTab::Keys => crate::app::Cmd::ALL.len(),
             SettingsTab::Modules => self.modules.modules.len(),
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
         }
     }
 
     pub fn handle_settings_key(&mut self, key: KeyEvent) {
-        let Some(&SettingsUi { tab, cursor }) = self.settings.as_ref() else {
+        let Some(&SettingsUi {
+            tab,
+            cursor,
+            capturing,
+        }) = self.settings.as_ref()
+        else {
             return;
         };
+        // Keys tab: while capturing, the next key press *is* the new binding
+        // (Esc cancels). This must intercept before the normal handling so keys
+        // like Tab / digits can themselves be bound.
+        if capturing {
+            if key.code != KeyCode::Esc {
+                if let Some(s) = keys::key_string(&key) {
+                    self.rebind(Self::keys_cmd_at(cursor), s);
+                }
+            }
+            if let Some(ui) = self.settings.as_mut() {
+                ui.capturing = false;
+            }
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.close_settings(),
             KeyCode::Tab => self.settings_set_tab(SettingsTab::from_index(tab.index() + 1)),
-            KeyCode::BackTab => self.settings_set_tab(SettingsTab::from_index(tab.index() + 4)),
+            KeyCode::BackTab => self.settings_set_tab(SettingsTab::from_index(
+                tab.index() + SettingsTab::ALL.len() - 1,
+            )),
             KeyCode::Up => self.settings_move(-1),
             KeyCode::Down => self.settings_move(1),
             KeyCode::Left => self.settings_adjust(cursor, -1),
             KeyCode::Right => self.settings_adjust(cursor, 1),
             KeyCode::Enter | KeyCode::Char(' ') => self.settings_activate(cursor),
-            KeyCode::Char(c) if ('1'..='5').contains(&c) => {
+            // In the Keys tab, Backspace/Delete resets a binding to its default.
+            KeyCode::Backspace | KeyCode::Delete if tab == SettingsTab::Keys => {
+                self.reset_binding(Self::keys_cmd_at(cursor));
+            }
+            KeyCode::Char(c) if ('1'..='6').contains(&c) => {
                 self.settings_set_tab(SettingsTab::from_index(c as usize - '1' as usize));
             }
             _ => {}
@@ -176,7 +209,7 @@ impl App {
     }
 
     fn settings_move(&mut self, delta: i32) {
-        let Some(&SettingsUi { tab, cursor }) = self.settings.as_ref() else {
+        let Some(&SettingsUi { tab, cursor, .. }) = self.settings.as_ref() else {
             return;
         };
         let rows = self.settings_rows(tab);
@@ -202,6 +235,7 @@ impl App {
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
             SettingsTab::Notifications if cursor < 3 => self.toggle_notify(cursor),
             SettingsTab::Notifications => {} // the Test row only reacts to Enter/click
+            SettingsTab::Keys => {}          // rebind is Enter (capture), not ‹ ›
             SettingsTab::Integrations => self.settings_activate(cursor),
             SettingsTab::Modules => self.toggle_module(cursor),
         }
@@ -218,9 +252,21 @@ impl App {
             SettingsTab::Layout => self.adjust_layout(cursor, 1),
             SettingsTab::Notifications if cursor == 3 => self.test_notification(),
             SettingsTab::Notifications => self.toggle_notify(cursor),
+            // Enter on a Keys row starts capturing the next key as its binding.
+            SettingsTab::Keys => {
+                if let Some(ui) = self.settings.as_mut() {
+                    ui.capturing = true;
+                }
+            }
             SettingsTab::Integrations => self.install_integration(cursor),
             SettingsTab::Modules => self.toggle_module(cursor),
         }
+    }
+
+    /// The command at row `cursor` in the Keys tab.
+    fn keys_cmd_at(cursor: usize) -> crate::app::Cmd {
+        let all = crate::app::Cmd::ALL;
+        all[cursor.min(all.len() - 1)]
     }
 
     /// Enable/disable the module at `cursor` in the Modules tab.

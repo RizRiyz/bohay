@@ -347,31 +347,54 @@ fn draw_footer(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
         );
         return;
     }
-    let hint = match g.section {
-        Section::Prs => format!(
-            "j/k · ⏎ checkout · d diff · o open · m {} · c new · / filter · q close",
-            g.scope.label()
-        ),
-        Section::Issues => format!(
-            "j/k · ⏎ view · o open · m {} · / filter · r refresh · q close",
-            g.scope.label()
-        ),
-        Section::Branches => {
-            "j/k · ⏎ checkout · d log · / filter · click a tab · r refresh · q close".to_string()
-        }
-        Section::Commits => {
-            "j/k · ⏎ show · / filter · click a tab to switch · r refresh · q close".to_string()
-        }
-        Section::Flow => "j/k scroll · click a tab to switch · r refresh · q close".to_string(),
-        Section::Status => "j/k scroll · click a tab · r refresh · q close".to_string(),
+    // Per-section hints as (key, label) pairs — the shared `hint_line` colors
+    // the keys with the theme accent and the labels in light text.
+    let scope = g.scope.label();
+    let pairs: Vec<(&str, &str)> = match g.section {
+        Section::Prs => vec![
+            ("j/k", "move"),
+            ("⏎", "checkout"),
+            ("d", "diff"),
+            ("o", "open"),
+            ("m", scope),
+            ("c", "new"),
+            ("/", "filter"),
+            ("q", "close"),
+        ],
+        Section::Issues => vec![
+            ("j/k", "move"),
+            ("⏎", "view"),
+            ("o", "open"),
+            ("m", scope),
+            ("/", "filter"),
+            ("r", "refresh"),
+            ("q", "close"),
+        ],
+        Section::Branches => vec![
+            ("j/k", "move"),
+            ("⏎", "checkout"),
+            ("d", "log"),
+            ("/", "filter"),
+            ("click", "tab"),
+            ("r", "refresh"),
+            ("q", "close"),
+        ],
+        Section::Commits => vec![
+            ("j/k", "move"),
+            ("⏎", "show"),
+            ("/", "filter"),
+            ("click", "tab"),
+            ("r", "refresh"),
+            ("q", "close"),
+        ],
+        Section::Flow | Section::Status => vec![
+            ("j/k", "scroll"),
+            ("click", "tab"),
+            ("r", "refresh"),
+            ("q", "close"),
+        ],
     };
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            format!(" {hint}"),
-            Style::new().fg(t.overlay0),
-        )),
-        area,
-    );
+    f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
 }
 
 fn draw_branches(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {

@@ -6,7 +6,6 @@ use std::path::Path;
 use std::thread;
 
 use anyhow::{anyhow, Result};
-use ratatui::crossterm::cursor::Hide;
 use ratatui::crossterm::event::{
     read as read_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
     EnableMouseCapture, Event,
@@ -86,13 +85,10 @@ fn input_loop(mut writer: Conn) {
 
 fn blit(terminal: &mut DefaultTerminal, frame: &FrameData, truecolor: bool) -> Result<()> {
     let adjust = |c| if truecolor { c } else { protocol::to_256(c) };
-    // Hide the cursor before the diff is written. ratatui flushes the changed
-    // cells *before* it repositions the cursor, so an on-screen cursor would
-    // visibly dart across every cell it writes — barely noticeable for a small
-    // update, but a full-screen flicker when many panes change at once (e.g. a
-    // multi-agent session restore). ratatui re-shows it at the focus position
-    // at the end of the draw.
-    let _ = execute!(std::io::stdout(), Hide);
+    // Don't touch the cursor here: ratatui shows + positions it once per draw.
+    // An extra per-frame `Hide` (added later) hid then re-showed the cursor on
+    // every frame, so any activity flickered it — this matches the original
+    // (smooth) blit, which never hid the cursor.
     terminal.draw(|f| {
         let area = f.area();
         let buf = f.buffer_mut();

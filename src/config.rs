@@ -28,6 +28,10 @@ pub struct Config {
     pub layout: LayoutConfig,
     #[serde(default)]
     pub notifications: NotifyConfig,
+    /// Custom keybindings: command id → key string (overrides the defaults).
+    /// An empty value means the command is explicitly unbound.
+    #[serde(default)]
+    pub keybindings: std::collections::HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -78,6 +82,7 @@ impl Default for Config {
             sidebar_width: default_sidebar_width(),
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
+            keybindings: std::collections::HashMap::new(),
         }
     }
 }

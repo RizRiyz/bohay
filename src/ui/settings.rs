@@ -81,14 +81,28 @@ pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> 
     );
     let (ctls, arrows) = draw_content(f, content, tab, cursor, app, t);
 
-    // ── footer hint ──
+    // ── footer hint (Keys tab gets its own rebind/reset hints) ──
     let footer_y = inner.bottom().saturating_sub(1);
     hline(f, inner.x, footer_y.saturating_sub(1), inner.width, t);
+    let hints: &[(&str, &str)] = if tab == SettingsTab::Keys {
+        &[
+            ("↑↓", "move"),
+            ("⇥", "section"),
+            ("⏎", "rebind"),
+            ("⌫", "reset"),
+            ("esc", "close"),
+        ]
+    } else {
+        &[
+            ("↑↓", "move"),
+            ("⇥", "tab"),
+            ("←→", "adjust"),
+            ("⏎", "apply"),
+            ("esc", "close"),
+        ]
+    };
     f.render_widget(
-        Paragraph::new(Span::styled(
-            " ↑↓ move   ⇥ tab   ←→ adjust   ⏎ apply   esc close",
-            Style::new().fg(t.overlay0),
-        )),
+        Paragraph::new(hint_line(hints, t)),
         Rect::new(inner.x, footer_y, inner.width, 1),
     );
 
@@ -115,24 +129,37 @@ fn draw_content(
     let mut arrows = Vec::new();
     match tab {
         SettingsTab::Theme => {
-            for (i, name) in theme::THEMES.iter().enumerate() {
-                let row = Rect::new(area.x, area.y + i as u16, area.width, 1);
-                if row.y >= area.bottom() {
-                    break;
-                }
+            // Scroll the list so the selected theme is always visible (there are
+            // more palettes than fit a short modal).
+            let avail = area.height.max(1) as usize;
+            let total = theme::THEMES.len();
+            let scroll = cursor
+                .saturating_sub(avail.saturating_sub(1))
+                .min(total.saturating_sub(avail));
+            for (vi, i) in (scroll..total).take(avail).enumerate() {
+                let name = theme::THEMES[i];
+                let row = Rect::new(area.x, area.y + vi as u16, area.width, 1);
                 let sel = i == cursor;
                 if sel {
                     fill_bg(f, row, t.sel_bg);
                 }
-                let pal = theme::by_name(name);
+                // One swatch — a solid block of the theme's *own* accent (its main
+                // color). `by_name` returns full RGB; downsample it to 256 when
+                // the active theme is (i.e. on non-truecolor terminals) so it
+                // renders the right color instead of a mangled truecolor escape.
+                let mut swatch = theme::by_name(name).accent;
+                if app.downsample {
+                    swatch = crate::ipc::protocol::to_256(swatch);
+                }
                 f.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled(if sel { " ▸ " } else { "   " }, Style::new().fg(t.accent)),
                         Span::styled(
-                            format!("{name:<7}"),
+                            format!("{name:<9}"),
                             Style::new().fg(if sel { t.text } else { t.subtext1 }),
                         ),
-                        Span::styled("███  ", Style::new().fg(pal.accent)),
+                        Span::styled("    ", Style::new().bg(swatch)),
+                        Span::raw("  "),
                         Span::styled(theme::describe(name), Style::new().fg(t.overlay0)),
                     ])),
                     row,
@@ -196,6 +223,68 @@ fn draw_content(
                     ))
                 };
                 ctls.push(ctl_row(f, area, i, cursor, agent, val, t));
+            }
+        }
+        SettingsTab::Keys => {
+            // Clarify that these are the keys pressed *after* the prefix — the
+            // `Ctrl+Space` chord itself stays fixed (tmux-style).
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("   These run after the ", Style::new().fg(t.overlay0)),
+                    Span::styled("Ctrl+Space", Style::new().fg(t.accent).bold()),
+                    Span::styled(" prefix.", Style::new().fg(t.overlay0)),
+                ])),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+            let area = Rect::new(
+                area.x,
+                area.y + 1,
+                area.width,
+                area.height.saturating_sub(1),
+            );
+            let capturing = app.settings.as_ref().is_some_and(|u| u.capturing);
+            let all = crate::app::Cmd::ALL;
+            let avail = area.height.max(1) as usize;
+            let total = all.len();
+            let scroll = cursor
+                .saturating_sub(avail.saturating_sub(1))
+                .min(total.saturating_sub(avail));
+            for (vi, i) in (scroll..total).take(avail).enumerate() {
+                let cmd = all[i];
+                let row = Rect::new(area.x, area.y + vi as u16, area.width, 1);
+                let sel = i == cursor;
+                if sel {
+                    fill_bg(f, row, t.sel_bg);
+                }
+                // The command label on the left…
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(if sel { " ▸ " } else { "   " }, Style::new().fg(t.accent)),
+                        Span::styled(
+                            cmd.label(),
+                            Style::new().fg(if sel { t.text } else { t.subtext1 }),
+                        ),
+                    ])),
+                    row,
+                );
+                // …its bound key on the right (accent), or a prompt while capturing.
+                let key = app.key_for(cmd);
+                let (txt, color) = if sel && capturing {
+                    ("press a key…".to_string(), t.coral)
+                } else if key.is_empty() {
+                    ("—".to_string(), t.overlay0) // unbound
+                } else {
+                    (key, t.accent)
+                };
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("{txt}  "),
+                        Style::new().fg(color).bold(),
+                    ))
+                    .alignment(Alignment::Right),
+                    row,
+                );
+                ctls.push((i, row));
             }
         }
         SettingsTab::Modules => {

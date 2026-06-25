@@ -17,7 +17,9 @@ use crate::ui::theme::{State, Theme};
 
 mod borders;
 mod git;
+mod help;
 mod panes;
+mod picker;
 mod settings;
 mod sidebar;
 mod status;
@@ -126,7 +128,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.settings_arrow_rects.clear();
     }
 
-    let cursor = if settings_hits.is_some() {
+    // The folder picker also draws last (over everything) when open.
+    let picker_open = app.picker.is_some();
+    let mut picker_rects = Vec::new();
+    if let Some(p) = &app.picker {
+        picker_rects = picker::draw_picker(f, area, p, &t);
+    }
+    app.picker_rects = picker_rects;
+
+    // The keyboard cheat-sheet overlay draws on top of everything.
+    if app.help_open {
+        help::draw_help(f, area, app, &t);
+    }
+
+    let cursor = if settings_hits.is_some() || picker_open || app.help_open {
         None
     } else {
         cursor
@@ -172,6 +187,30 @@ fn pane_inner(rect: Rect, bordered: bool) -> Option<Rect> {
 /// terminal content line up with the tab bar's left edge (`area.x + 1`) instead
 /// of touching the sidebar. Split panes get spacing from their borders instead.
 pub(super) const LONE_PANE_HPAD: u16 = 1;
+
+/// A footer hint line: each `(key, label)` rendered with the **key** in the
+/// theme accent and the **label** in light text, separated by a dim `·`. Shared
+/// by the modals (Settings / picker) and the git-tab footer. A pair with an
+/// empty label is a bare key (e.g. `j/k`).
+pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (key, label)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::new().fg(t.overlay0)));
+        }
+        spans.push(Span::styled(
+            key.to_string(),
+            Style::new().fg(t.accent).bold(),
+        ));
+        if !label.is_empty() {
+            spans.push(Span::styled(
+                format!(" {label}"),
+                Style::new().fg(t.subtext1),
+            ));
+        }
+    }
+    Line::from(spans)
+}
 
 /// The lone-pane horizontal pad, suppressed for panes too narrow to spare it.
 pub(super) fn lone_pad(width: u16) -> u16 {

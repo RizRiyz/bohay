@@ -36,11 +36,43 @@ impl App {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
+        // Any click dismisses the help overlay.
+        if self.help_open {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                self.help_open = false;
+            }
+            return;
+        }
         // While the Settings modal is open it owns the mouse: clicks hit the
         // modal (or dismiss it); everything else is swallowed.
         if self.settings.is_some() {
             if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                 self.handle_settings_click(m.column, m.row);
+            }
+            return;
+        }
+        // The folder picker likewise owns the mouse while open.
+        if self.picker.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let (c, r) = (m.column, m.row);
+                    let hit = self
+                        .picker_rects
+                        .iter()
+                        .find(|(_, rect)| {
+                            c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom()
+                        })
+                        .map(|(i, _)| *i);
+                    match hit {
+                        Some(i) => self.picker_click(i),
+                        None => self.close_folder_picker(), // click outside cancels
+                    }
+                }
+                // Wheel scrolls the browse list (moves the cursor, which the
+                // render keeps in view).
+                MouseEventKind::ScrollUp => self.picker_scroll(-1),
+                MouseEventKind::ScrollDown => self.picker_scroll(1),
+                _ => {}
             }
             return;
         }
@@ -120,7 +152,7 @@ impl App {
         }
         if let Some(rect) = self.new_ws_rect {
             if hit(rect) {
-                self.new_workspace();
+                self.open_folder_picker(); // "+" → choose a folder to open as a node
                 return;
             }
         }
@@ -190,9 +222,19 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        // The help cheat-sheet overlay swallows the next key press and closes.
+        if self.help_open {
+            self.help_open = false;
+            return;
+        }
         // The Settings modal captures all input while open.
         if self.settings.is_some() {
             self.handle_settings_key(key);
+            return;
+        }
+        // The folder picker captures all input while open.
+        if self.picker.is_some() {
+            self.handle_picker_key(key);
             return;
         }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the
@@ -215,37 +257,26 @@ impl App {
                     }
                     return;
                 }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('d') => self.detach_requested = true,
-                    KeyCode::Char('b') => self.sidebar_visible = !self.sidebar_visible,
-                    // `g` opens the git tab for the current node (docs/17).
-                    KeyCode::Char('g') => self.open_git_tab_active(),
-                    // `,` opens Settings (preferences), like many apps.
-                    KeyCode::Char(',') => self.open_settings(),
-                    // Splits: `v` puts the new pane to the right (vertical
-                    // divider), `s`/`-` puts it below (horizontal divider).
-                    KeyCode::Char('v') => self.split(Axis::Col),
-                    KeyCode::Char('s') | KeyCode::Char('-') => self.split(Axis::Row),
-                    // `x` or `X` closes the active pane (matches the ✕ button).
-                    KeyCode::Char('x') | KeyCode::Char('X') => self.close_pane(self.layout().focus),
-                    KeyCode::Char('z') => self.zoomed = !self.zoomed,
-                    KeyCode::Char('c') => self.new_tab(),
-                    KeyCode::Char('n') => self.cycle_tab(1),
-                    KeyCode::Char('p') => self.cycle_tab(-1),
-                    KeyCode::Char('N') => self.new_workspace(),
-                    KeyCode::Char('D') => {
-                        let i = self.active_ws;
-                        self.close_workspace(i);
+                // Fixed convenience keys (not rebindable): `1`–`9` jump to a tab,
+                // `?` opens the shortcut cheat-sheet.
+                if let KeyCode::Char(c) = key.code {
+                    if c.is_ascii_digit() && c != '0' {
+                        self.switch_tab(c as usize - '1' as usize);
+                        return;
                     }
-                    KeyCode::Char('w') => self.cycle_workspace(),
-                    KeyCode::Char('h') => self.focus_dir(Dir::Left),
-                    KeyCode::Char('j') => self.focus_dir(Dir::Down),
-                    KeyCode::Char('k') => self.focus_dir(Dir::Up),
-                    KeyCode::Char('l') => self.focus_dir(Dir::Right),
-                    KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                        self.switch_tab(c as usize - '1' as usize)
+                    if c == '?' {
+                        self.help_open = true;
+                        return;
                     }
-                    _ => {}
+                }
+                // Everything else resolves through the keybinding registry
+                // (defaults + user overrides; see `app/keys.rs`). `key_string`
+                // ignores modifiers, so the command key works whether you
+                // released Ctrl after the prefix (`Ctrl+Space` then `c`) or kept
+                // it held as a fast chord (`Ctrl+Space`+`Ctrl+c`).
+                if let Some(cmd) = keys::key_string(&key).and_then(|s| self.keymap.get(&s).copied())
+                {
+                    self.run_cmd(cmd);
                 }
             }
             Mode::Normal => {

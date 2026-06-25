@@ -638,9 +638,9 @@ command = ["sh", "-c", "sleep 5"]
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         app.open_settings();
         app.handle_event(AppEvent::Key(KeyEvent::new(
-            KeyCode::Char('4'),
+            KeyCode::Char('5'),
             KeyModifiers::NONE,
-        ))); // Modules
+        ))); // Modules (tab 5 after Theme/Layout/Notify/Keys)
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         assert_eq!(app.settings_ctl_rects.len(), 2, "one row per module");

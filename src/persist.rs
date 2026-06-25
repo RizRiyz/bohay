@@ -34,6 +34,9 @@ pub struct TabSnap {
     pub focus: u32,
     /// (raw pane id at save time → its cwd/command).
     pub panes: Vec<(u32, PaneSnap)>,
+    /// A git tab (docs/17) — restored as the dashboard (no panes), re-fetched.
+    #[serde(default)]
+    pub git: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,9 +94,15 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
     for ws in &app.workspaces {
         let mut tabs = Vec::new();
         for tab in &ws.tabs {
-            // Git tabs (docs/17) aren't persisted in GIT-1 — they have no real
-            // panes; re-open them from the sidebar after a restart.
+            // A git tab (docs/17) has no real panes — record just the flag; it's
+            // re-created as the dashboard (and re-fetched) on restore.
             if tab.is_git() {
+                tabs.push(TabSnap {
+                    tree: tab.layout.to_tree(),
+                    focus: tab.layout.focus.0,
+                    panes: Vec::new(),
+                    git: true,
+                });
                 continue;
             }
             let panes = tab
@@ -142,6 +151,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                 tree: tab.layout.to_tree(),
                 focus: tab.layout.focus.0,
                 panes,
+                git: false,
             });
         }
         workspaces.push(WsSnap {

@@ -24,9 +24,13 @@ use crate::ui::theme::{State, Theme};
 mod dispatch;
 mod git;
 mod input;
+mod keys;
 mod modules;
+mod picker;
 mod settings;
 
+pub use keys::Cmd;
+pub use picker::FolderPicker;
 pub use settings::{SettingsTab, SettingsUi};
 
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
@@ -118,10 +122,18 @@ pub struct App {
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub theme: Theme,
-    /// Persisted user configuration (theme, layout, notifications).
+    /// Persisted user configuration (theme, layout, notifications, keys).
     pub config: crate::config::Config,
+    /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
+    pub keymap: std::collections::HashMap<String, Cmd>,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
     pub settings: Option<SettingsUi>,
+    /// The open folder picker (workspace chooser), if any (captures input).
+    pub picker: Option<FolderPicker>,
+    /// Clickable rows in the open folder picker (row index → rect).
+    pub picker_rects: Vec<(usize, Rect)>,
+    /// Whether the keyboard-shortcut cheat-sheet overlay is open (`Ctrl+Space ?`).
+    pub help_open: bool,
     pub mode: Mode,
     pub sidebar_visible: bool,
     /// Sidebar width in columns (customizable; see `set_sidebar_width`).
@@ -211,6 +223,7 @@ impl App {
         let theme = crate::ui::theme::by_name(&config.theme);
         let sidebar_width = config.sidebar_width();
         let shell = crate::platform::resolve_shell(&config.shell);
+        let keymap = keys::build_keymap(&config.keybindings);
 
         let id = PaneId::alloc();
         let pane = Pane::spawn(id, cols, rows, cwd.clone(), app_tx.clone(), None, &shell)?;
@@ -234,7 +247,11 @@ impl App {
             active_ws: 0,
             theme,
             config,
+            keymap,
             settings: None,
+            picker: None,
+            picker_rects: Vec::new(),
+            help_open: false,
             mode: Mode::Normal,
             sidebar_visible: true,
             sidebar_width,
@@ -289,7 +306,9 @@ impl App {
     /// Restore the saved session, or start fresh if there is none / it fails.
     pub fn restore_or_new(cols: u16, rows: u16, app_tx: Sender<AppEvent>) -> Result<App> {
         if let Some(snap) = persist::load() {
-            if let Some(app) = App::from_snapshot(snap, app_tx.clone()) {
+            if let Some(mut app) = App::from_snapshot(snap, app_tx.clone()) {
+                // Kick off the async fetch for any restored git tabs.
+                app.refetch_git_tabs();
                 return Ok(app);
             }
         }
@@ -298,6 +317,7 @@ impl App {
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        let keymap = keys::build_keymap(&config.keybindings);
         let shell = crate::platform::resolve_shell(&config.shell);
         let modules = crate::module::registry::load();
         let mut panes = HashMap::new();
@@ -307,6 +327,20 @@ impl App {
         for ws in snap.workspaces {
             let mut tabs = Vec::new();
             for tab in ws.tabs {
+                // A git tab (docs/17): re-create the dashboard (no real panes) if
+                // the folder is still a repo; it's re-fetched after the app is
+                // built. If the folder is no longer a repo, the tab is dropped.
+                if tab.git {
+                    if crate::git::local::is_repo(&ws.cwd) {
+                        let view = crate::git::GitView::new(ws.cwd.clone());
+                        let placeholder = PaneId::alloc();
+                        tabs.push(Tab {
+                            layout: TileLayout::new(placeholder),
+                            git: Some(Box::new(view)),
+                        });
+                    }
+                    continue;
+                }
                 let mut remap = HashMap::new();
                 for (raw, ps) in &tab.panes {
                     let id = PaneId::alloc();
@@ -386,7 +420,11 @@ impl App {
             active_ws,
             theme,
             config,
+            keymap,
             settings: None,
+            picker: None,
+            picker_rects: Vec::new(),
+            help_open: false,
             mode: Mode::Normal,
             sidebar_visible: true,
             sidebar_width,
@@ -511,7 +549,9 @@ impl App {
     }
 
     fn new_tab(&mut self) {
-        let cwd = self.focused_cwd();
+        // A new tab opens at the node's **static** folder (not wherever the
+        // current pane has `cd`'d), matching the static-workspace model.
+        let cwd = self.ws().cwd.clone();
         if let Some(id) = self.spawn_into(cwd) {
             let ws = &mut self.workspaces[self.active_ws];
             ws.tabs.push(Tab::panes(TileLayout::new(id)));
@@ -522,8 +562,14 @@ impl App {
     }
 
     fn new_workspace(&mut self) {
-        // Start where the user currently is; the name then follows the cwd live.
+        // No path chosen (CLI / fallback): use the current directory.
         let cwd = self.focused_cwd();
+        self.create_workspace_at(cwd);
+    }
+
+    /// Open `cwd` as a new **static** workspace (a node) and focus it. The folder
+    /// is fixed — its name/cwd won't change as the pane's process `cd`s around.
+    pub fn create_workspace_at(&mut self, cwd: PathBuf) {
         let name = ws_name(&cwd);
         let branch = git_branch(&cwd);
         if let Some(id) = self.spawn_into(cwd.clone()) {
@@ -559,8 +605,10 @@ impl App {
         }
     }
 
-    /// Update each pane's working directory from its live process, then derive
-    /// every workspace's name from its focused pane's cwd.
+    /// Track each pane's live process cwd (used for per-pane git / agent-session
+    /// keying) and refresh each workspace's git branch from its **fixed** folder.
+    /// A node is a **static workspace**: `cd`-ing inside a pane does not move the
+    /// node's directory — only its branch updates (a checkout changes that).
     fn refresh_cwds(&mut self) {
         let updates: Vec<(PaneId, PathBuf)> = self
             .panes
@@ -576,22 +624,15 @@ impl App {
                 p.cwd = cwd;
             }
         }
-        let names: Vec<(usize, PathBuf)> = self
+        let branches: Vec<(usize, Option<String>)> = self
             .workspaces
             .iter()
             .enumerate()
-            .filter_map(|(wi, ws)| {
-                let focus = ws.tabs.get(ws.active_tab)?.layout.focus;
-                self.panes.get(&focus).map(|p| (wi, p.cwd.clone()))
-            })
+            .map(|(wi, ws)| (wi, git_branch(&ws.cwd)))
             .collect();
-        for (wi, cwd) in names {
-            let name = ws_name(&cwd);
-            let branch = git_branch(&cwd);
+        for (wi, branch) in branches {
             if let Some(ws) = self.workspaces.get_mut(wi) {
-                ws.name = name;
                 ws.branch = branch;
-                ws.cwd = cwd;
             }
         }
     }
@@ -697,10 +738,10 @@ impl App {
         }
     }
 
-    fn cycle_workspace(&mut self) {
-        let n = self.workspaces.len();
+    fn cycle_workspace(&mut self, delta: isize) {
+        let n = self.workspaces.len() as isize;
         if n > 0 {
-            self.active_ws = (self.active_ws + 1) % n;
+            self.active_ws = (((self.active_ws as isize + delta) % n + n) % n) as usize;
         }
     }
 
@@ -1256,7 +1297,7 @@ mod tests {
         assert!(app.settings.is_none());
         app.open_settings();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert_eq!(app.settings_tab_rects.len(), 5, "five tabs");
+        assert_eq!(app.settings_tab_rects.len(), 6, "six tabs");
         assert!(
             !app.settings_ctl_rects.is_empty(),
             "theme tab lists palettes"
@@ -1276,7 +1317,7 @@ mod tests {
             KeyCode::Down,
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.config.theme, "latte");
+        assert_eq!(app.config.theme, crate::ui::theme::THEMES[1]); // next after noir
 
         let click = |app: &mut App, x, y| {
             app.handle_event(AppEvent::Mouse(MouseEvent {
@@ -1315,6 +1356,63 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert!(app.settings.is_none());
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn arrow_keys_focus_panes_and_rebinding_works() {
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Split right (Ctrl+Space v) → focus moves to the new right pane.
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('v', KeyModifiers::NONE));
+        let right = app.layout().focus;
+        // Prefix + ← arrow focuses the left pane (the headline new binding).
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+        )));
+        assert_ne!(
+            app.layout().focus,
+            right,
+            "← moved focus off the right pane"
+        );
+
+        // Rebind "New tab" from `c` to `t` through Settings → Keys.
+        app.open_settings();
+        app.handle_event(key('4', KeyModifiers::NONE)); // Keys tab
+        assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Keys);
+        let idx = Cmd::ALL.iter().position(|c| *c == Cmd::NewTab).unwrap();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.cursor = idx;
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))); // capture
+        assert!(app.settings.as_ref().unwrap().capturing);
+        app.handle_event(key('t', KeyModifiers::NONE)); // bind to `t`
+        assert!(!app.settings.as_ref().unwrap().capturing);
+        assert_eq!(app.key_for(Cmd::NewTab), "t");
+        app.close_settings();
+
+        // `t` now makes a tab; the old `c` no longer does.
+        let tabs = app.ws().tabs.len();
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('t', KeyModifiers::NONE));
+        assert_eq!(app.ws().tabs.len(), tabs + 1, "rebound key works");
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('c', KeyModifiers::NONE));
+        assert_eq!(app.ws().tabs.len(), tabs + 1, "old default freed");
 
         std::env::remove_var("BOHAY_HOME");
         let _ = std::fs::remove_dir_all(&tmp);

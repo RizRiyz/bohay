@@ -104,6 +104,23 @@ impl App {
         }
     }
 
+    /// Kick off the async fetch for every open git tab. Called after a session
+    /// restore so restored git tabs load their data (docs/17).
+    pub fn refetch_git_tabs(&mut self) {
+        let targets: Vec<(u64, PathBuf, Scope)> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| {
+                ws.tabs
+                    .iter()
+                    .filter_map(|t| t.git.as_ref().map(|g| (g.id, g.repo_root.clone(), g.scope)))
+            })
+            .collect();
+        for (id, root, scope) in targets {
+            self.git_fetch(id, root, scope);
+        }
+    }
+
     /// Run the local-git fetches + GitHub (per `scope`) on a detached thread.
     fn git_fetch(&self, view_id: u64, root: PathBuf, scope: Scope) {
         let tx = self.app_tx.clone();
@@ -568,12 +585,21 @@ mod tests {
             other => panic!("branches not loaded: {}", matches!(other, Load::Error(_))),
         }
 
-        // A git tab open at save time must not break restore: it's skipped, so
-        // the snapshot keeps only the pane tab and re-imports cleanly.
+        // A git tab open at save time is persisted and restored (docs/17): the
+        // snapshot keeps both the pane tab and the git tab, and the restore
+        // re-creates the dashboard for the (still-valid) repo.
         let snap = crate::persist::snapshot(&app);
-        assert_eq!(snap.workspaces[0].tabs.len(), 1, "git tab not persisted");
+        assert_eq!(snap.workspaces[0].tabs.len(), 2, "pane + git tab persisted");
+        assert!(
+            snap.workspaces[0].tabs.iter().any(|t| t.git),
+            "git tab is flagged in the snapshot"
+        );
         let (tx2, _rx2) = std::sync::mpsc::channel();
-        assert!(App::from_snapshot(snap, tx2).is_some(), "session restores");
+        let restored = App::from_snapshot(snap, tx2).expect("session restores");
+        assert!(
+            restored.workspaces[0].tabs.iter().any(Tab::is_git),
+            "git tab restored"
+        );
 
         // Re-open is idempotent; close returns to a pane tab.
         app.open_git_tab(0);
@@ -582,8 +608,22 @@ mod tests {
             1,
             "one git tab per node"
         );
-        app.close_git_tab();
-        assert!(!app.active_is_git());
+        // `Ctrl+Space x` closes the active git tab (no real pane to close).
+        let tabs_before = app.ws().tabs.len();
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.active_is_git(), "x closed the git tab");
+        assert_eq!(
+            app.ws().tabs.len(),
+            tabs_before - 1,
+            "the git tab was removed"
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }

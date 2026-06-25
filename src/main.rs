@@ -27,7 +27,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use ratatui::crossterm::cursor::Hide;
 use ratatui::crossterm::event::{
     read as read_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
     EnableMouseCapture, Event,
@@ -228,10 +227,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         for msg in app.pending_notify.drain(..) {
             emit_notification(&msg);
         }
-        // Hide the cursor before the diff write so it doesn't dart across the
-        // changed cells (a flicker that scales with how much the frame changes,
-        // e.g. a multi-agent restore). ratatui re-shows it after the flush.
-        let _ = execute!(std::io::stdout(), Hide);
+        // Don't touch the cursor here — ratatui shows + positions it once per
+        // draw. A per-frame `Hide` flickered it on any activity.
         terminal.draw(|f| ui::render(f, &mut app))?;
         last_draw = Instant::now();
     }
