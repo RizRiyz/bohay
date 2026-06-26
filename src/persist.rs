@@ -60,6 +60,44 @@ pub struct PaneSnap {
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// RAII test isolation: locks [`TEST_ENV_LOCK`] **and** points `$BOHAY_HOME` at a
+/// fresh empty dir, so the test reads/writes only default, isolated config — never
+/// racing another test's keybinding/theme overrides (`$BOHAY_HOME` is process-global,
+/// so the lock alone isn't enough; a parallel `App::new` would still read whatever
+/// dir a mutating test had set). Restores `$BOHAY_HOME` + removes the dir on drop.
+/// Bind it for the whole test body: `let _env = test_env("name");`.
+#[cfg(test)]
+pub(crate) struct TestEnv {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    prev: Option<std::ffi::OsString>,
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(p) => std::env::set_var("BOHAY_HOME", p),
+            None => std::env::remove_var("BOHAY_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_env(tag: &str) -> TestEnv {
+    let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var_os("BOHAY_HOME");
+    let dir = std::env::temp_dir().join(format!("bohay-test-{}-{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::env::set_var("BOHAY_HOME", &dir);
+    TestEnv {
+        _guard: guard,
+        prev,
+        dir,
+    }
+}
+
 /// `~/.bohay/` (or `~/.bohay-dev/` in debug builds). Override with `$BOHAY_HOME`.
 pub fn config_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("BOHAY_HOME") {

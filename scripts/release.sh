@@ -29,6 +29,11 @@ MODE="${2:-}"
 TAG="v$VERSION"
 cd "$(git rev-parse --show-toplevel)"
 
+# Self-heal: if we bail out (failed check, abort, dry-run) before the release is
+# committed, undo the version bump so the tree is never left half-updated.
+committed=0
+trap '[ "$committed" = 1 ] || git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT
+
 step "Preconditions"
 [ "$(git branch --show-current)" = "main" ] || die "not on main"
 [ -z "$(git status --porcelain)" ] || die "working tree is dirty — commit or stash first"
@@ -55,26 +60,29 @@ step "Verify (fmt · clippy · test · publish dry-run)"
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
-cargo publish --dry-run
+# --allow-dirty: the version bump isn't committed yet at this point. This is only
+# a build/package check; the REAL `cargo publish` below runs after the commit on a
+# clean tree, so the published artifact still matches a committed state.
+cargo publish --dry-run --allow-dirty
 
 step "Release notes preview (what the workflow will publish on the GitHub Release)"
 bash scripts/changelog.sh "$TAG"
 
 if [ "$MODE" = "--dry-run" ]; then
-  git checkout -- Cargo.toml Cargo.lock
   step "Dry run OK — everything passed. Re-run without --dry-run to release."
-  exit 0
+  exit 0 # the trap reverts the bump
 fi
 
 if [ "$MODE" != "--yes" ]; then
   printf "\nRelease \033[1m%s\033[0m to crates.io + GitHub + Homebrew. Continue? [y/N] " "$TAG"
   read -r ans
-  [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { git checkout -- Cargo.toml Cargo.lock; die "aborted"; }
+  [ "$ans" = "y" ] || [ "$ans" = "Y" ] || die "aborted" # the trap reverts the bump
 fi
 
 step "Commit + tag"
 git add Cargo.toml Cargo.lock
 git commit -m "release: $TAG"
+committed=1 # past here the bump is committed — the trap must not revert it
 git tag -a "$TAG" -m "$TAG"
 
 step "Push (triggers the release workflow → binaries)"

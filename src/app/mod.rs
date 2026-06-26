@@ -1244,6 +1244,7 @@ mod tests {
 
     #[test]
     fn close_tab_removes_it_and_its_panes() {
+        let _env = crate::persist::test_env("close-tab");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.handle_event(key(' ', KeyModifiers::CONTROL));
@@ -1368,6 +1369,7 @@ mod tests {
 
     #[test]
     fn closing_last_pane_quits_and_ignores_further_events() {
+        let _env = crate::persist::test_env("close-last-pane");
         // Closing the last pane empties `workspaces` and sets `should_quit`; the
         // server loop drains the rest of the event batch before checking that
         // flag, so late events must be no-ops, not panics on an empty Vec.
@@ -1385,6 +1387,7 @@ mod tests {
 
     #[test]
     fn agents_list_is_global() {
+        let _env = crate::persist::test_env("agents-global");
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1414,6 +1417,7 @@ mod tests {
 
     #[test]
     fn tabbar_scrolls_when_full() {
+        let _env = crate::persist::test_env("tabbar-full");
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1849,11 +1853,7 @@ mod tests {
 
     #[test]
     fn arrow_keys_focus_panes_and_rebinding_works() {
-        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!("bohay-keys-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("BOHAY_HOME", &tmp);
-
+        let _env = crate::persist::test_env("arrow-keys");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
 
@@ -1899,9 +1899,6 @@ mod tests {
         app.handle_event(key(' ', KeyModifiers::CONTROL));
         app.handle_event(key('c', KeyModifiers::NONE));
         assert_eq!(app.ws().tabs.len(), tabs + 1, "old default freed");
-
-        std::env::remove_var("BOHAY_HOME");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

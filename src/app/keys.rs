@@ -310,6 +310,7 @@ mod tests {
 
     #[test]
     fn command_works_as_both_two_step_and_held_chord() {
+        let _env = crate::persist::test_env("two-step-chord");
         use crate::event::AppEvent;
         use ratatui::crossterm::event::KeyModifiers;
         let prefix = || AppEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
