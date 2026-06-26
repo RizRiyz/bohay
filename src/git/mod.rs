@@ -1,4 +1,4 @@
-//! Git & GitHub integration — the **git tab** (docs/17). A node's branch is
+//! Git & GitHub integration — the **git tab** (docs/17). A workspace's branch is
 //! clickable; clicking it opens a built-in dashboard of the repo's branches,
 //! commit flow, working tree, and (later) GitHub PRs/issues. Data is shelled out
 //! to `git`/`gh` and fetched on a background thread — no HTTP dependency.

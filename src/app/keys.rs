@@ -23,10 +23,10 @@ pub enum Cmd {
     NewTab,
     NextTab,
     PrevTab,
-    NewNode,
-    CloseNode,
-    NextNode,
-    PrevNode,
+    NewWorkspace,
+    CloseWorkspace,
+    NextWorkspace,
+    PrevWorkspace,
     NewWorktree,
     OpenGit,
     OpenSettings,
@@ -49,10 +49,10 @@ impl Cmd {
         Cmd::NewTab,
         Cmd::NextTab,
         Cmd::PrevTab,
-        Cmd::NewNode,
-        Cmd::CloseNode,
-        Cmd::NextNode,
-        Cmd::PrevNode,
+        Cmd::NewWorkspace,
+        Cmd::CloseWorkspace,
+        Cmd::NextWorkspace,
+        Cmd::PrevWorkspace,
         Cmd::NewWorktree,
         Cmd::OpenGit,
         Cmd::OpenSettings,
@@ -75,10 +75,10 @@ impl Cmd {
             Cmd::NewTab => "new_tab",
             Cmd::NextTab => "next_tab",
             Cmd::PrevTab => "prev_tab",
-            Cmd::NewNode => "new_node",
-            Cmd::CloseNode => "close_node",
-            Cmd::NextNode => "next_node",
-            Cmd::PrevNode => "prev_node",
+            Cmd::NewWorkspace => "new_node",
+            Cmd::CloseWorkspace => "close_node",
+            Cmd::NextWorkspace => "next_node",
+            Cmd::PrevWorkspace => "prev_node",
             Cmd::NewWorktree => "new_worktree",
             Cmd::OpenGit => "open_git",
             Cmd::OpenSettings => "open_settings",
@@ -104,10 +104,10 @@ impl Cmd {
             Cmd::NewTab => cat.cmd_new_tab,
             Cmd::NextTab => cat.cmd_next_tab,
             Cmd::PrevTab => cat.cmd_prev_tab,
-            Cmd::NewNode => cat.cmd_new_node,
-            Cmd::CloseNode => cat.cmd_close_node,
-            Cmd::NextNode => cat.cmd_next_node,
-            Cmd::PrevNode => cat.cmd_prev_node,
+            Cmd::NewWorkspace => cat.cmd_new_workspace,
+            Cmd::CloseWorkspace => cat.cmd_close_workspace,
+            Cmd::NextWorkspace => cat.cmd_next_workspace,
+            Cmd::PrevWorkspace => cat.cmd_prev_workspace,
             Cmd::NewWorktree => cat.cmd_new_worktree,
             Cmd::OpenGit => cat.cmd_open_git,
             Cmd::OpenSettings => cat.cmd_open_settings,
@@ -131,10 +131,10 @@ impl Cmd {
             Cmd::NewTab => "c",
             Cmd::NextTab => "n",
             Cmd::PrevTab => "p",
-            Cmd::NewNode => "N",
-            Cmd::CloseNode => "D",
-            Cmd::NextNode => "w",
-            Cmd::PrevNode => "W",
+            Cmd::NewWorkspace => "N",
+            Cmd::CloseWorkspace => "D",
+            Cmd::NextWorkspace => "w",
+            Cmd::PrevWorkspace => "W",
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
             Cmd::OpenSettings => ",",
@@ -246,13 +246,13 @@ impl App {
             Cmd::NewTab => self.new_tab(),
             Cmd::NextTab => self.cycle_tab(1),
             Cmd::PrevTab => self.cycle_tab(-1),
-            Cmd::NewNode => self.open_folder_picker(),
-            Cmd::CloseNode => {
+            Cmd::NewWorkspace => self.open_folder_picker(),
+            Cmd::CloseWorkspace => {
                 let i = self.active_ws;
                 self.close_workspace(i);
             }
-            Cmd::NextNode => self.cycle_workspace(1),
-            Cmd::PrevNode => self.cycle_workspace(-1),
+            Cmd::NextWorkspace => self.cycle_workspace(1),
+            Cmd::PrevWorkspace => self.cycle_workspace(-1),
             Cmd::NewWorktree => self.open_worktree_prompt(),
             Cmd::OpenGit => self.open_git_tab_active(),
             Cmd::OpenSettings => self.open_settings(),
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(m.get("←"), Some(&Cmd::FocusLeft));
         assert_eq!(m.get("h"), Some(&Cmd::FocusLeft)); // vim alias
         assert_eq!(m.get("⇥"), Some(&Cmd::NextTab));
-        assert_eq!(m.get("N"), Some(&Cmd::NewNode));
+        assert_eq!(m.get("N"), Some(&Cmd::NewWorkspace));
         // every command is reachable by its default key
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} bound");

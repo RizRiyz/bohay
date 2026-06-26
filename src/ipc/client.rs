@@ -150,11 +150,19 @@ where
 
 fn blit(terminal: &mut DefaultTerminal, frame: &FrameData, truecolor: bool) -> Result<()> {
     let adjust = |c| if truecolor { c } else { protocol::to_256(c) };
+    // Begin a DEC 2026 synchronized update so the terminal applies the whole frame
+    // atomically — no tearing/flicker mid-paint. Terminals without it ignore the
+    // sequence. Paired with `?2026l` after the draw below.
+    {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(b"\x1b[?2026h");
+        let _ = out.flush();
+    }
     // Don't touch the cursor here: ratatui shows + positions it once per draw.
     // An extra per-frame `Hide` (added later) hid then re-showed the cursor on
     // every frame, so any activity flickered it — this matches the original
     // (smooth) blit, which never hid the cursor.
-    terminal.draw(|f| {
+    let result = terminal.draw(|f| {
         let area = f.area();
         let buf = f.buffer_mut();
         for (i, cell) in frame.cells.iter().enumerate() {
@@ -180,7 +188,14 @@ fn blit(terminal: &mut DefaultTerminal, frame: &FrameData, truecolor: bool) -> R
                 f.set_cursor_position((cx, cy));
             }
         }
-    })?;
+    });
+    // End the synchronized update — the terminal now paints the frame in one shot.
+    {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(b"\x1b[?2026l");
+        let _ = out.flush();
+    }
+    result?;
     Ok(())
 }
 

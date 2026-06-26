@@ -45,9 +45,9 @@ pub struct LayoutConfig {
     pub row_gap: u16,
     #[serde(default = "yes")]
     pub show_titles: bool,
-    /// Resume a session into its own node (else a new tab in the current node).
-    #[serde(default = "yes")]
-    pub resume_in_new_node: bool,
+    /// Resume a session into its own workspace (else a new tab in the current one).
+    #[serde(default = "yes", alias = "resume_in_new_node")]
+    pub resume_in_new_workspace: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -100,7 +100,7 @@ impl Default for LayoutConfig {
             col_gap: 1,
             row_gap: 0,
             show_titles: true,
-            resume_in_new_node: true,
+            resume_in_new_workspace: true,
         }
     }
 }

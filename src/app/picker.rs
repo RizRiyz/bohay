@@ -1,8 +1,8 @@
 //! The folder picker — a modal to open (or create) a folder as a new **static
-//! workspace** (node). The "+" button opens it: browse the filesystem, pick an
+//! workspace** (workspace). The "+" button opens it: browse the filesystem, pick an
 //! existing folder, or make a new one (which opens immediately). When the browsed
 //! folder is a git repo it offers a second action row, **"Open with new
-//! worktree"** (`w` also triggers it). The front door for nodes and worktrees.
+//! worktree"** (`w` also triggers it). The front door for workspaces and worktrees.
 
 use std::path::PathBuf;
 
@@ -35,7 +35,7 @@ pub struct FolderPicker {
 /// A selectable row in the picker. The action rows lead; the directory entries
 /// follow. The "open with worktree" row only exists when the folder is a repo.
 pub enum Row {
-    /// Open the browsed folder as a node.
+    /// Open the browsed folder as a workspace.
     OpenFolder,
     /// Create a git worktree of the browsed repo (then open it).
     OpenWorktree,
@@ -74,7 +74,7 @@ impl FolderPicker {
 }
 
 impl App {
-    /// Open the folder picker, starting in the active node's folder (or `$HOME`).
+    /// Open the folder picker, starting in the active workspace's folder (or `$HOME`).
     pub fn open_folder_picker(&mut self) {
         let start = self
             .workspaces
@@ -267,7 +267,7 @@ impl App {
             p.error = Some(e.to_string());
             return;
         }
-        // Open the brand-new folder as a node straight away — making a folder from
+        // Open the brand-new folder as a workspace straight away — making a folder from
         // the workspace picker means "use this as my workspace", so don't make the
         // user then hunt for "open this folder".
         self.picker = None;
@@ -334,7 +334,7 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        let nodes_before = app.workspaces.len();
+        let workspaces_before = app.workspaces.len();
 
         app.open_folder_picker();
         // Point the picker at our temp dir and refresh.
@@ -346,14 +346,18 @@ mod tests {
         assert!(entries.iter().any(|e| e.name == "readme.txt" && !e.is_dir));
         assert!(entries[0].is_dir, "directories are listed before files");
 
-        // Cursor 0 = "use this folder" → opens the browsed folder as a node.
+        // Cursor 0 = "use this folder" → opens the browsed folder as a workspace.
         app.picker.as_mut().unwrap().cursor = 0;
         app.handle_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.picker.is_none(), "picker closed after opening");
-        assert_eq!(app.workspaces.len(), nodes_before + 1, "a node was created");
+        assert_eq!(
+            app.workspaces.len(),
+            workspaces_before + 1,
+            "a workspace was created"
+        );
         assert_eq!(app.workspaces.last().unwrap().cwd, tmp);
 
-        // Reopen and make a new folder: it opens as a node immediately (one step).
+        // Reopen and make a new folder: it opens as a workspace immediately (one step).
         app.open_folder_picker();
         app.picker.as_mut().unwrap().path = tmp.clone();
         app.picker_refresh();
@@ -365,9 +369,9 @@ mod tests {
         assert!(tmp.join("fresh").is_dir(), "new folder created");
         assert!(
             app.picker.is_none(),
-            "new folder opens as a node (no second Enter)"
+            "new folder opens as a workspace (no second Enter)"
         );
-        assert_eq!(app.workspaces.len(), nodes_before + 2);
+        assert_eq!(app.workspaces.len(), workspaces_before + 2);
         assert_eq!(app.workspaces.last().unwrap().cwd, tmp.join("fresh"));
 
         let _ = std::fs::remove_dir_all(&tmp);

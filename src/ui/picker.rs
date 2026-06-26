@@ -1,4 +1,4 @@
-//! The folder-picker modal: choose a folder to open as a new workspace (node).
+//! The folder-picker modal: choose a folder to open as a new workspace.
 //! Browse the filesystem, pick an existing folder, or create a new one.
 
 use super::*;

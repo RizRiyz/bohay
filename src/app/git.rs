@@ -12,24 +12,24 @@ use crate::git::{
 };
 
 impl App {
-    /// Open (or focus) the git tab for `node`. Idempotent — one git tab per node.
-    pub fn open_git_tab(&mut self, node: usize) {
-        if node >= self.workspaces.len() {
+    /// Open (or focus) the git tab for `workspace`. Idempotent — one git tab per workspace.
+    pub fn open_git_tab(&mut self, wsi: usize) {
+        if wsi >= self.workspaces.len() {
             return;
         }
-        self.active_ws = node;
-        if let Some(i) = self.workspaces[node].tabs.iter().position(Tab::is_git) {
-            self.workspaces[node].active_tab = i;
+        self.active_ws = wsi;
+        if let Some(i) = self.workspaces[wsi].tabs.iter().position(Tab::is_git) {
+            self.workspaces[wsi].active_tab = i;
             return;
         }
-        let root = self.workspaces[node].cwd.clone();
+        let root = self.workspaces[wsi].cwd.clone();
         if !local::is_repo(&root) {
-            return; // a node that isn't a git repo has no git tab
+            return; // a workspace that isn't a git repo has no git tab
         }
         let view = GitView::new(root.clone());
         let view_id = view.id;
         let placeholder = PaneId::alloc(); // never inserted into `panes`
-        let ws = &mut self.workspaces[node];
+        let ws = &mut self.workspaces[wsi];
         ws.tabs.push(Tab {
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
@@ -40,7 +40,7 @@ impl App {
         self.git_fetch(view_id, root, Scope::ThisRepo);
     }
 
-    /// Open the git tab for the currently active node.
+    /// Open the git tab for the currently active workspace.
     pub fn open_git_tab_active(&mut self) {
         self.open_git_tab(self.active_ws);
     }
@@ -65,7 +65,7 @@ impl App {
     }
 
     /// Apply an async fetch result to whichever git tab owns `view_id`. A status
-    /// result also refreshes that node's sidebar ahead/behind badge.
+    /// result also refreshes that workspace's sidebar ahead/behind badge.
     pub fn git_data(&mut self, view_id: u64, payload: GitPayload) {
         let badge = match &payload {
             GitPayload::Status(Ok(s)) => Some((s.ahead, s.behind)),
@@ -215,7 +215,7 @@ impl App {
         }
     }
 
-    /// A PR action (run in the node's terminal pane so the user sees output and
+    /// A PR action (run in the workspace's terminal pane so the user sees output and
     /// can answer any prompt — `gh pr merge` is interactive, which is the safe
     /// "confirm before merging" path).
     fn pr_action(&mut self, kind: &str) {
@@ -350,15 +350,15 @@ impl App {
         }
     }
 
-    /// Run `cmd` in the node's first terminal pane (GIT-3): switch to a pane tab,
+    /// Run `cmd` in the workspace's first terminal pane (GIT-3): switch to a pane tab,
     /// focus a pane, and feed it the command so the user sees its output and can
     /// handle any prompt or dirty-tree refusal.
     fn git_run_in_pane(&mut self, cmd: String) {
-        let node = self.active_ws;
-        let Some(ti) = self.workspaces[node].tabs.iter().position(|t| !t.is_git()) else {
+        let wsi = self.active_ws;
+        let Some(ti) = self.workspaces[wsi].tabs.iter().position(|t| !t.is_git()) else {
             return; // no terminal tab to run in
         };
-        self.workspaces[node].active_tab = ti;
+        self.workspaces[wsi].active_tab = ti;
         let focus = self.layout().focus;
         if let Some(p) = self.panes.get(&focus) {
             p.send(cmd.as_bytes());
@@ -490,7 +490,7 @@ impl App {
 
     /// `⏎` context action: PR → checkout, branch → switch, commit → show,
     /// issue → view. Branch checkout is direct (fast + refresh); the rest run in
-    /// the node's terminal pane (GIT-3).
+    /// the workspace's terminal pane (GIT-3).
     fn git_activate(&mut self) {
         // A PR row opens the rich detail panel (GIT-6).
         if self.active_git().map(|g| g.section) == Some(Section::Prs) {
@@ -517,7 +517,7 @@ impl App {
         }
     }
 
-    /// `d`: diff/show the selection in the node's terminal pane.
+    /// `d`: diff/show the selection in the workspace's terminal pane.
     fn git_diff(&mut self) {
         if let Some(cmd) = self.git_selected_command(true) {
             self.git_run_in_pane(cmd);
@@ -729,7 +729,7 @@ mod tests {
         assert_eq!(
             app.workspaces[0].tabs.iter().filter(|t| t.is_git()).count(),
             1,
-            "one git tab per node"
+            "one git tab per workspace"
         );
         // `Ctrl+Space x` closes the active git tab (no real pane to close).
         let tabs_before = app.ws().tabs.len();

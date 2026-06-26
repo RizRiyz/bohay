@@ -21,6 +21,7 @@ exclude = [
     "/preview.ans",
     "/MODULE-GUIDE.md",
     "/install.sh",
+    "/install.ps1",
     "/RELEASING.md",
     "/scripts",
 ]

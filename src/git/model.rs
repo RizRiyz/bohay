@@ -162,7 +162,7 @@ pub struct Worktree {
     pub is_main: bool,
 }
 
-/// A node's worktree grouping. All checkouts of one repo share a `common_dir`
+/// A workspace's worktree grouping. All checkouts of one repo share a `common_dir`
 /// (the git common `.git`), so the sidebar groups them under one parent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorktreeMembership {

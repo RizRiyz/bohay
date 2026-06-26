@@ -115,7 +115,7 @@ impl App {
     // ── api dispatch ──────────────────────────────────────────────────────────
 
     pub fn handle_api(&mut self, req: &ApiRequest) -> String {
-        // No active session (the last node was closed and the app is quitting) —
+        // No active session (the last workspace was closed and the app is quitting) —
         // most methods reach `layout()`, which would index an empty `workspaces`.
         if self.workspaces.is_empty() {
             return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
@@ -209,8 +209,8 @@ impl App {
                 self.close_pane(id);
                 Ok(json!({"type":"ok"}))
             }
-            // A **global** single-pane status lookup (any node) — `pane.list` is
-            // scoped to the active node, so `bohay wait agent-status` polls this.
+            // A **global** single-pane status lookup (any workspace) — `pane.list` is
+            // scoped to the active workspace, so `bohay wait agent-status` polls this.
             "pane.status" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
                 let (agent, status) = self
@@ -243,33 +243,35 @@ impl App {
                 self.session_dirty = true;
                 Ok(json!({"type":"ok"}))
             }
-            // ── nodes (workspaces) ──
-            "node.list" => {
+            // ── workspaces ── (`node.*` kept as a back-compat alias)
+            "workspace.list" | "node.list" => {
                 let active = self.active_ws;
                 let arr: Vec<Value> = self
                     .workspaces
                     .iter()
                     .enumerate()
                     .map(|(i, w)| {
-                        json!({"node": i.to_string(), "name": w.name, "active": i == active, "tabs": w.tabs.len()})
+                        json!({"workspace": i.to_string(), "name": w.name, "active": i == active, "tabs": w.tabs.len()})
                     })
                     .collect();
-                Ok(json!({"type":"node_list","nodes":arr}))
+                Ok(json!({"type":"workspace_list","workspaces":arr}))
             }
-            "node.new" => {
+            "workspace.new" | "node.new" => {
                 self.new_workspace();
-                Ok(json!({"type":"node","node": self.active_ws.to_string()}))
+                Ok(json!({"type":"workspace","workspace": self.active_ws.to_string()}))
             }
-            "node.focus" => {
-                if let Some(i) = param_usize(p, "node") {
+            "workspace.focus" | "node.focus" => {
+                if let Some(i) = param_usize(p, "workspace").or_else(|| param_usize(p, "node")) {
                     if i < self.workspaces.len() {
                         self.active_ws = i;
                     }
                 }
                 Ok(json!({"type":"ok"}))
             }
-            "node.close" => {
-                let i = param_usize(p, "node").unwrap_or(self.active_ws);
+            "workspace.close" | "node.close" => {
+                let i = param_usize(p, "workspace")
+                    .or_else(|| param_usize(p, "node"))
+                    .unwrap_or(self.active_ws);
                 self.close_workspace(i);
                 Ok(json!({"type":"ok"}))
             }
@@ -328,7 +330,7 @@ impl App {
                             arr.push(json!({
                                 "pane": id.0.to_string(), "agent": s.agent,
                                 "status": state_str(s.state),
-                                "node": wi.to_string(), "node_name": ws.name,
+                                "workspace": wi.to_string(), "workspace_name": ws.name,
                                 "tab": (ti + 1).to_string(), "focused": id == focus,
                             }));
                         }
@@ -525,7 +527,7 @@ impl App {
             }
             // ── git (docs/17) — fast local-git reads + open the git tab ──
             "git.status" => {
-                let cwd = self.git_node_cwd(p);
+                let cwd = self.git_workspace_cwd(p);
                 let s = crate::git::local::status(&cwd).map_err(git_err)?;
                 let files = |v: &[crate::git::model::FileChange]| -> Vec<Value> {
                     v.iter()
@@ -540,7 +542,7 @@ impl App {
                 }))
             }
             "git.branches" => {
-                let cwd = self.git_node_cwd(p);
+                let cwd = self.git_workspace_cwd(p);
                 let v = crate::git::local::branches(&cwd).map_err(git_err)?;
                 let arr: Vec<Value> = v
                     .iter()
@@ -549,7 +551,7 @@ impl App {
                 Ok(json!({"type":"git_branches","branches":arr}))
             }
             "git.log" => {
-                let cwd = self.git_node_cwd(p);
+                let cwd = self.git_workspace_cwd(p);
                 let n = param_usize(p, "n").unwrap_or(30);
                 let v = crate::git::local::commits(&cwd, n, false).map_err(git_err)?;
                 let arr: Vec<Value> = v
@@ -559,13 +561,15 @@ impl App {
                 Ok(json!({"type":"git_log","commits":arr}))
             }
             "git.open" => {
-                let node = param_usize(p, "node").unwrap_or(self.active_ws);
-                self.open_git_tab(node);
+                let i = param_usize(p, "workspace")
+                    .or_else(|| param_usize(p, "node"))
+                    .unwrap_or(self.active_ws);
+                self.open_git_tab(i);
                 Ok(json!({"type":"ok","git": self.active_is_git()}))
             }
             // ── worktrees (docs/18 WT-3) ──
             "worktree.list" => {
-                let cwd = self.git_node_cwd(p);
+                let cwd = self.git_workspace_cwd(p);
                 let v = crate::git::local::worktrees(&cwd).map_err(git_err)?;
                 let arr: Vec<Value> = v
                     .iter()
@@ -577,7 +581,7 @@ impl App {
             }
             "worktree.create" => {
                 let branch = p.get("branch").and_then(|v| v.as_str()).unwrap_or("");
-                let repo = self.git_node_cwd(p);
+                let repo = self.git_workspace_cwd(p);
                 let path = self.create_worktree(&repo, branch).map_err(git_err)?;
                 Ok(json!({"type":"ok","path": path.display().to_string()}))
             }
@@ -589,7 +593,7 @@ impl App {
             "worktree.remove" => {
                 let path = param_path(p)?;
                 // Run from the repo's **main** worktree — git refuses to remove a
-                // worktree from inside it, and the active node may be unrelated.
+                // worktree from inside it, and the active workspace may be unrelated.
                 let repo = crate::git::local::worktrees(&path)
                     .ok()
                     .and_then(|wts| wts.into_iter().find(|w| w.is_main).map(|w| w.path))
@@ -602,7 +606,7 @@ impl App {
                         let _ = std::fs::remove_dir(parent);
                     }
                 }
-                // Close the node opened at this worktree, if any.
+                // Close the workspace opened at this worktree, if any.
                 if let Some(i) = self.workspaces.iter().position(|w| w.cwd == path) {
                     self.close_workspace(i);
                 }
@@ -629,9 +633,11 @@ impl App {
         }
     }
 
-    /// The cwd of the `node` param (else the active node) for git.* methods.
-    fn git_node_cwd(&self, p: &Value) -> PathBuf {
-        let i = param_usize(p, "node").unwrap_or(self.active_ws);
+    /// The cwd of the `workspace` param (else the active workspace) for git.* methods.
+    fn git_workspace_cwd(&self, p: &Value) -> PathBuf {
+        let i = param_usize(p, "workspace")
+            .or_else(|| param_usize(p, "node"))
+            .unwrap_or(self.active_ws);
         self.workspaces
             .get(i)
             .map(|w| w.cwd.clone())

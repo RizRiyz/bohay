@@ -1,5 +1,5 @@
 //! The bottom status line: prefix hint, key cheatsheet, and right-aligned
-//! mode / pane / tab / node readout.
+//! mode / pane / tab / workspace readout.
 
 use super::*;
 
@@ -26,7 +26,7 @@ pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         left.extend(hint("x", cat.act_close, t));
         left.extend(hint("c", cat.act_new_tab, t));
         left.extend(hint("n/p", cat.act_tab, t));
-        left.extend(hint("N", cat.node, t));
+        left.extend(hint("N", cat.workspace, t));
         left.extend(hint("g", "git", t));
     } else {
         left.push(Span::styled(

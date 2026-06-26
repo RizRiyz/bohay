@@ -217,7 +217,7 @@ impl App {
         ));
 
         // The pane runs the argv in the module root (so relative paths resolve);
-        // the script reads the node cwd from the context.
+        // the script reads the workspace cwd from the context.
         let id = PaneId::alloc();
         let pane = Pane::spawn_command(id, 80, 24, root, self.app_tx.clone(), &argv, &env)
             .map_err(|e| format!("cannot spawn module pane: {e}"))?;

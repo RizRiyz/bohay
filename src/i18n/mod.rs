@@ -14,7 +14,7 @@
 /// consistency and to keep the table small.
 pub struct Catalog {
     // ── sidebar ──
-    pub nodes: &'static str,
+    pub workspaces: &'static str,
     pub agents: &'static str,
     pub no_active_agents: &'static str,
     pub no_agents_or_sessions: &'static str,
@@ -30,7 +30,7 @@ pub struct Catalog {
     pub all_keys: &'static str,
     pub pane: &'static str,
     pub panes: &'static str,
-    pub node: &'static str,
+    pub workspace: &'static str,
     // ── shared action words (footers, hints) ──
     pub act_move: &'static str,
     pub act_select: &'static str,
@@ -88,7 +88,7 @@ pub struct Catalog {
     pub set_column_gap: &'static str,
     pub set_row_gap: &'static str,
     pub set_pane_titles: &'static str,
-    pub set_resume_node: &'static str,
+    pub set_resume_workspace: &'static str,
     pub set_enabled: &'static str,
     pub set_notify_blocked: &'static str,
     pub set_notify_done: &'static str,
@@ -175,10 +175,10 @@ pub struct Catalog {
     pub cmd_new_tab: &'static str,
     pub cmd_next_tab: &'static str,
     pub cmd_prev_tab: &'static str,
-    pub cmd_new_node: &'static str,
-    pub cmd_close_node: &'static str,
-    pub cmd_next_node: &'static str,
-    pub cmd_prev_node: &'static str,
+    pub cmd_new_workspace: &'static str,
+    pub cmd_close_workspace: &'static str,
+    pub cmd_next_workspace: &'static str,
+    pub cmd_prev_workspace: &'static str,
     pub cmd_new_worktree: &'static str,
     pub cmd_open_git: &'static str,
     pub cmd_open_settings: &'static str,
@@ -194,7 +194,7 @@ pub struct Catalog {
 
 /// The English baseline — every other catalog mirrors this shape exactly.
 pub static EN: Catalog = Catalog {
-    nodes: "NODES",
+    workspaces: "WORKSPACES",
     agents: "AGENTS",
     no_active_agents: "no active agents",
     no_agents_or_sessions: "no agents or sessions",
@@ -209,7 +209,7 @@ pub static EN: Catalog = Catalog {
     all_keys: "all keys",
     pane: "pane",
     panes: "panes",
-    node: "node",
+    workspace: "workspace",
     act_move: "move",
     act_select: "select",
     act_up: "up",
@@ -263,7 +263,7 @@ pub static EN: Catalog = Catalog {
     set_column_gap: "Column gap",
     set_row_gap: "Row gap",
     set_pane_titles: "Pane titles",
-    set_resume_node: "Resume in new node",
+    set_resume_workspace: "Resume in new workspace",
     set_enabled: "Enabled",
     set_notify_blocked: "Notify on blocked",
     set_notify_done: "Notify on done",
@@ -342,10 +342,10 @@ pub static EN: Catalog = Catalog {
     cmd_new_tab: "New tab",
     cmd_next_tab: "Next tab",
     cmd_prev_tab: "Previous tab",
-    cmd_new_node: "New node (pick a folder)",
-    cmd_close_node: "Close node",
-    cmd_next_node: "Next node",
-    cmd_prev_node: "Previous node",
+    cmd_new_workspace: "New workspace (pick a folder)",
+    cmd_close_workspace: "Close workspace",
+    cmd_next_workspace: "Next workspace",
+    cmd_prev_workspace: "Previous workspace",
     cmd_new_worktree: "New git worktree",
     cmd_open_git: "Open git tab",
     cmd_open_settings: "Open settings",
@@ -360,7 +360,7 @@ pub static EN: Catalog = Catalog {
 };
 
 static ES: Catalog = Catalog {
-    nodes: "NODOS",
+    workspaces: "ESPACIOS",
     agents: "AGENTES",
     no_active_agents: "sin agentes activos",
     no_agents_or_sessions: "sin agentes ni sesiones",
@@ -375,7 +375,7 @@ static ES: Catalog = Catalog {
     all_keys: "todas las teclas",
     pane: "panel",
     panes: "paneles",
-    node: "nodo",
+    workspace: "espacio",
     act_move: "mover",
     act_select: "elegir",
     act_up: "subir",
@@ -429,7 +429,7 @@ static ES: Catalog = Catalog {
     set_column_gap: "Espacio columna",
     set_row_gap: "Espacio fila",
     set_pane_titles: "Títulos de panel",
-    set_resume_node: "Reanudar en nuevo nodo",
+    set_resume_workspace: "Reanudar en nuevo espacio",
     set_enabled: "Activado",
     set_notify_blocked: "Avisar si bloqueado",
     set_notify_done: "Avisar al terminar",
@@ -508,10 +508,10 @@ static ES: Catalog = Catalog {
     cmd_new_tab: "Nueva pestaña",
     cmd_next_tab: "Pestaña siguiente",
     cmd_prev_tab: "Pestaña anterior",
-    cmd_new_node: "Nuevo nodo (elegir carpeta)",
-    cmd_close_node: "Cerrar nodo",
-    cmd_next_node: "Nodo siguiente",
-    cmd_prev_node: "Nodo anterior",
+    cmd_new_workspace: "Nuevo espacio (elegir carpeta)",
+    cmd_close_workspace: "Cerrar espacio",
+    cmd_next_workspace: "Espacio siguiente",
+    cmd_prev_workspace: "Espacio anterior",
     cmd_new_worktree: "Nuevo worktree git",
     cmd_open_git: "Abrir pestaña git",
     cmd_open_settings: "Abrir ajustes",
@@ -526,7 +526,7 @@ static ES: Catalog = Catalog {
 };
 
 static PT: Catalog = Catalog {
-    nodes: "NÓS",
+    workspaces: "ESPAÇOS",
     agents: "AGENTES",
     no_active_agents: "nenhum agente ativo",
     no_agents_or_sessions: "nenhum agente ou sessão",
@@ -541,7 +541,7 @@ static PT: Catalog = Catalog {
     all_keys: "todas as teclas",
     pane: "painel",
     panes: "painéis",
-    node: "nó",
+    workspace: "espaço",
     act_move: "mover",
     act_select: "escolher",
     act_up: "subir",
@@ -595,7 +595,7 @@ static PT: Catalog = Catalog {
     set_column_gap: "Espaço coluna",
     set_row_gap: "Espaço linha",
     set_pane_titles: "Títulos do painel",
-    set_resume_node: "Retomar em novo nó",
+    set_resume_workspace: "Retomar em novo espaço",
     set_enabled: "Ativado",
     set_notify_blocked: "Avisar se bloqueado",
     set_notify_done: "Avisar ao concluir",
@@ -674,10 +674,10 @@ static PT: Catalog = Catalog {
     cmd_new_tab: "Nova aba",
     cmd_next_tab: "Próxima aba",
     cmd_prev_tab: "Aba anterior",
-    cmd_new_node: "Novo nó (escolher pasta)",
-    cmd_close_node: "Fechar nó",
-    cmd_next_node: "Próximo nó",
-    cmd_prev_node: "Nó anterior",
+    cmd_new_workspace: "Novo espaço (escolher pasta)",
+    cmd_close_workspace: "Fechar espaço",
+    cmd_next_workspace: "Próximo espaço",
+    cmd_prev_workspace: "Espaço anterior",
     cmd_new_worktree: "Novo worktree git",
     cmd_open_git: "Abrir aba git",
     cmd_open_settings: "Abrir configurações",
@@ -692,7 +692,7 @@ static PT: Catalog = Catalog {
 };
 
 static FR: Catalog = Catalog {
-    nodes: "NŒUDS",
+    workspaces: "ESPACES",
     agents: "AGENTS",
     no_active_agents: "aucun agent actif",
     no_agents_or_sessions: "aucun agent ni session",
@@ -707,7 +707,7 @@ static FR: Catalog = Catalog {
     all_keys: "toutes les touches",
     pane: "volet",
     panes: "volets",
-    node: "nœud",
+    workspace: "espace",
     act_move: "naviguer",
     act_select: "choisir",
     act_up: "remonter",
@@ -761,7 +761,7 @@ static FR: Catalog = Catalog {
     set_column_gap: "Écart colonne",
     set_row_gap: "Écart ligne",
     set_pane_titles: "Titres de volet",
-    set_resume_node: "Reprendre en nouveau nœud",
+    set_resume_workspace: "Reprendre dans un nouvel espace",
     set_enabled: "Activé",
     set_notify_blocked: "Alerter si bloqué",
     set_notify_done: "Alerter à la fin",
@@ -840,10 +840,10 @@ static FR: Catalog = Catalog {
     cmd_new_tab: "Nouvel onglet",
     cmd_next_tab: "Onglet suivant",
     cmd_prev_tab: "Onglet précédent",
-    cmd_new_node: "Nouveau nœud (choisir dossier)",
-    cmd_close_node: "Fermer le nœud",
-    cmd_next_node: "Nœud suivant",
-    cmd_prev_node: "Nœud précédent",
+    cmd_new_workspace: "Nouvel espace (choisir dossier)",
+    cmd_close_workspace: "Fermer l'espace",
+    cmd_next_workspace: "Espace suivant",
+    cmd_prev_workspace: "Espace précédent",
     cmd_new_worktree: "Nouveau worktree git",
     cmd_open_git: "Ouvrir l'onglet git",
     cmd_open_settings: "Ouvrir les paramètres",
@@ -858,7 +858,7 @@ static FR: Catalog = Catalog {
 };
 
 static DE: Catalog = Catalog {
-    nodes: "KNOTEN",
+    workspaces: "BEREICHE",
     agents: "AGENTEN",
     no_active_agents: "keine aktiven Agenten",
     no_agents_or_sessions: "keine Agenten oder Sitzungen",
@@ -873,7 +873,7 @@ static DE: Catalog = Catalog {
     all_keys: "alle Tasten",
     pane: "Bereich",
     panes: "Bereiche",
-    node: "Knoten",
+    workspace: "Bereich",
     act_move: "bewegen",
     act_select: "wählen",
     act_up: "hoch",
@@ -927,7 +927,7 @@ static DE: Catalog = Catalog {
     set_column_gap: "Spaltenabstand",
     set_row_gap: "Zeilenabstand",
     set_pane_titles: "Bereichstitel",
-    set_resume_node: "In neuem Knoten fortsetzen",
+    set_resume_workspace: "In neuem Bereich fortsetzen",
     set_enabled: "Aktiviert",
     set_notify_blocked: "Bei Blockade melden",
     set_notify_done: "Bei Fertig melden",
@@ -1006,10 +1006,10 @@ static DE: Catalog = Catalog {
     cmd_new_tab: "Neuer Tab",
     cmd_next_tab: "Nächster Tab",
     cmd_prev_tab: "Vorheriger Tab",
-    cmd_new_node: "Neuer Knoten (Ordner wählen)",
-    cmd_close_node: "Knoten schließen",
-    cmd_next_node: "Nächster Knoten",
-    cmd_prev_node: "Vorheriger Knoten",
+    cmd_new_workspace: "Neuer Bereich (Ordner wählen)",
+    cmd_close_workspace: "Bereich schließen",
+    cmd_next_workspace: "Nächster Bereich",
+    cmd_prev_workspace: "Vorheriger Bereich",
     cmd_new_worktree: "Neuer git-Worktree",
     cmd_open_git: "git-Tab öffnen",
     cmd_open_settings: "Einstellungen öffnen",
@@ -1024,7 +1024,7 @@ static DE: Catalog = Catalog {
 };
 
 static ID: Catalog = Catalog {
-    nodes: "NODE",
+    workspaces: "RUANG KERJA",
     agents: "AGEN",
     no_active_agents: "tidak ada agen aktif",
     no_agents_or_sessions: "tidak ada agen atau sesi",
@@ -1039,7 +1039,7 @@ static ID: Catalog = Catalog {
     all_keys: "semua tombol",
     pane: "panel",
     panes: "panel",
-    node: "node",
+    workspace: "workspace",
     act_move: "pindah",
     act_select: "pilih",
     act_up: "naik",
@@ -1093,7 +1093,7 @@ static ID: Catalog = Catalog {
     set_column_gap: "Jarak kolom",
     set_row_gap: "Jarak baris",
     set_pane_titles: "Judul panel",
-    set_resume_node: "Lanjut di node baru",
+    set_resume_workspace: "Lanjut di ruang kerja baru",
     set_enabled: "Aktif",
     set_notify_blocked: "Beri tahu jika diblokir",
     set_notify_done: "Beri tahu jika selesai",
@@ -1172,10 +1172,10 @@ static ID: Catalog = Catalog {
     cmd_new_tab: "Tab baru",
     cmd_next_tab: "Tab berikutnya",
     cmd_prev_tab: "Tab sebelumnya",
-    cmd_new_node: "Node baru (pilih folder)",
-    cmd_close_node: "Tutup node",
-    cmd_next_node: "Node berikutnya",
-    cmd_prev_node: "Node sebelumnya",
+    cmd_new_workspace: "Ruang kerja baru (pilih folder)",
+    cmd_close_workspace: "Tutup ruang kerja",
+    cmd_next_workspace: "Ruang kerja berikutnya",
+    cmd_prev_workspace: "Ruang kerja sebelumnya",
     cmd_new_worktree: "Worktree git baru",
     cmd_open_git: "Buka tab git",
     cmd_open_settings: "Buka pengaturan",
@@ -1190,7 +1190,7 @@ static ID: Catalog = Catalog {
 };
 
 static ZH: Catalog = Catalog {
-    nodes: "节点",
+    workspaces: "工作区",
     agents: "代理",
     no_active_agents: "无活动代理",
     no_agents_or_sessions: "无代理或会话",
@@ -1205,7 +1205,7 @@ static ZH: Catalog = Catalog {
     all_keys: "所有按键",
     pane: "窗格",
     panes: "窗格",
-    node: "节点",
+    workspace: "工作区",
     act_move: "移动",
     act_select: "选择",
     act_up: "上级",
@@ -1259,7 +1259,7 @@ static ZH: Catalog = Catalog {
     set_column_gap: "列间距",
     set_row_gap: "行间距",
     set_pane_titles: "窗格标题",
-    set_resume_node: "在新节点恢复",
+    set_resume_workspace: "在新工作区恢复",
     set_enabled: "已启用",
     set_notify_blocked: "阻塞时通知",
     set_notify_done: "完成时通知",
@@ -1338,10 +1338,10 @@ static ZH: Catalog = Catalog {
     cmd_new_tab: "新建标签",
     cmd_next_tab: "下一个标签",
     cmd_prev_tab: "上一个标签",
-    cmd_new_node: "新建节点（选择文件夹）",
-    cmd_close_node: "关闭节点",
-    cmd_next_node: "下一个节点",
-    cmd_prev_node: "上一个节点",
+    cmd_new_workspace: "新建工作区（选择文件夹）",
+    cmd_close_workspace: "关闭工作区",
+    cmd_next_workspace: "下一个工作区",
+    cmd_prev_workspace: "上一个工作区",
     cmd_new_worktree: "新建 git 工作树",
     cmd_open_git: "打开 git 标签",
     cmd_open_settings: "打开设置",
@@ -1356,7 +1356,7 @@ static ZH: Catalog = Catalog {
 };
 
 static JA: Catalog = Catalog {
-    nodes: "ノード",
+    workspaces: "ワークスペース",
     agents: "エージェント",
     no_active_agents: "アクティブなエージェントなし",
     no_agents_or_sessions: "エージェント・セッションなし",
@@ -1371,7 +1371,7 @@ static JA: Catalog = Catalog {
     all_keys: "全キー",
     pane: "ペイン",
     panes: "ペイン",
-    node: "ノード",
+    workspace: "ワークスペース",
     act_move: "移動",
     act_select: "選択",
     act_up: "上へ",
@@ -1425,7 +1425,7 @@ static JA: Catalog = Catalog {
     set_column_gap: "列の間隔",
     set_row_gap: "行の間隔",
     set_pane_titles: "ペインのタイトル",
-    set_resume_node: "新ノードで再開",
+    set_resume_workspace: "新規ワークスペースで再開",
     set_enabled: "有効",
     set_notify_blocked: "ブロック時に通知",
     set_notify_done: "完了時に通知",
@@ -1504,10 +1504,10 @@ static JA: Catalog = Catalog {
     cmd_new_tab: "新規タブ",
     cmd_next_tab: "次のタブ",
     cmd_prev_tab: "前のタブ",
-    cmd_new_node: "新規ノード（フォルダ選択）",
-    cmd_close_node: "ノードを閉じる",
-    cmd_next_node: "次のノード",
-    cmd_prev_node: "前のノード",
+    cmd_new_workspace: "新規ワークスペース（フォルダ選択）",
+    cmd_close_workspace: "ワークスペースを閉じる",
+    cmd_next_workspace: "次のワークスペース",
+    cmd_prev_workspace: "前のワークスペース",
     cmd_new_worktree: "新規 git ワークツリー",
     cmd_open_git: "git タブを開く",
     cmd_open_settings: "設定を開く",
@@ -1567,14 +1567,14 @@ mod tests {
             assert!(!native_name(code).is_empty(), "{code} has a native name");
         }
         // An unknown code degrades to English, never panics.
-        assert_eq!(by_code("xx").nodes, EN.nodes);
+        assert_eq!(by_code("xx").workspaces, EN.workspaces);
         assert_eq!(native_name("xx"), "English");
     }
 
     #[test]
     fn non_english_catalog_actually_differs() {
         // Sanity that translations are wired across surfaces.
-        assert_ne!(by_code("zh").nodes, EN.nodes);
+        assert_ne!(by_code("zh").workspaces, EN.workspaces);
         assert_ne!(by_code("ja").settings_title, EN.settings_title);
         assert_ne!(by_code("es").open_this_folder, EN.open_this_folder);
         assert_ne!(by_code("fr").sec_status, EN.sec_status);

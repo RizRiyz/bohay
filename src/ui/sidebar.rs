@@ -1,4 +1,4 @@
-//! The left sidebar: the NODES (workspaces) and AGENTS lists.
+//! The left sidebar: the WORKSPACES and AGENTS lists.
 
 use super::*;
 
@@ -30,8 +30,8 @@ fn rollup(app: &App, ws_index: usize) -> State {
 
 // ── sidebar ───────────────────────────────────────────────────────────────
 
-/// (node rows, live-agent rows, resumable-session rows, session ✕ buttons,
-/// new-node button).
+/// (workspace rows, live-agent rows, resumable-session rows, session ✕ buttons,
+/// new-workspace button).
 pub(super) type SidebarHits = (
     Vec<(usize, Rect)>,
     Vec<(PaneId, Rect)>,
@@ -136,12 +136,12 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
     );
     app.settings_icon_rect = Some(menu);
 
-    // Two stacked halves: NODES (top) and AGENTS (bottom), with a divider.
+    // Two stacked halves: WORKSPACES (top) and AGENTS (bottom), with a divider.
     let body_top = area.y + 3;
     let split = body_top + area.bottom().saturating_sub(body_top) / 2;
 
-    // ── NODES ──
-    line_at(f, body_top, header(cat.nodes, t));
+    // ── WORKSPACES ──
+    line_at(f, body_top, header(cat.workspaces, t));
     let new_ws_rect = if area.width >= 8 {
         let rect = Rect::new(area.right().saturating_sub(4), body_top, 3, 1);
         f.render_widget(
@@ -159,20 +159,20 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
     let nrows = split.saturating_sub(nlist_top);
     let ncap = list_capacity(nrows);
     let ntotal = app.workspaces.len();
-    // Auto-reveal the active node when it changes (cycle / new / resume), without
+    // Auto-reveal the active workspace when it changes (cycle / new / resume), without
     // fighting wheel scrolling (which never changes `active_ws`).
     if app.active_ws != app.last_active_ws_shown {
-        if app.active_ws < app.nodes_scroll {
-            app.nodes_scroll = app.active_ws;
-        } else if ncap > 0 && app.active_ws >= app.nodes_scroll + ncap {
-            app.nodes_scroll = app.active_ws + 1 - ncap;
+        if app.active_ws < app.workspaces_scroll {
+            app.workspaces_scroll = app.active_ws;
+        } else if ncap > 0 && app.active_ws >= app.workspaces_scroll + ncap {
+            app.workspaces_scroll = app.active_ws + 1 - ncap;
         }
         app.last_active_ws_shown = app.active_ws;
     }
-    app.nodes_scroll = app.nodes_scroll.min(ntotal.saturating_sub(ncap));
-    app.nodes_area = Rect::new(area.x, nlist_top, area.width, nrows);
-    let nscroll = app.nodes_scroll;
-    app.node_branch_rects.clear();
+    app.workspaces_scroll = app.workspaces_scroll.min(ntotal.saturating_sub(ncap));
+    app.workspaces_area = Rect::new(area.x, nlist_top, area.width, nrows);
+    let nscroll = app.workspaces_scroll;
+    app.workspace_branch_rects.clear();
     for (vi, i) in (nscroll..ntotal).take(ncap).enumerate() {
         let y = nlist_top + vi as u16 * ROW_STRIDE;
         let active = i == app.active_ws;
@@ -184,15 +184,15 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
         } else {
             Style::new().fg(t.subtext1)
         };
-        // Worktree grouping (docs/18 WT-4): a node sharing its repo's common dir
-        // with an earlier node is a sibling checkout — nest it with a connector.
+        // Worktree grouping (docs/18 WT-4): a workspace sharing its repo's common dir
+        // with an earlier workspace is a sibling checkout — nest it with a connector.
         let is_member = ws.worktree.as_ref().is_some_and(|m| {
             app.workspaces[..i]
                 .iter()
                 .any(|w| w.worktree.as_ref().map(|o| &o.common_dir) == Some(&m.common_dir))
         });
         let indent: u16 = if is_member { 2 } else { 0 };
-        // Row 1: state dot + node name + git branch (dot aligned with "NODES").
+        // Row 1: state dot + workspace name + git branch (dot aligned with "WORKSPACES").
         let mut line1: Vec<Span> = Vec::new();
         if is_member {
             line1.push(Span::styled("└ ", Style::new().fg(t.overlay0)));
@@ -207,13 +207,14 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
             let bw = 2 + b.chars().count() as u16;
             if bx < area.right() {
                 let bw = bw.min(area.right().saturating_sub(bx));
-                app.node_branch_rects.push((i, Rect::new(bx, y, bw, 1)));
+                app.workspace_branch_rects
+                    .push((i, Rect::new(bx, y, bw, 1)));
             }
             line1.push(Span::styled(
                 format!("  {b}"),
                 Style::new().fg(if active { t.green } else { t.overlay0 }),
             ));
-            // Ahead/behind badge (set once the node's git tab fetches status).
+            // Ahead/behind badge (set once the workspace's git tab fetches status).
             if let Some((ahead, behind)) = ws.git_ahead_behind {
                 if ahead > 0 || behind > 0 {
                     line1.push(Span::styled(
@@ -303,7 +304,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
     app.agents_area = Rect::new(area.x, alist_top, area.width, arows);
 
     let focus = app.layout().focus;
-    // Live agents across every node/tab (real agents or panes with a session).
+    // Live agents across every workspace/tab (real agents or panes with a session).
     let mut live: Vec<(PaneId, String, usize)> = Vec::new();
     for ws in app.workspaces.iter() {
         for (ti, tab) in ws.tabs.iter().enumerate() {
@@ -342,7 +343,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
         for (vi, k) in (ascroll..atotal).take(acap).enumerate() {
             let y = alist_top + vi as u16 * ROW_STRIDE;
             if let Some((id, wsname, ti)) = live.get(k) {
-                // A live agent: runtime status + which node/tab it runs in.
+                // A live agent: runtime status + which workspace/tab it runs in.
                 let id = *id;
                 let focused = id == focus;
                 let st = pane_state(app, id);

@@ -80,7 +80,7 @@ pub struct DiffRun {
     pub symbols: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct CellData {
     pub symbol: String,
     pub fg: u32,
@@ -89,7 +89,10 @@ pub struct CellData {
 }
 
 /// Changed cells of `new` vs `old` (assumed same dimensions), coalesced into
-/// same-style runs.
+/// same-style runs. The production path uses [`diff_buffer`] (which diffs a live
+/// `Buffer` with no per-cell allocation); this `FrameData`-to-`FrameData` form
+/// remains for round-trip tests of the diff/[`apply_diff`] wire encoding.
+#[cfg(test)]
 pub fn diff_runs(old: &FrameData, new: &FrameData) -> Vec<DiffRun> {
     let mut runs: Vec<DiffRun> = Vec::new();
     for (i, (a, b)) in old.cells.iter().zip(&new.cells).enumerate() {
@@ -186,6 +189,58 @@ pub fn frame_from_buffer(buf: &Buffer, cursor: Option<(u16, u16)>) -> FrameData 
         cells,
         cursor,
     }
+}
+
+/// Diff the live ratatui `buf` against `prev` (the last sent frame) **in place**:
+/// returns the changed-cell runs *and* updates `prev`'s cells to match. A frame then
+/// costs one O(screen) comparison and allocates only for cells that actually changed
+/// — not a full `Buffer::clone()` + a per-cell `String` via [`frame_from_buffer`]
+/// every frame, which dominated server CPU (and so input latency) on large terminals
+/// and at 60 fps. Assumes `buf` and `prev` share dimensions (the caller sends a full
+/// frame on resize). Mirrors [`diff_runs`] but reads cells straight from the buffer.
+pub fn diff_buffer(prev: &mut FrameData, buf: &Buffer) -> Vec<DiffRun> {
+    let area = buf.area;
+    let width = prev.width as u32;
+    let mut runs: Vec<DiffRun> = Vec::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let c = &buf[(area.x + x, area.y + y)];
+            let i = y as u32 * width + x as u32;
+            let Some(slot) = prev.cells.get_mut(i as usize) else {
+                continue;
+            };
+            let (fg, bg, mods) = (pack(c.fg), pack(c.bg), c.modifier.bits());
+            let sym = c.symbol();
+            if slot.fg == fg && slot.bg == bg && slot.mods == mods && slot.symbol == sym {
+                continue; // unchanged — no allocation, no work
+            }
+            // Extend the previous run if contiguous + same style, else start one.
+            match runs.last_mut() {
+                Some(run)
+                    if run.start + run.symbols.len() as u32 == i
+                        && run.fg == fg
+                        && run.bg == bg
+                        && run.mods == mods =>
+                {
+                    run.symbols.push(sym.to_string());
+                }
+                _ => runs.push(DiffRun {
+                    start: i,
+                    fg,
+                    bg,
+                    mods,
+                    symbols: vec![sym.to_string()],
+                }),
+            }
+            // Update `prev` in place, reusing the existing String's allocation.
+            slot.fg = fg;
+            slot.bg = bg;
+            slot.mods = mods;
+            slot.symbol.clear();
+            slot.symbol.push_str(sym);
+        }
+    }
+    runs
 }
 
 pub fn pack(c: Color) -> u32 {
@@ -320,6 +375,28 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn diff_buffer_emits_changed_runs_and_updates_prev_in_place() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let area = Rect::new(0, 0, 4, 2);
+        // `prev` starts as the blank buffer.
+        let mut prev = frame_from_buffer(&Buffer::empty(area), None);
+        // A buffer with two adjacent changed cells on row 0.
+        let mut buf = Buffer::empty(area);
+        buf[(1, 0)].set_symbol("a");
+        buf[(2, 0)].set_symbol("b");
+
+        let runs = diff_buffer(&mut prev, &buf);
+        assert_eq!(runs.len(), 1, "adjacent same-style cells coalesce");
+        assert_eq!(runs[0].start, 1);
+        assert_eq!(runs[0].symbols, vec!["a".to_string(), "b".to_string()]);
+        // `prev` was updated in place to equal the buffer.
+        assert_eq!(prev.cells, frame_from_buffer(&buf, None).cells);
+        // Diffing the same buffer again yields nothing (no spurious frames).
+        assert!(diff_buffer(&mut prev, &buf).is_empty());
     }
 
     #[test]

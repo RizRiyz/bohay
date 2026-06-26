@@ -22,7 +22,11 @@ use crate::persist;
 use crate::ui;
 
 const DEFAULT_SIZE: (u16, u16) = (120, 32);
-const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// Minimum time between rendered frames — the fps cap during activity (60fps).
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// How often to wake when idle (drives agent detection + toast expiry) — coarser
+/// than the frame cap so an idle session doesn't spin the CPU.
+const IDLE_INTERVAL: Duration = Duration::from_millis(33);
 
 type Clients = HashMap<u64, SyncSender<ServerMessage>>;
 
@@ -53,9 +57,21 @@ pub fn run() -> Result<()> {
     // dropped it, so they're resynced with a full frame next round (a dropped
     // diff would otherwise desync them; a dropped *full* frame is self-healing).
     let mut behind: HashSet<u64> = HashSet::new();
+    // Un-rendered activity waiting for the frame cap to expire — drives a trailing
+    // render so a change that lands mid-interval isn't stuck until the next event.
+    let mut dirty = false;
 
     loop {
-        let mut activity = match rx.recv_timeout(FRAME_INTERVAL) {
+        // Pending + clients attached → wait only until the cap frees up (flush
+        // promptly); otherwise tick at the coarser idle cadence.
+        let wait = if dirty && !clients.is_empty() {
+            FRAME_INTERVAL
+                .saturating_sub(last_draw.elapsed())
+                .max(Duration::from_millis(1))
+        } else {
+            IDLE_INTERVAL
+        };
+        let mut activity = match rx.recv_timeout(wait) {
             Ok(ev) => apply(
                 ev,
                 &mut app,
@@ -120,46 +136,52 @@ pub fn run() -> Result<()> {
         if app.tick_toast(Instant::now()) {
             activity = true;
         }
+        dirty |= activity;
 
-        if activity && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
+        if dirty && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
             if size != backend_size {
                 terminal = Terminal::new(TestBackend::new(size.0, size.1))?;
                 backend_size = size;
             }
             terminal.draw(|f| ui::render(f, &mut app))?;
-            let buf = terminal.backend().buffer().clone();
-            let frame = protocol::frame_from_buffer(&buf, app.last_cursor);
-            // A full frame is needed for everyone on the first frame and on a
-            // resize (the diff would be meaningless against different dims).
+            let buf = terminal.backend().buffer();
+            let cursor = app.last_cursor;
+            // A full frame is needed on the first frame and on resize (a diff would
+            // be meaningless against different dims). Otherwise diff the live buffer
+            // straight against `last_frame` and update it in place — no per-frame
+            // clone or per-cell `String` (the old hot-path allocation that made
+            // panes lag under load).
             let full_for_all = last_frame
                 .as_ref()
-                .is_none_or(|p| p.width != frame.width || p.height != frame.height);
-            // Otherwise compute the sparse diff (None ⇒ nothing changed).
-            let diff_msg = match &last_frame {
-                Some(prev) if !full_for_all => {
-                    let runs = protocol::diff_runs(prev, &frame);
-                    if runs.is_empty() && prev.cursor == frame.cursor {
-                        None
-                    } else {
-                        Some(ServerMessage::FrameDiff(protocol::FrameDiff {
-                            width: frame.width,
-                            height: frame.height,
-                            runs,
-                            cursor: frame.cursor,
-                        }))
-                    }
+                .is_none_or(|p| p.width != buf.area.width || p.height != buf.area.height);
+            let diff_msg = if full_for_all {
+                last_frame = Some(protocol::frame_from_buffer(buf, cursor));
+                None
+            } else {
+                let prev = last_frame.as_mut().unwrap();
+                let cursor_moved = prev.cursor != cursor;
+                let runs = protocol::diff_buffer(prev, buf);
+                prev.cursor = cursor;
+                if runs.is_empty() && !cursor_moved {
+                    None // screen unchanged — send nothing
+                } else {
+                    Some(ServerMessage::FrameDiff(protocol::FrameDiff {
+                        width: prev.width,
+                        height: prev.height,
+                        runs,
+                        cursor,
+                    }))
                 }
-                _ => None,
             };
             send_frame(
                 &mut clients,
                 &mut behind,
-                &frame,
+                last_frame.as_ref().unwrap(),
                 diff_msg.as_ref(),
                 full_for_all,
             );
-            last_frame = Some(frame);
             last_draw = Instant::now();
+            dirty = false;
         }
     }
 

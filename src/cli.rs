@@ -16,6 +16,7 @@ pub fn is_cli(args: &[String]) -> bool {
             "ping"
                 | "pane"
                 | "node"
+                | "workspace"
                 | "tab"
                 | "agent"
                 | "ui"
@@ -40,14 +41,14 @@ usage: bohay <command> [args]
   doctor               check optional external tools (git, gh, …)
   ping                 check the server
 
-nodes (spaces):
-  node list                  list nodes
-  node new                   create a node in the current directory
-  node focus <i>             focus node i (0-based)
-  node close [<i>]           close a node (default: active)
+workspaces:
+  workspace list             list workspaces
+  workspace new              create a workspace in the current directory
+  workspace focus <i>        focus workspace i (0-based)
+  workspace close [<i>]      close a workspace (default: active)
 
 tabs:
-  tab list                   list tabs in the current node
+  tab list                   list tabs in the current workspace
   tab new                    new tab
   tab focus <n>              focus tab n (1-based)
   tab close [<n>]            close a tab (default: active)
@@ -55,13 +56,13 @@ tabs:
 panes / agents:
   pane list                  list panes in the current tab
   pane split [<id>] [--down] split a pane (default: side by side)
-  pane focus <id>            focus a pane (jumps to its node/tab)
+  pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane run [<id>] <cmd...>   run a command in a pane
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
-  pane status [<id>]         print a pane's agent status (any node)
+  pane status [<id>]         print a pane's agent status (any workspace)
   pane close [<id>]          close a pane
-  agent list                 list every agent across all nodes/tabs
+  agent list                 list every agent across all workspaces/tabs
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
   wait output <id> --match <text> [--timeout <s>]    block until output appears
@@ -89,15 +90,15 @@ modules (extensions):
   module config-dir <id>     print/create a module's config dir
 
 git:
-  git status                 branch, ahead/behind, working tree of the current node
+  git status                 branch, ahead/behind, working tree of the current workspace
   git branches               local branches with tracking
   git log [--limit N]        recent commits
-  git open [<node>]          open the git tab for a node
+  git open [<workspace>]     open the git tab for a workspace
 
 worktrees:
   worktree list              list the current repo's worktrees
-  worktree create <branch>   create a worktree + node for <branch>
-  worktree open <path>       open an existing worktree as a node
+  worktree create <branch>   create a worktree + workspace for <branch>
+  worktree open <path>       open an existing worktree as a workspace
   worktree remove <path>     remove a worktree (its branch is kept)
 
 events:
@@ -556,7 +557,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         Value::Object(obj)
     };
 
-    // First positional arg after the verb (for node/tab indices).
+    // First positional arg after the verb (for workspace/tab indices).
     let arg0 = || rest.first().cloned();
     let one = |key: &str, val: Option<String>| {
         let mut obj = serde_json::Map::new();
@@ -586,10 +587,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("ui.sidebar".into(), Value::Object(obj))
         }
 
-        ("node", "new") => ("node.new".into(), json!({})),
-        ("node", "focus") => ("node.focus".into(), one("node", arg0())),
-        ("node", "close") => ("node.close".into(), one("node", arg0())),
-        ("node", _) => ("node.list".into(), json!({})),
+        ("workspace" | "node", "new") => ("workspace.new".into(), json!({})),
+        ("workspace" | "node", "focus") => ("workspace.focus".into(), one("workspace", arg0())),
+        ("workspace" | "node", "close") => ("workspace.close".into(), one("workspace", arg0())),
+        ("workspace" | "node", _) => ("workspace.list".into(), json!({})),
 
         ("tab", "new") => ("tab.new".into(), json!({})),
         ("tab", "focus") => ("tab.focus".into(), one("tab", arg0())),
@@ -711,7 +712,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("git.log".into(), Value::Object(obj))
         }
-        ("git", "open") => ("git.open".into(), one("node", arg0())),
+        ("git", "open") => ("git.open".into(), one("workspace", arg0())),
         ("git", _) => ("git.status".into(), json!({})),
 
         ("worktree", "create") => ("worktree.create".into(), one("branch", arg0())),
@@ -757,10 +758,10 @@ mod tests {
         assert_eq!(p.get("command").and_then(|v| v.as_str()), Some("echo hi"));
 
         let (m, _) = parse(&argv("bohay node list")).unwrap();
-        assert_eq!(m, "node.list");
+        assert_eq!(m, "workspace.list");
         let (m, p) = parse(&argv("bohay node focus 2")).unwrap();
-        assert_eq!(m, "node.focus");
-        assert_eq!(p.get("node").and_then(|v| v.as_str()), Some("2"));
+        assert_eq!(m, "workspace.focus");
+        assert_eq!(p.get("workspace").and_then(|v| v.as_str()), Some("2"));
         let (m, _) = parse(&argv("bohay tab new")).unwrap();
         assert_eq!(m, "tab.new");
         let (m, _) = parse(&argv("bohay agent list")).unwrap();
@@ -837,7 +838,7 @@ mod tests {
         assert_eq!(p.get("n").and_then(|v| v.as_u64()), Some(5));
         let (m, p) = parse(&argv("bohay git open 2")).unwrap();
         assert_eq!(m, "git.open");
-        assert_eq!(p.get("node").and_then(|v| v.as_str()), Some("2"));
+        assert_eq!(p.get("workspace").and_then(|v| v.as_str()), Some("2"));
     }
 
     #[test]

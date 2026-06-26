@@ -39,6 +39,10 @@ use crate::app::App;
 use crate::event::AppEvent;
 
 fn main() -> Result<()> {
+    // Run the whole process at 1ms timer resolution so the event loop's timed
+    // waits aren't quantized to Windows' ~15.6ms default (the cause of laggy
+    // typing in panes there). No-op on Unix; restored when `main` returns.
+    let _timer = platform::high_res_timer();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         // Standard CLI conveniences (don't start the server).
@@ -455,7 +459,7 @@ mod tests {
         }
 
         assert!(text.contains("bohay"), "brand missing");
-        assert!(text.contains("NODES"), "nodes header missing");
+        assert!(text.contains("WORKSPACES"), "workspaces header missing");
         assert!(text.contains("AGENTS"), "agents header missing");
         assert!(text.contains("tab"), "tab status missing");
         assert!(text.contains("NORMAL"), "status mode missing");
@@ -578,7 +582,7 @@ mod tests {
             s.state = State::Idle;
             s.agent = "zsh".to_string(); // a shell — filtered out of AGENTS
         }
-        // Show the node with its git branch.
+        // Show the workspace with its git branch.
         app.workspaces[0].branch = Some("main".to_string());
 
         let backend = TestBackend::new(110, 34);

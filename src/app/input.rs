@@ -5,7 +5,7 @@ use super::*;
 
 impl App {
     pub fn handle_event(&mut self, ev: AppEvent) {
-        // Closing the last node empties `workspaces` and sets `should_quit`; the
+        // Closing the last workspace empties `workspaces` and sets `should_quit`; the
         // loop drains the rest of the event batch before it checks that flag, so
         // ignore events here once there's nothing left to act on (`layout()`
         // would otherwise index an empty `workspaces`).
@@ -141,8 +141,8 @@ impl App {
                     off + 1
                 }
             };
-            if hit(self.nodes_area) {
-                self.nodes_scroll = step(self.nodes_scroll);
+            if hit(self.workspaces_area) {
+                self.workspaces_scroll = step(self.workspaces_scroll);
                 return;
             }
             if hit(self.agents_area) {
@@ -198,7 +198,7 @@ impl App {
         }
         if let Some(rect) = self.new_ws_rect {
             if hit(rect) {
-                self.open_folder_picker(); // "+" → choose a folder to open as a node
+                self.open_folder_picker(); // "+" → choose a folder to open as a workspace
                 return;
             }
         }
@@ -238,8 +238,12 @@ impl App {
             self.resume_session(i);
             return;
         }
-        // Clicking a node's branch opens its git tab (docs/17).
-        if let Some((i, _)) = self.node_branch_rects.iter().find(|(_, rect)| hit(*rect)) {
+        // Clicking a workspace's branch opens its git tab (docs/17).
+        if let Some((i, _)) = self
+            .workspace_branch_rects
+            .iter()
+            .find(|(_, rect)| hit(*rect))
+        {
             let i = *i;
             self.open_git_tab(i);
             return;
@@ -360,7 +364,7 @@ impl App {
             return;
         }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the
-        // `Ctrl+Space` prefix still works for global ops (switch tab/node, …).
+        // `Ctrl+Space` prefix still works for global ops (switch tab/workspace, …).
         if self.mode == Mode::Normal && self.active_is_git() {
             if is_prefix(&key) {
                 self.mode = Mode::Prefix;

@@ -328,7 +328,8 @@ impl App {
                 config::save(&self.config);
             }
             4 => {
-                self.config.layout.resume_in_new_node = !self.config.layout.resume_in_new_node;
+                self.config.layout.resume_in_new_workspace =
+                    !self.config.layout.resume_in_new_workspace;
                 config::save(&self.config);
             }
             #[cfg(windows)]

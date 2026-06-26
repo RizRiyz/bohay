@@ -70,12 +70,12 @@ impl Tab {
 pub struct Workspace {
     pub name: String,
     pub cwd: PathBuf,
-    /// Current git branch of `cwd`, if it's inside a repo (for the NODES list).
+    /// Current git branch of `cwd`, if it's inside a repo (for the WORKSPACES list).
     pub branch: Option<String>,
-    /// Ahead/behind upstream, set when this node's git tab fetches status (docs/17).
+    /// Ahead/behind upstream, set when this workspace's git tab fetches status (docs/17).
     pub git_ahead_behind: Option<(u32, u32)>,
-    /// Worktree grouping (docs/18 WT): present for any node inside a git repo;
-    /// nodes sharing a `common_dir` are checkouts of one repo and group together.
+    /// Worktree grouping (docs/18 WT): present for any workspace inside a git repo;
+    /// workspaces sharing a `common_dir` are checkouts of one repo and group together.
     pub worktree: Option<crate::git::WorktreeMembership>,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
@@ -189,7 +189,7 @@ pub struct App {
     /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
     /// open, holding the branch being typed.
     pub worktree_prompt: Option<String>,
-    /// The repo the pending worktree is created in — the active node's folder
+    /// The repo the pending worktree is created in — the active workspace's folder
     /// (`Ctrl+Space G`) or the folder browsed in the picker (`w`).
     pub worktree_repo: Option<PathBuf>,
     /// The last worktree-create error (e.g. branch already checked out), shown in
@@ -231,15 +231,15 @@ pub struct App {
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
     /// Scroll offsets + scrollable regions for the two sidebar lists, so long
-    /// NODES / AGENTS lists can be wheeled through.
-    pub nodes_scroll: usize,
+    /// WORKSPACES / AGENTS lists can be wheeled through.
+    pub workspaces_scroll: usize,
     pub agents_scroll: usize,
-    pub nodes_area: Rect,
+    pub workspaces_area: Rect,
     pub agents_area: Rect,
     /// AGENTS list filter: `false` (default) shows live agents + resumable
     /// session history; `true` shows only live (active) agents.
     pub agents_active_only: bool,
-    /// Last active node shown, to auto-reveal it on a programmatic change.
+    /// Last active workspace shown, to auto-reveal it on a programmatic change.
     pub last_active_ws_shown: usize,
     /// Last mouse position, for hover affordances (the session delete ✕).
     pub hover: Option<(u16, u16)>,
@@ -253,8 +253,8 @@ pub struct App {
     pub tab_rects: Vec<(usize, Rect)>,
     pub tab_close_rects: Vec<(usize, Rect)>,
     pub ws_rects: Vec<(usize, Rect)>,
-    /// Clickable git-branch text per node (opens the git tab — docs/17).
-    pub node_branch_rects: Vec<(usize, Rect)>,
+    /// Clickable git-branch text per workspace (opens the git tab — docs/17).
+    pub workspace_branch_rects: Vec<(usize, Rect)>,
     /// Clickable view-selector tabs in the active git tab (Commits/Flow/…).
     pub git_section_rects: Vec<(crate::git::Section, Rect)>,
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
@@ -349,10 +349,10 @@ impl App {
             resumable: Vec::new(),
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
-            nodes_scroll: 0,
+            workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
-            nodes_area: Rect::ZERO,
+            workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             last_active_ws_shown: 0,
             hover: None,
@@ -362,7 +362,7 @@ impl App {
             pane_content_rects: Vec::new(),
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
-            node_branch_rects: Vec::new(),
+            workspace_branch_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
@@ -532,10 +532,10 @@ impl App {
             resumable: Vec::new(),
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
-            nodes_scroll: 0,
+            workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
-            nodes_area: Rect::ZERO,
+            workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             last_active_ws_shown: 0,
             hover: None,
@@ -545,7 +545,7 @@ impl App {
             pane_content_rects: Vec::new(),
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
-            node_branch_rects: Vec::new(),
+            workspace_branch_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
@@ -641,7 +641,7 @@ impl App {
     }
 
     fn new_tab(&mut self) {
-        // A new tab opens at the node's **static** folder (not wherever the
+        // A new tab opens at the workspace's **static** folder (not wherever the
         // current pane has `cd`'d), matching the static-workspace model.
         let cwd = self.ws().cwd.clone();
         if let Some(id) = self.spawn_into(cwd) {
@@ -659,7 +659,7 @@ impl App {
         self.create_workspace_at(cwd);
     }
 
-    /// Open `cwd` as a new **static** workspace (a node) and focus it. The folder
+    /// Open `cwd` as a new **static** workspace (a workspace) and focus it. The folder
     /// is fixed — its name/cwd won't change as the pane's process `cd`s around.
     pub fn create_workspace_at(&mut self, cwd: PathBuf) {
         let name = ws_name(&cwd);
@@ -675,15 +675,15 @@ impl App {
                 active_tab: 0,
             });
             self.active_ws = self.workspaces.len() - 1;
-            let node = self.active_ws;
+            let ws = self.active_ws;
             self.emit_event(
-                "node.created",
-                serde_json::json!({"node": node.to_string()}),
+                "workspace.created",
+                serde_json::json!({"workspace": ws.to_string()}),
             );
         }
     }
 
-    /// Create a git worktree for `branch` off `repo` and open it as a node
+    /// Create a git worktree for `branch` off `repo` and open it as a workspace
     /// (docs/18 WT). Laid out **nested by repo** —
     /// `~/.bohay/worktrees/<repo>/<branch>` — so checkouts don't clutter the repo
     /// and stay readable, with a numeric suffix if that path is taken (two repos
@@ -727,7 +727,7 @@ impl App {
         Ok(path)
     }
 
-    /// Open the new-worktree branch prompt (`Ctrl+Space G`) for the active node,
+    /// Open the new-worktree branch prompt (`Ctrl+Space G`) for the active workspace,
     /// if it's a git repo (worktrees only make sense inside one).
     pub fn open_worktree_prompt(&mut self) {
         let cwd = self.ws().cwd.clone();
@@ -750,7 +750,7 @@ impl App {
                 if let Some(repo) = self.worktree_repo.clone() {
                     match self.create_worktree(&repo, &branch) {
                         Ok(_) => {
-                            // Success: close the prompt; the new node is focused.
+                            // Success: close the prompt; the new workspace is focused.
                             self.worktree_prompt = None;
                             self.worktree_repo = None;
                             self.worktree_error = None;
@@ -797,8 +797,8 @@ impl App {
 
     /// Track each pane's live process cwd (used for per-pane git / agent-session
     /// keying) and refresh each workspace's git branch from its **fixed** folder.
-    /// A node is a **static workspace**: `cd`-ing inside a pane does not move the
-    /// node's directory — only its branch updates (a checkout changes that).
+    /// A workspace is a **static workspace**: `cd`-ing inside a pane does not move the
+    /// workspace's directory — only its branch updates (a checkout changes that).
     fn refresh_cwds(&mut self) {
         let updates: Vec<(PaneId, PathBuf)> = self
             .panes
@@ -859,7 +859,7 @@ impl App {
     }
 
     /// Reopen a resumable session (from the AGENTS sidebar): spawn a pane in the
-    /// session's directory — reusing its node if one exists, else a new node —
+    /// session's directory — reusing its workspace if one exists, else a new workspace —
     /// and run the agent's resume command.
     pub fn resume_session(&mut self, idx: usize) {
         let Some(s) = self.resumable.get(idx).cloned() else {
@@ -872,9 +872,9 @@ impl App {
             return;
         };
         let tab = Tab::panes(TileLayout::new(id));
-        // Per the Layout setting, reuse the session's own node (or the node at
-        // its cwd); otherwise open it as a tab in the currently active node.
-        let target = if self.config.layout.resume_in_new_node {
+        // Per the Layout setting, reuse the session's own workspace (or the workspace at
+        // its cwd); otherwise open it as a tab in the currently active workspace.
+        let target = if self.config.layout.resume_in_new_workspace {
             self.workspaces.iter().position(|w| w.cwd == s.cwd)
         } else {
             Some(self.active_ws)
@@ -975,7 +975,7 @@ impl App {
         }
     }
 
-    /// Close a node (workspace) and all of its panes.
+    /// Close a workspace and all of its panes.
     fn close_workspace(&mut self, index: usize) {
         if index >= self.workspaces.len() {
             return;
@@ -998,8 +998,8 @@ impl App {
         }
         self.session_dirty = true;
         self.emit_event(
-            "node.closed",
-            serde_json::json!({"node": index.to_string()}),
+            "workspace.closed",
+            serde_json::json!({"workspace": index.to_string()}),
         );
     }
 
@@ -1041,8 +1041,8 @@ fn ws_name(cwd: &std::path::Path) -> String {
         .to_string()
 }
 
-/// Worktree grouping for a node at `cwd` (docs/18 WT): its git common dir, if
-/// `cwd` is inside a repo. Nodes that share one group together in the sidebar.
+/// Worktree grouping for a workspace at `cwd` (docs/18 WT): its git common dir, if
+/// `cwd` is inside a repo. Workspaces that share one group together in the sidebar.
 fn worktree_membership(cwd: &std::path::Path) -> Option<crate::git::WorktreeMembership> {
     crate::git::local::common_dir(cwd)
         .map(|common_dir| crate::git::WorktreeMembership { common_dir })
@@ -1497,7 +1497,7 @@ mod tests {
         assert_eq!(
             app.workspaces.len(),
             before_ws + 1,
-            "a new node for the cwd"
+            "a new workspace for the cwd"
         );
         let s = app.status.get(&app.layout().focus).unwrap();
         assert_eq!(s.agent, "claude");
@@ -1514,7 +1514,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         for _ in 0..9 {
-            app.new_workspace(); // 10 nodes — more than fit in a short sidebar
+            app.new_workspace(); // 10 workspaces — more than fit in a short sidebar
         }
         app.active_ws = 0;
         app.last_active_ws_shown = 0;
@@ -1526,10 +1526,13 @@ mod tests {
                 .unwrap()
         };
         draw(&mut app);
-        assert!(app.nodes_area.height > 0, "the nodes list was measured");
-        assert_eq!(app.nodes_scroll, 0);
+        assert!(
+            app.workspaces_area.height > 0,
+            "the workspaces list was measured"
+        );
+        assert_eq!(app.workspaces_scroll, 0);
 
-        let na = app.nodes_area;
+        let na = app.workspaces_area;
         let wheel = |app: &mut App, kind| {
             app.handle_event(AppEvent::Mouse(MouseEvent {
                 kind,
@@ -1538,23 +1541,26 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }));
         };
-        // Wheel down over the NODES list → it scrolls.
+        // Wheel down over the WORKSPACES list → it scrolls.
         wheel(&mut app, MouseEventKind::ScrollDown);
         wheel(&mut app, MouseEventKind::ScrollDown);
         draw(&mut app);
-        assert_eq!(app.nodes_scroll, 2, "wheel scrolled the nodes list down");
+        assert_eq!(
+            app.workspaces_scroll, 2,
+            "wheel scrolled the workspaces list down"
+        );
         // Wheel up past the top → clamps at 0.
         for _ in 0..5 {
             wheel(&mut app, MouseEventKind::ScrollUp);
         }
         draw(&mut app);
-        assert_eq!(app.nodes_scroll, 0, "scroll clamps at the top");
-        // Selecting an off-screen node auto-reveals it.
+        assert_eq!(app.workspaces_scroll, 0, "scroll clamps at the top");
+        // Selecting an off-screen workspace auto-reveals it.
         app.active_ws = 9;
         draw(&mut app);
         assert!(
-            app.nodes_scroll > 0,
-            "the active node was scrolled into view"
+            app.workspaces_scroll > 0,
+            "the active workspace was scrolled into view"
         );
     }
 
@@ -1708,20 +1714,20 @@ mod tests {
         // English baseline shows the English sidebar header.
         app.catalog = crate::i18n::by_code("en");
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert!(text(&term).contains("NODES"), "EN header");
+        assert!(text(&term).contains("WORKSPACES"), "EN header");
 
-        // A Latin language swaps the header text (NODOS = NODES, contiguous).
+        // A Latin language swaps the header text (ESPACIOS = WORKSPACES, contiguous).
         app.catalog = crate::i18n::by_code("es");
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let es = text(&term);
-        assert!(es.contains("NODOS"), "translated header appears");
-        assert!(!es.contains("NODES"), "English header replaced");
+        assert!(es.contains("ESPACIOS"), "translated header appears");
+        assert!(!es.contains("WORKSPACES"), "English header replaced");
 
-        // CJK renders too (`节` = first char of the zh header). A wide char's
+        // CJK renders too (`工` = first char of the zh header). A wide char's
         // trailing cell is a space, so we check the lead glyph, not the pair.
         app.catalog = crate::i18n::by_code("zh");
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert!(text(&term).contains('节'), "CJK header renders");
+        assert!(text(&term).contains('工'), "CJK header renders");
     }
 
     #[test]
@@ -1745,7 +1751,7 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(text(&term).contains("Menú"), "menu button translated");
 
-        // The folder picker ("open new node" modal) is translated.
+        // The folder picker ("open new workspace" modal) is translated.
         app.open_folder_picker();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
@@ -1837,8 +1843,8 @@ mod tests {
             "a non-default language is selected"
         );
         assert_eq!(
-            app.catalog.nodes,
-            crate::i18n::by_code(&app.config.language).nodes,
+            app.catalog.workspaces,
+            crate::i18n::by_code(&app.config.language).workspaces,
             "catalog swapped live"
         );
         assert_eq!(

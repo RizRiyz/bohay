@@ -227,7 +227,7 @@ fn draw_content(
                 (cat.set_column_gap, l.col_gap == 1),
                 (cat.set_row_gap, l.row_gap == 1),
                 (cat.set_pane_titles, l.show_titles),
-                (cat.set_resume_node, l.resume_in_new_node),
+                (cat.set_resume_workspace, l.resume_in_new_workspace),
             ];
             for (k, (label, on)) in toggles.into_iter().enumerate() {
                 ctls.push(ctl_row(f, area, k + 1, cursor, label, toggle(on, t), t));

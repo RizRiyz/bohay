@@ -122,6 +122,41 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+/// Raise the OS timer resolution so the event loop's timed waits (`recv_timeout`,
+/// `thread::sleep`) actually run at their intended cadence. Windows' default
+/// scheduler tick is ~15.6 ms, which quantizes those waits and makes the render
+/// loop laggy + jittery (typing in a pane feels delayed); this drops it to 1 ms
+/// while the guard is held. A no-op on Unix (already sub-millisecond). Hold the
+/// returned guard for the whole process lifetime.
+#[must_use]
+pub fn high_res_timer() -> TimerGuard {
+    #[cfg(windows)]
+    // SAFETY: `timeBeginPeriod` only sets a global timer-resolution hint.
+    unsafe {
+        timeBeginPeriod(1);
+    }
+    TimerGuard
+}
+
+pub struct TimerGuard;
+
+impl Drop for TimerGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        // SAFETY: pairs 1:1 with the `timeBeginPeriod(1)` in `high_res_timer`.
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(u_period: u32) -> u32;
+    fn timeEndPeriod(u_period: u32) -> u32;
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
