@@ -6,7 +6,7 @@ use super::*;
 use crate::app::Cmd;
 use ratatui::widgets::{Borders, Clear};
 
-pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) {
     dim_backdrop(f, area, t);
 
     let all = Cmd::ALL;
@@ -94,7 +94,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-fn dim_backdrop(f: &mut Frame, area: Rect, t: &Theme) {
+fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -105,7 +105,7 @@ fn dim_backdrop(f: &mut Frame, area: Rect, t: &Theme) {
     }
 }
 
-fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
+fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
     let buf = f.buffer_mut();
     for i in 0..w {
         buf[(x + i, y)]

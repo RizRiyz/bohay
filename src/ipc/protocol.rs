@@ -122,8 +122,10 @@ pub fn diff_runs(old: &FrameData, new: &FrameData) -> Vec<DiffRun> {
     runs
 }
 
-/// Apply a `FrameDiff` to `frame` in place (the client reconstructs the full
-/// frame so its blit path is unchanged).
+/// Apply a `FrameDiff` to a full `FrameData` in place. The client no longer
+/// reconstructs full frames (it writes changed cells straight to the terminal), so
+/// this is now only a test helper for the diff/round-trip checks.
+#[cfg(test)]
 pub fn apply_diff(frame: &mut FrameData, diff: &FrameDiff) {
     frame.width = diff.width;
     frame.height = diff.height;

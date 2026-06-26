@@ -5,15 +5,52 @@ pub mod theme;
 
 use std::path::Path;
 
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
 use crate::ids::PaneId;
 use crate::ui::theme::{State, Theme};
+
+/// A draw surface mirroring the slice of `ratatui::Frame` the UI actually uses, but
+/// over a `Buffer` we own. The server renders straight into its frame buffer through
+/// this and runs a single `diff_buffer`, skipping `Terminal`'s redundant internal
+/// reset+diff+flush (~28% of the per-frame cost — see `bench_render_hotpath`). The
+/// `--local` path and tests keep calling `render(&mut Frame, …)`, which wraps the
+/// terminal's own buffer in one of these.
+pub struct RenderTarget<'a> {
+    buf: &'a mut Buffer,
+    area: Rect,
+    cursor: Option<(u16, u16)>,
+}
+
+impl<'a> RenderTarget<'a> {
+    /// Wrap a buffer we own (the server's frame buffer) as a draw surface.
+    pub fn new(buf: &'a mut Buffer, area: Rect) -> Self {
+        RenderTarget {
+            buf,
+            area,
+            cursor: None,
+        }
+    }
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+    pub fn buffer_mut(&mut self) -> &mut Buffer {
+        self.buf
+    }
+    pub fn render_widget<W: Widget>(&mut self, widget: W, area: Rect) {
+        widget.render(area, self.buf);
+    }
+    pub fn set_cursor_position<P: Into<Position>>(&mut self, position: P) {
+        let p = position.into();
+        self.cursor = Some((p.x, p.y));
+    }
+}
 
 mod borders;
 mod git;
@@ -25,7 +62,27 @@ mod sidebar;
 mod status;
 mod tabbar;
 
+/// Frame-based entry (used by `--local` and tests): wrap the terminal's buffer in a
+/// `RenderTarget`, render, then copy the resulting cursor back onto the frame.
 pub fn render(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let cursor = {
+        let mut target = RenderTarget {
+            buf: f.buffer_mut(),
+            area,
+            cursor: None,
+        };
+        render_into(&mut target, app);
+        target.cursor
+    };
+    if let Some(p) = cursor {
+        f.set_cursor_position(p);
+    }
+}
+
+/// The actual UI render, over a buffer we own (`RenderTarget`). The server calls
+/// this directly with its frame buffer; `render` above adapts a `Frame` to it.
+pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     let t = app.theme.clone();
     // The active i18n catalog (Copy `&'static`), passed to draw fns that don't
     // get the whole `App` (picker, git tab) so all chrome is localized (docs/21).
@@ -245,7 +302,7 @@ pub(super) fn display_width(s: &str) -> usize {
 
 /// A small centered toast box near the bottom (e.g. "✓ Copied"). Drawn last, so
 /// it floats over everything; the loop clears it after ~1.4s.
-fn draw_toast(f: &mut Frame, area: Rect, text: &str, t: &Theme) {
+fn draw_toast(f: &mut RenderTarget, area: Rect, text: &str, t: &Theme) {
     use ratatui::widgets::{Borders, Clear};
     let w = (display_width(text) as u16 + 6).min(area.width);
     let h = 3u16;

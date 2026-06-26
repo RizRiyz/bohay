@@ -427,6 +427,150 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// Manual benchmark of the server render hot path (full UI render + in-place
+    /// `diff_buffer`) — the per-frame cost during typing. Run with:
+    ///   cargo test --release bench_render_hotpath -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_render_hotpath() {
+        use crate::ipc::protocol::{diff_buffer, frame_from_buffer};
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let (w, h) = (120u16, 40u16);
+        let mut app = App::new(w, h, tx).unwrap();
+        let focus = app.layout().focus;
+        // Fill the focused pane with a screenful of text.
+        if let Some(p) = app.panes.get(&focus) {
+            if let Ok(mut e) = p.engine.lock() {
+                for _ in 0..h {
+                    e.advance(
+                        b"the quick brown fox jumps over the lazy dog 0123 abcdefghijklmnop\r\n",
+                    );
+                }
+            }
+        }
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| ui::render(f, &mut app)).unwrap();
+        let mut last = frame_from_buffer(term.backend().buffer(), None);
+
+        let bench = |label: &str,
+                     app: &mut App,
+                     term: &mut Terminal<TestBackend>,
+                     last: &mut crate::ipc::protocol::FrameData,
+                     feed: &[u8]| {
+            let n = 2000u32;
+            let t0 = std::time::Instant::now();
+            let mut total_changed = 0usize;
+            for _ in 0..n {
+                if let Some(p) = app.panes.get(&focus) {
+                    if let Ok(mut e) = p.engine.lock() {
+                        e.advance(feed);
+                    }
+                }
+                term.draw(|f| ui::render(f, app)).unwrap();
+                let runs = diff_buffer(last, term.backend().buffer());
+                total_changed += runs.iter().map(|r| r.symbols.len()).sum::<usize>();
+            }
+            let dt = t0.elapsed();
+            println!(
+                "{label:>10} @ {w}x{h}: {:>10?}/frame  (~{} changed cells/frame)",
+                dt / n,
+                total_changed as u32 / n,
+            );
+        };
+        println!();
+        bench("typing", &mut app, &mut term, &mut last, b"x");
+        bench(
+            "scrolling",
+            &mut app,
+            &mut term,
+            &mut last,
+            b"the quick brown fox jumps over the lazy dog 0123 abcdefghij\r\n",
+        );
+
+        // Breakdown of one frame (where the ~126µs goes).
+        let n = 5000u32;
+        // (a) the pane grid-walk alone (alacritty display_iter → RenderCell).
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            if let Some(p) = app.panes.get(&focus) {
+                if let Ok(e) = p.engine.lock() {
+                    e.for_each_cell(&mut |_, _, _| {});
+                }
+            }
+        }
+        let grid_walk = t.elapsed() / n;
+        // (b) ratatui Terminal::draw with an EMPTY render (its reset+diff+flush overhead).
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            term.draw(|_f| {}).unwrap();
+        }
+        let ratatui_overhead = t.elapsed() / n;
+        // (c) the full draw (overhead + the real ui::render).
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            term.draw(|f| ui::render(f, &mut app)).unwrap();
+        }
+        let full_draw = t.elapsed() / n;
+        // (d) diff_buffer alone.
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = diff_buffer(&mut last, term.backend().buffer());
+        }
+        let diff = t.elapsed() / n;
+        // (e) the actual server frame now: render straight into an owned buffer +
+        // diff, with NO ratatui Terminal in the loop.
+        let area = ratatui::layout::Rect::new(0, 0, w, h);
+        let mut owned = ratatui::buffer::Buffer::empty(area);
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            owned.reset();
+            {
+                let mut tg = crate::ui::RenderTarget::new(&mut owned, area);
+                ui::render_into(&mut tg, &mut app);
+            }
+            let _ = diff_buffer(&mut last, &owned);
+        }
+        let server_frame = t.elapsed() / n;
+        println!("  breakdown:");
+        println!("    pane grid-walk:    {grid_walk:>10?}");
+        println!(
+            "    ratatui overhead:  {ratatui_overhead:>10?}  (reset+diff+flush — now dropped)"
+        );
+        println!(
+            "    OLD full frame:    {:>10?}  (terminal.draw + diff_buffer)",
+            full_draw + diff
+        );
+        println!(
+            "    NEW server frame:  {server_frame:>10?}  (render_into owned buf + diff_buffer)"
+        );
+        // (f) the CLIENT's per-frame cost: re-blit the whole frame via terminal.draw.
+        let frame = frame_from_buffer(&owned, None);
+        let mut cterm = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            cterm
+                .draw(|f| {
+                    let b = f.buffer_mut();
+                    for (i, cell) in frame.cells.iter().enumerate() {
+                        let (x, y) = ((i as u16) % w, (i as u16) / w);
+                        let tgt = &mut b[(x, y)];
+                        tgt.set_symbol(if cell.symbol.is_empty() {
+                            " "
+                        } else {
+                            &cell.symbol
+                        });
+                        tgt.set_fg(crate::ipc::protocol::unpack(cell.fg));
+                        tgt.set_bg(crate::ipc::protocol::unpack(cell.bg));
+                        tgt.modifier = crate::ipc::protocol::unpack_mods(cell.mods);
+                    }
+                })
+                .unwrap();
+        }
+        let client_blit = t.elapsed() / n;
+        println!("    CLIENT old re-blit:{client_blit:>10?}  (terminal.draw full frame — REMOVED; client now writes only changed cells)");
+        println!();
+    }
+
     #[test]
     fn base64_matches_known_vectors() {
         // RFC 4648 test vectors — the OSC 52 clipboard payload must encode right.

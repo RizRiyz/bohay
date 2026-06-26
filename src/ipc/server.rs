@@ -11,8 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::backend::TestBackend;
-use ratatui::Terminal;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use crate::app::App;
 use crate::event::AppEvent;
@@ -45,7 +45,10 @@ pub fn run() -> Result<()> {
     let mut foreground: Option<u64> = None;
     let mut size = DEFAULT_SIZE;
     let mut backend_size = size;
-    let mut terminal = Terminal::new(TestBackend::new(size.0, size.1))?;
+    // We render straight into a buffer we own (no ratatui `Terminal`), so a frame is
+    // one render + one `diff_buffer` — not render + Terminal's reset/diff/flush + our
+    // diff. Saved ~28% of the per-frame cost (see `bench_render_hotpath`).
+    let mut render_buf = Buffer::empty(Rect::new(0, 0, size.0, size.1));
     let mut last_draw = Instant::now();
     let mut last_save = Instant::now();
     // The last frame broadcast. We send only the *diff* against it (or skip an
@@ -139,12 +142,17 @@ pub fn run() -> Result<()> {
         dirty |= activity;
 
         if dirty && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
+            let area = Rect::new(0, 0, size.0, size.1);
             if size != backend_size {
-                terminal = Terminal::new(TestBackend::new(size.0, size.1))?;
+                render_buf = Buffer::empty(area);
                 backend_size = size;
             }
-            terminal.draw(|f| ui::render(f, &mut app))?;
-            let buf = terminal.backend().buffer();
+            render_buf.reset();
+            {
+                let mut target = ui::RenderTarget::new(&mut render_buf, area);
+                ui::render_into(&mut target, &mut app);
+            }
+            let buf = &render_buf;
             let cursor = app.last_cursor;
             // A full frame is needed on the first frame and on resize (a diff would
             // be meaningless against different dims). Otherwise diff the live buffer

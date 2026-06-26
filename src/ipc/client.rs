@@ -6,14 +6,17 @@ use std::path::Path;
 use std::thread;
 
 use anyhow::{anyhow, Result};
+use ratatui::backend::Backend;
+use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
     read as read_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
     EnableMouseCapture, Event,
 };
 use ratatui::crossterm::execute;
-use ratatui::DefaultTerminal;
+use ratatui::layout::Position;
+use ratatui::{DefaultTerminal, Terminal};
 
-use crate::ipc::protocol::{self, ClientMessage, FrameData, ServerMessage};
+use crate::ipc::protocol::{self, ClientMessage, FrameData, FrameDiff, ServerMessage};
 use crate::ipc::transport;
 
 /// Attach to the local server over its Unix socket.
@@ -70,23 +73,30 @@ where
     // Input thread: terminal events → the server.
     thread::spawn(move || input_loop(writer));
 
-    // Main thread: blit frames as they arrive. We keep the last full frame so a
-    // `FrameDiff` (sparse changed cells) can be reconstructed before blitting —
-    // the blit path itself is unchanged.
-    let mut current: Option<FrameData> = None;
+    // Main thread: paint frames as they arrive. A full frame repaints the screen; a
+    // diff writes only its changed cells straight to the terminal (no full re-blit,
+    // no reconstructed frame) — so a busy session costs O(changed cells), not O(screen).
     loop {
         match protocol::read_message::<_, ServerMessage>(&mut reader) {
+            // A full frame repaints the whole screen; a diff writes *only its changed
+            // cells* straight to the terminal (O(changed), not a whole re-blit). Each
+            // is wrapped in a DEC 2026 synchronized update so it paints atomically.
             Ok(ServerMessage::Frame(frame)) => {
-                blit(terminal, &frame, truecolor)?;
-                current = Some(frame);
+                sync_begin();
+                let r = paint(
+                    terminal,
+                    &frame_cells(&frame, truecolor),
+                    frame.cursor,
+                    true,
+                );
+                sync_end();
+                r?;
             }
             Ok(ServerMessage::FrameDiff(diff)) => {
-                if let Some(cur) = current.as_mut() {
-                    protocol::apply_diff(cur, &diff);
-                    blit(terminal, cur, truecolor)?;
-                }
-                // (A diff before any full frame can't happen — the server always
-                // sends a full Frame to a freshly-attached client first.)
+                sync_begin();
+                let r = paint(terminal, &diff_cells(&diff, truecolor), diff.cursor, false);
+                sync_end();
+                r?;
             }
             Ok(ServerMessage::Notify(msg)) => crate::emit_notification(&msg),
             Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
@@ -148,54 +158,106 @@ where
     Ok(())
 }
 
-fn blit(terminal: &mut DefaultTerminal, frame: &FrameData, truecolor: bool) -> Result<()> {
+/// Begin/end a DEC 2026 synchronized update so a frame paints atomically (no
+/// tearing). Terminals without it ignore the sequence.
+fn sync_begin() {
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"\x1b[?2026h");
+    let _ = out.flush();
+}
+fn sync_end() {
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"\x1b[?2026l");
+    let _ = out.flush();
+}
+
+/// Build one ratatui `Cell` from wire fields (control chars → space; 256-color
+/// downsampling on non-truecolor terminals).
+fn make_cell(sym: &str, fg: u32, bg: u32, mods: u16, truecolor: bool) -> Cell {
     let adjust = |c| if truecolor { c } else { protocol::to_256(c) };
-    // Begin a DEC 2026 synchronized update so the terminal applies the whole frame
-    // atomically — no tearing/flicker mid-paint. Terminals without it ignore the
-    // sequence. Paired with `?2026l` after the draw below.
-    {
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"\x1b[?2026h");
-        let _ = out.flush();
-    }
-    // Don't touch the cursor here: ratatui shows + positions it once per draw.
-    // An extra per-frame `Hide` (added later) hid then re-showed the cursor on
-    // every frame, so any activity flickered it — this matches the original
-    // (smooth) blit, which never hid the cursor.
-    let result = terminal.draw(|f| {
-        let area = f.area();
-        let buf = f.buffer_mut();
-        for (i, cell) in frame.cells.iter().enumerate() {
-            let x = (i as u16) % frame.width;
-            let y = (i as u16) / frame.width;
-            if x < area.width && y < area.height {
-                let target = &mut buf[(x, y)];
-                // Guard against control chars in the symbol (ratatui panics on
-                // them); the server filters too, but never trust the wire.
-                let sym = if cell.symbol.is_empty() || cell.symbol.chars().any(|c| c.is_control()) {
-                    " "
-                } else {
-                    &cell.symbol
-                };
-                target.set_symbol(sym);
-                target.set_fg(adjust(protocol::unpack(cell.fg)));
-                target.set_bg(adjust(protocol::unpack(cell.bg)));
-                target.modifier = protocol::unpack_mods(cell.mods);
-            }
+    // ratatui panics on control chars in a symbol; the server filters, but never
+    // trust the wire.
+    let s = if sym.is_empty() || sym.chars().any(|c| c.is_control()) {
+        " "
+    } else {
+        sym
+    };
+    let mut cell = Cell::default();
+    cell.set_symbol(s); // copies into the cell (no borrow), unlike `Cell::new`
+    cell.set_fg(adjust(protocol::unpack(fg)));
+    cell.set_bg(adjust(protocol::unpack(bg)));
+    cell.modifier = protocol::unpack_mods(mods);
+    cell
+}
+
+/// Every cell of a full frame as `(x, y, Cell)`.
+fn frame_cells(frame: &FrameData, truecolor: bool) -> Vec<(u16, u16, Cell)> {
+    frame
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let i = i as u16;
+            (
+                i % frame.width,
+                i / frame.width,
+                make_cell(&c.symbol, c.fg, c.bg, c.mods, truecolor),
+            )
+        })
+        .collect()
+}
+
+/// Only the changed cells of a diff as `(x, y, Cell)` — the whole point: O(changed).
+fn diff_cells(diff: &FrameDiff, truecolor: bool) -> Vec<(u16, u16, Cell)> {
+    let w = diff.width as u32;
+    let mut cells = Vec::new();
+    for run in &diff.runs {
+        for (k, sym) in run.symbols.iter().enumerate() {
+            let i = run.start + k as u32;
+            cells.push((
+                (i % w) as u16,
+                (i / w) as u16,
+                make_cell(sym, run.fg, run.bg, run.mods, truecolor),
+            ));
         }
-        if let Some((cx, cy)) = frame.cursor {
-            if cx < area.width && cy < area.height {
-                f.set_cursor_position((cx, cy));
-            }
-        }
-    });
-    // End the synchronized update — the terminal now paints the frame in one shot.
-    {
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"\x1b[?2026l");
-        let _ = out.flush();
     }
-    result?;
+    cells
+}
+
+/// Write `cells` straight to the terminal via the backend (no full re-blit / no
+/// ratatui double-buffer), position the cursor, and flush. `clear` first wipes the
+/// screen (full frame / resync); diffs paint over what's already there.
+fn paint<B>(
+    terminal: &mut Terminal<B>,
+    cells: &[(u16, u16, Cell)],
+    cursor: Option<(u16, u16)>,
+    clear: bool,
+) -> Result<()>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    // Clamp to the terminal size so a resize race can't index out of bounds.
+    let size = terminal.size()?;
+    let (tw, th) = (size.width, size.height);
+    let backend = terminal.backend_mut();
+    if clear {
+        backend.clear()?;
+    }
+    backend.draw(
+        cells
+            .iter()
+            .filter(|(x, y, _)| *x < tw && *y < th)
+            .map(|(x, y, c)| (*x, *y, c)),
+    )?;
+    match cursor {
+        Some((x, y)) if x < tw && y < th => {
+            backend.set_cursor_position(Position::new(x, y))?;
+            backend.show_cursor()?;
+        }
+        _ => backend.hide_cursor()?,
+    }
+    backend.flush()?;
     Ok(())
 }
 
@@ -230,5 +292,49 @@ mod tests {
 
         assert_eq!(&srv.join().unwrap(), b"hello", "input forwarded to server");
         assert_eq!(output, b"world", "server reply forwarded to output");
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn incremental_diff_reconstructs_the_screen() {
+        let cell = |s: &str| protocol::CellData {
+            symbol: s.into(),
+            fg: 0,
+            bg: 0,
+            mods: 0,
+        };
+        let f0 = FrameData {
+            width: 3,
+            height: 1,
+            cells: vec![cell("a"), cell("b"), cell("c")],
+            cursor: None,
+        };
+        let f1 = FrameData {
+            width: 3,
+            height: 1,
+            cells: vec![cell("a"), cell("X"), cell("c")],
+            cursor: Some((1, 0)),
+        };
+
+        let mut term = Terminal::new(TestBackend::new(3, 1)).unwrap();
+        // Paint a full frame, then apply a diff that changes only one cell.
+        paint(&mut term, &frame_cells(&f0, true), f0.cursor, true).unwrap();
+        let diff = FrameDiff {
+            width: 3,
+            height: 1,
+            runs: protocol::diff_runs(&f0, &f1),
+            cursor: f1.cursor,
+        };
+        paint(&mut term, &diff_cells(&diff, true), diff.cursor, false).unwrap();
+
+        // The terminal now shows f1 — the client stays correct without ever
+        // re-blitting the whole frame.
+        let got = protocol::frame_from_buffer(term.backend().buffer(), None);
+        assert_eq!(got.cells, f1.cells);
     }
 }

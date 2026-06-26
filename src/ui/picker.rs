@@ -9,7 +9,7 @@ use ratatui::widgets::{Borders, Clear};
 /// Draw the picker over a dimmed backdrop; returns the clickable row rects
 /// (row index → rect) the input layer uses for mouse selection.
 pub(super) fn draw_picker(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     p: &FolderPicker,
     cat: &Catalog,
@@ -148,7 +148,7 @@ fn trunc_tail(s: &str, max: usize) -> String {
 /// shown in red (e.g. the branch is already checked out) so a failed create is
 /// never a silent no-op.
 pub(super) fn draw_worktree_prompt(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     buf: &str,
     error: Option<&str>,
@@ -213,7 +213,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 /// Dim the whole frame toward `crust` so the dialog reads as focused.
-fn dim_backdrop(f: &mut Frame, area: Rect, t: &Theme) {
+fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -224,7 +224,7 @@ fn dim_backdrop(f: &mut Frame, area: Rect, t: &Theme) {
     }
 }
 
-fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
+fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
     let buf = f.buffer_mut();
     for i in 0..w {
         buf[(x + i, y)]
@@ -233,7 +233,7 @@ fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
     }
 }
 
-fn fill_bg(f: &mut Frame, rect: Rect, color: Color) {
+fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
     let buf = f.buffer_mut();
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {

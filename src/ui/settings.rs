@@ -14,7 +14,12 @@ pub(super) struct SettingsHits {
     pub arrows: Vec<(usize, i32, Rect)>,
 }
 
-pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> SettingsHits {
+pub(super) fn draw_settings(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &App,
+    t: &Theme,
+) -> SettingsHits {
     dim_backdrop(f, area, t);
 
     // Width must fit the whole tab bar — translated labels (esp. CJK) can be much
@@ -128,7 +133,7 @@ pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> 
 type Content = (Vec<(usize, Rect)>, Vec<(usize, i32, Rect)>);
 
 fn draw_content(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     tab: SettingsTab,
     cursor: usize,
@@ -387,7 +392,7 @@ fn draw_content(
 /// cells as decrement/increment targets so the left arrow decreases and the
 /// right increases.
 fn slider_row(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     sel: bool,
     label: &str,
@@ -424,7 +429,7 @@ fn slider_row(
 
 /// A label + right-aligned value control row, highlighted when selected.
 fn ctl_row(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     i: usize,
     cursor: usize,
@@ -481,7 +486,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 /// Dim the whole frame toward `crust` so the dialog reads as focused.
-fn dim_backdrop(f: &mut Frame, area: Rect, t: &Theme) {
+fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -492,7 +497,7 @@ fn dim_backdrop(f: &mut Frame, area: Rect, t: &Theme) {
     }
 }
 
-fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
+fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
     let buf = f.buffer_mut();
     for i in 0..w {
         buf[(x + i, y)]
@@ -501,7 +506,7 @@ fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
     }
 }
 
-fn fill_bg(f: &mut Frame, rect: Rect, color: ratatui::style::Color) {
+fn fill_bg(f: &mut RenderTarget, rect: Rect, color: ratatui::style::Color) {
     let buf = f.buffer_mut();
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {

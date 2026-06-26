@@ -50,7 +50,14 @@ fn list_capacity(rows: u16) -> usize {
 
 /// A thin scrollbar on the sidebar's right edge, shown only when the list
 /// overflows its area. Preserves the cell background (e.g. the green selection).
-fn draw_scrollbar(f: &mut Frame, track: Rect, total: usize, cap: usize, scroll: usize, t: &Theme) {
+fn draw_scrollbar(
+    f: &mut RenderTarget,
+    track: Rect,
+    total: usize,
+    cap: usize,
+    scroll: usize,
+    t: &Theme,
+) {
     if total <= cap || track.height == 0 {
         return;
     }
@@ -69,7 +76,12 @@ fn draw_scrollbar(f: &mut Frame, track: Rect, total: usize, cap: usize, scroll: 
     }
 }
 
-pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) -> SidebarHits {
+pub(super) fn draw_sidebar(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    t: &Theme,
+) -> SidebarHits {
     // `catalog` is `&'static` (Copy), so binding it here sidesteps borrow
     // conflicts with the `&mut app` rect bookkeeping below.
     let cat = app.catalog;
@@ -96,7 +108,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
     let cx = area.x + 2;
     let cw = area.width.saturating_sub(3);
     let bar_col = area.right().saturating_sub(2);
-    let line_at = |f: &mut Frame, y: u16, line: Line| {
+    let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
         if y < area.bottom() {
             f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
         }

@@ -12,7 +12,7 @@ pub(super) type TabHits = (
     Option<Rect>,
 );
 
-pub(super) fn draw_tabbar(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> TabHits {
+pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) -> TabHits {
     // Tab bar background = pane background (the sidebar is the lighter one).
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
     let ws = app.ws();

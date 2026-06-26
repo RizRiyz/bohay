@@ -6,7 +6,7 @@ use super::*;
 /// Draw the dot + path (+ ✕ for the focused pane) as a title ON each pane's top
 /// border row, after the borders are drawn, so it lands on the tab bar edge.
 pub(super) fn draw_pane_titles(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     focus: PaneId,
     app: &App,
@@ -50,7 +50,7 @@ pub(super) fn draw_pane_titles(
 // ── panes ─────────────────────────────────────────────────────────────────
 
 pub(super) fn draw_panes(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     bordered: bool,
     app: &App,
@@ -67,7 +67,7 @@ pub(super) fn draw_panes(
 }
 
 fn draw_one_pane(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     id: PaneId,
     focused: bool,

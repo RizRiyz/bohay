@@ -34,7 +34,7 @@ fn scope_label(s: Scope, cat: &Catalog) -> &'static str {
 /// Renders the git tab; returns the clickable view-selector rects so the input
 /// layer can switch sections on a tab click.
 pub(super) fn render(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     g: &mut GitView,
     cat: &Catalog,
@@ -75,7 +75,7 @@ pub(super) fn render(
     tab_rects
 }
 
-fn draw_prs(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
+fn draw_prs(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.prs {
         Load::Idle => {
             let note = g.gh.note().unwrap_or(cat.git_unavailable);
@@ -176,7 +176,13 @@ fn check_glyph(c: Checks, t: &Theme) -> (&'static str, Color) {
 /// The PR detail panel (GIT-6): description, branches, per-check CI, individual
 /// reviews, mergeability, and stats. Scrolls as a block; returns the clamped
 /// scroll offset (like Flow/Status).
-fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
+fn draw_pr_detail(
+    f: &mut RenderTarget,
+    area: Rect,
+    g: &GitView,
+    cat: &Catalog,
+    t: &Theme,
+) -> usize {
     let d = match &g.detail {
         Load::Loading => {
             message(f, area, cat.git_loading_pr, t.overlay0);
@@ -381,7 +387,7 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn draw_issues(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
+fn draw_issues(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.issues {
         Load::Idle => {
             let note = g.gh.note().unwrap_or(cat.git_unavailable);
@@ -423,7 +429,7 @@ fn draw_issues(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme)
 /// The **flow** view: the trunk branch as a track, with the other branches
 /// diverging below — each with its commit dots, ahead/behind, and matched PR.
 /// A GitHub-flow-style picture built from the data already fetched.
-fn draw_flow(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
+fn draw_flow(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
     let branches = match &g.branches {
         Load::Loading => {
             message(f, area, cat.git_loading_flow, t.overlay0);
@@ -526,7 +532,7 @@ fn draw_flow(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -
 }
 
 fn draw_header(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     g: &GitView,
     cat: &Catalog,
@@ -601,7 +607,7 @@ fn draw_header(
     rects
 }
 
-fn draw_footer(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
+fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     if g.filtering {
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -678,7 +684,7 @@ fn draw_footer(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme)
     f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
 }
 
-fn draw_branches(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
+fn draw_branches(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.branches {
         Load::Loading => return message(f, area, cat.git_loading_branches, t.overlay0),
         Load::Error(e) => return message(f, area, &format!("{}: {e}", cat.git_error), t.coral),
@@ -716,7 +722,7 @@ fn draw_branches(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Them
     draw_list(f, area, rows, g.cursor, cat, t);
 }
 
-fn draw_commits(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
+fn draw_commits(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.commits {
         Load::Loading => return message(f, area, cat.git_loading_commits, t.overlay0),
         Load::Error(e) => return message(f, area, &format!("{}: {e}", cat.git_error), t.coral),
@@ -754,7 +760,7 @@ fn draw_commits(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme
     draw_list(f, area, rows, g.cursor, cat, t);
 }
 
-fn draw_status(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
+fn draw_status(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
     let s = match &g.status {
         Load::Loading => {
             message(f, area, cat.git_loading_status, t.overlay0);
@@ -914,7 +920,7 @@ fn file_line(code: char, path: &str, code_color: Color, t: &Theme) -> Line<'stat
 
 /// A scrolling, cursor-highlighted list.
 fn draw_list(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     area: Rect,
     rows: Vec<Line<'static>>,
     cursor: usize,
@@ -951,7 +957,7 @@ fn draw_list(
     }
 }
 
-fn message(f: &mut Frame, area: Rect, text: &str, color: Color) {
+fn message(f: &mut RenderTarget, area: Rect, text: &str, color: Color) {
     if area.height == 0 {
         return;
     }
@@ -961,7 +967,7 @@ fn message(f: &mut Frame, area: Rect, text: &str, color: Color) {
     );
 }
 
-fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
+fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
     let buf = f.buffer_mut();
     for i in 0..w {
         buf[(x + i, y)]
@@ -970,7 +976,7 @@ fn hline(f: &mut Frame, x: u16, y: u16, w: u16, t: &Theme) {
     }
 }
 
-fn fill_bg(f: &mut Frame, rect: Rect, color: Color) {
+fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
     let buf = f.buffer_mut();
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {

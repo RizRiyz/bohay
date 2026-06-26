@@ -230,6 +230,9 @@ pub struct App {
     pub dismissed_sessions: HashSet<String>,
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
+    /// Throttle for per-pane agent classification — it locks each pane's VT engine
+    /// and scans its grid, so it runs at ~100ms, not at the render frame rate.
+    last_detect_at: Instant,
     /// Scroll offsets + scrollable regions for the two sidebar lists, so long
     /// WORKSPACES / AGENTS lists can be wheeled through.
     pub workspaces_scroll: usize,
@@ -349,6 +352,9 @@ impl App {
             resumable: Vec::new(),
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
+            last_detect_at: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -532,6 +538,9 @@ impl App {
             resumable: Vec::new(),
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
+            last_detect_at: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -2066,6 +2075,9 @@ mod tests {
             s.last_activity = idle_at; // stale → classifies Idle → Done
         };
 
+        // Detection is throttled to ~100ms, so each simulated tick advances time.
+        let step = Duration::from_millis(150);
+
         // First completion rings exactly once.
         arm_working_then_idle(&mut app);
         app.detect_tick(now);
@@ -2074,17 +2086,17 @@ mod tests {
         // Flap (working again, then idle again) does NOT re-ring — bell disarmed.
         app.pending_notify.clear();
         app.status.get_mut(&id).unwrap().last_activity = now; // recent → Working
-        app.detect_tick(now);
+        app.detect_tick(now + step);
         app.status.get_mut(&id).unwrap().last_activity = idle_at; // → Done again
-        app.detect_tick(now);
+        app.detect_tick(now + step * 2);
         assert!(app.pending_notify.is_empty(), "flapping does not re-ring");
 
         // Looking at the pane re-arms it; a later completion rings again.
         app.layout_mut().focus = id;
-        app.detect_tick(now);
+        app.detect_tick(now + step * 3);
         app.layout_mut().focus = bogus;
         arm_working_then_idle(&mut app);
-        app.detect_tick(now);
+        app.detect_tick(now + step * 4);
         assert_eq!(
             app.pending_notify.len(),
             1,

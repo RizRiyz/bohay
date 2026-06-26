@@ -16,6 +16,13 @@ impl App {
             self.last_sessions_at = now;
             self.refresh_resumable();
         }
+        // The per-pane classification below locks each pane's VT engine + scans its
+        // grid; agent state (blocked/working/done) is human-paced, so ~100ms is
+        // plenty — running it at the render frame rate (up to 60fps) just burns CPU.
+        if now.duration_since(self.last_detect_at) < Duration::from_millis(100) {
+            return;
+        }
+        self.last_detect_at = now;
         let focus = self.layout().focus;
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         let mut changes: Vec<(PaneId, State, String)> = Vec::new();

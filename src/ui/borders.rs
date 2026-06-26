@@ -101,7 +101,7 @@ fn on_perimeter(x: u16, y: u16, r: Rect) -> bool {
 
 /// Draw every pane's border in one overlay pass.
 pub(super) fn render_pane_borders(
-    f: &mut Frame,
+    f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     focus: PaneId,
     t: &Theme,

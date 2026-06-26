@@ -5,7 +5,7 @@ use super::*;
 
 // ── status ──────────────────────────────────────────────────────────────────
 
-pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) {
     f.render_widget(Block::new().style(Style::new().bg(t.crust)), area);
     let prefix = app.mode == Mode::Prefix;
     let cat = app.catalog;
