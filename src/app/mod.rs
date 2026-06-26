@@ -125,6 +125,8 @@ pub struct App {
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub theme: Theme,
+    /// Active UI-language catalog (docs/21), resolved from `config.language`.
+    pub catalog: &'static crate::i18n::Catalog,
     /// Persisted user configuration (theme, layout, notifications, keys).
     pub config: crate::config::Config,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
@@ -233,6 +235,7 @@ impl App {
         let config = crate::config::load();
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme = crate::ui::theme::by_name(&config.theme);
+        let catalog = crate::i18n::by_code(&config.language);
         let sidebar_width = config.sidebar_width();
         let shell = crate::platform::resolve_shell(&config.shell);
         let keymap = keys::build_keymap(&config.keybindings);
@@ -259,6 +262,7 @@ impl App {
             }],
             active_ws: 0,
             theme,
+            catalog,
             config,
             keymap,
             settings: None,
@@ -428,6 +432,7 @@ impl App {
 
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme = crate::ui::theme::by_name(&config.theme);
+        let catalog = crate::i18n::by_code(&config.language);
         let sidebar_width = config.sidebar_width();
 
         Some(App {
@@ -436,6 +441,7 @@ impl App {
             workspaces,
             active_ws,
             theme,
+            catalog,
             config,
             keymap,
             settings: None,
@@ -1504,7 +1510,7 @@ mod tests {
         assert!(app.settings.is_none());
         app.open_settings();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert_eq!(app.settings_tab_rects.len(), 6, "six tabs");
+        assert_eq!(app.settings_tab_rects.len(), 7, "seven tabs");
         assert!(
             !app.settings_ctl_rects.is_empty(),
             "theme tab lists palettes"
@@ -1563,6 +1569,168 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert!(app.settings.is_none());
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ui_renders_in_the_selected_language() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let text = |term: &Terminal<TestBackend>| -> String {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        };
+
+        // English baseline shows the English sidebar header.
+        app.catalog = crate::i18n::by_code("en");
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(text(&term).contains("NODES"), "EN header");
+
+        // A Latin language swaps the header text (NODOS = NODES, contiguous).
+        app.catalog = crate::i18n::by_code("es");
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let es = text(&term);
+        assert!(es.contains("NODOS"), "translated header appears");
+        assert!(!es.contains("NODES"), "English header replaced");
+
+        // CJK renders too (`节` = first char of the zh header). A wide char's
+        // trailing cell is a space, so we check the lead glyph, not the pair.
+        app.catalog = crate::i18n::by_code("zh");
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(text(&term).contains('节'), "CJK header renders");
+    }
+
+    #[test]
+    fn modals_render_in_the_selected_language() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.catalog = crate::i18n::by_code("es");
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let text = |term: &Terminal<TestBackend>| -> String {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        };
+
+        // The menu button (sidebar) is translated.
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(text(&term).contains("Menú"), "menu button translated");
+
+        // The folder picker ("open new node" modal) is translated.
+        app.open_folder_picker();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            text(&term).contains("Abrir esta carpeta"),
+            "picker rows translated"
+        );
+        assert!(
+            text(&term).contains("Abrir espacio"),
+            "picker title translated"
+        );
+        app.close_folder_picker();
+
+        // The `?` cheat-sheet body (command labels) is translated.
+        app.help_open = true;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            text(&term).contains("Cerrar panel"),
+            "cheat-sheet command labels translated"
+        );
+    }
+
+    #[test]
+    fn settings_modal_widens_to_fit_wide_language_tabs() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // Japanese tab labels (CJK, width-2) are wider than the old 74-col cap.
+        app.catalog = crate::i18n::by_code("ja");
+        app.open_settings();
+        // A terminal with room: the modal must grow so all 7 tabs render (the
+        // Language tab was previously clipped off the right edge).
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(
+            app.settings_tab_rects.len(),
+            7,
+            "all 7 tabs render (none clipped)"
+        );
+        assert!(
+            app.settings_tab_rects
+                .iter()
+                .any(|(t, _)| *t == SettingsTab::Language),
+            "the Language tab is present"
+        );
+    }
+
+    #[test]
+    fn settings_language_tab_swaps_catalog_and_persists() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let _env = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-lang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("BOHAY_HOME", &tmp);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.open_settings();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.config.language, "en");
+
+        // Click the Language tab.
+        let lang = app
+            .settings_tab_rects
+            .iter()
+            .find(|(t, _)| *t == SettingsTab::Language)
+            .unwrap()
+            .1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: lang.x + 1,
+            row: lang.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Language);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Moving the selection picks the next language — applied live + persisted.
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_ne!(
+            app.config.language, "en",
+            "a non-default language is selected"
+        );
+        assert_eq!(
+            app.catalog.nodes,
+            crate::i18n::by_code(&app.config.language).nodes,
+            "catalog swapped live"
+        );
+        assert_eq!(
+            crate::config::load().language,
+            app.config.language,
+            "persisted to config.json"
+        );
 
         std::env::remove_var("BOHAY_HOME");
         let _ = std::fs::remove_dir_all(&tmp);

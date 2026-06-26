@@ -19,6 +19,9 @@ pub struct Config {
     pub version: u32,
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// UI language code (docs/21) — `"en"` (default) or any `i18n::LANGS` code.
+    #[serde(default = "default_lang")]
+    pub language: String,
     /// Shell keyword for new panes (`default` / `powershell` / `cmd` / literal).
     #[serde(default = "default_shell_choice")]
     pub shell: String,
@@ -60,6 +63,9 @@ pub struct NotifyConfig {
 fn default_theme() -> String {
     "noir".to_string()
 }
+fn default_lang() -> String {
+    "en".to_string()
+}
 fn default_shell_choice() -> String {
     "default".to_string()
 }
@@ -78,6 +84,7 @@ impl Default for Config {
         Config {
             version: CONFIG_VERSION,
             theme: default_theme(),
+            language: default_lang(),
             shell: default_shell_choice(),
             sidebar_width: default_sidebar_width(),
             layout: LayoutConfig::default(),

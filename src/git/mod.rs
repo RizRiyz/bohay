@@ -42,17 +42,6 @@ impl Section {
         Section::Status,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Section::Commits => "Commits",
-            Section::Flow => "Flow",
-            Section::Branches => "Branches",
-            Section::Prs => "PRs",
-            Section::Issues => "Issues",
-            Section::Status => "Status",
-        }
-    }
-
     fn index(self) -> usize {
         Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
     }
@@ -78,12 +67,6 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub fn label(self) -> &'static str {
-        match self {
-            Scope::ThisRepo => "this repo",
-            Scope::MyWork => "my work",
-        }
-    }
     pub fn toggle(self) -> Scope {
         match self {
             Scope::ThisRepo => Scope::MyWork,

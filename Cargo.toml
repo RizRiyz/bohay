@@ -2,8 +2,26 @@
 name = "bohay"
 version = "0.1.0"
 edition = "2021"
-description = "terminal workspace manager for AI coding agents"
+rust-version = "1.82"
+description = "Next-Gen Agents multiplexer"
+authors = ["Riz <rizflagz@gmail.com>"]
 license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/RizRiyz/bohay"
+repository = "https://github.com/RizRiyz/bohay"
+keywords = ["terminal", "multiplexer", "tui", "agents", "workspace"]
+categories = ["command-line-utilities", "development-tools"]
+# Keep the published crate lean: ship source + README + license, not the design
+# notes, previews, or CI/packaging files.
+exclude = [
+    "/docs",
+    "/.github",
+    "/Formula",
+    "/preview.html",
+    "/preview.ans",
+    "/MODULE-GUIDE.md",
+    "/install.sh",
+]
 
 [[bin]]
 name = "bohay"

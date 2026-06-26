@@ -72,6 +72,9 @@ fn draw_scrollbar(f: &mut Frame, track: Rect, total: usize, cap: usize, scroll: 
 }
 
 pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) -> SidebarHits {
+    // `catalog` is `&'static` (Copy), so binding it here sidesteps borrow
+    // conflicts with the `&mut app` rect bookkeeping below.
+    let cat = app.catalog;
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
     let mut session_rects = Vec::new();
@@ -104,8 +107,8 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
     // Settings/Menu button — a labelled pill at the right of the brand row
     // (inverts on hover) so it's an obvious, tappable control. Text beats a lone
     // glyph for discoverability.
-    let menu_label = " Menu ";
-    let menu_w = menu_label.chars().count() as u16;
+    let menu_label = format!(" {} ", cat.menu);
+    let menu_w = crate::ui::display_width(&menu_label) as u16;
     let menu = Rect::new(
         area.right().saturating_sub(menu_w + 1),
         area.y + 1,
@@ -140,7 +143,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
     let split = body_top + area.bottom().saturating_sub(body_top) / 2;
 
     // ── NODES ──
-    line_at(f, body_top, header("NODES", t));
+    line_at(f, body_top, header(cat.nodes, t));
     let new_ws_rect = if area.width >= 8 {
         let rect = Rect::new(area.right().saturating_sub(4), body_top, 3, 1);
         f.render_widget(
@@ -267,17 +270,24 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
 
     // ── AGENTS — live agents then resumable sessions, as one scrollable list ──
     let aheader = split + 1;
-    line_at(f, aheader, header("AGENTS", t));
+    line_at(f, aheader, header(cat.agents, t));
     // All/Active filter toggle, right-aligned in the header row. "All" shows the
     // session history too; "Active" shows only live agents.
     app.agents_filter_rects.clear();
     let active_only = app.agents_active_only;
     if area.width >= 22 {
-        let segs = [(" All ", false), (" Active ", true)];
-        let total: u16 = segs.iter().map(|(l, _)| l.chars().count() as u16).sum();
+        let segs = [
+            (format!(" {} ", cat.all), false),
+            (format!(" {} ", cat.active), true),
+        ];
+        let total: u16 = segs
+            .iter()
+            .map(|(l, _)| crate::ui::display_width(l) as u16)
+            .sum();
         let mut x = area.right().saturating_sub(1 + total);
-        for (label, val) in segs {
-            let w = label.chars().count() as u16;
+        for (label, val) in &segs {
+            let (label, val) = (label.as_str(), *val);
+            let w = crate::ui::display_width(label) as u16;
             let rect = Rect::new(x, aheader, w, 1);
             let style = if active_only == val {
                 Style::new().fg(t.crust).bg(t.accent).bold()
@@ -323,9 +333,9 @@ pub(super) fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, t: &Theme) 
             alist_top,
             Line::from(Span::styled(
                 if active_only {
-                    "no active agents"
+                    cat.no_active_agents
                 } else {
-                    "no agents or sessions"
+                    cat.no_agents_or_sessions
                 },
                 Style::new().fg(t.overlay0),
             )),

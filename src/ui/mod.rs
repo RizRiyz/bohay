@@ -27,6 +27,9 @@ mod tabbar;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let t = app.theme.clone();
+    // The active i18n catalog (Copy `&'static`), passed to draw fns that don't
+    // get the whole `App` (picker, git tab) so all chrome is localized (docs/21).
+    let cat = app.catalog;
     let area = f.area();
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
 
@@ -92,7 +95,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // A git tab fills the pane area with its dashboard instead of terminals.
     let mut git_section_rects = Vec::new();
     let cursor = if let Some(g) = app.active_git_mut() {
-        git_section_rects = git::render(f, pane_area, g, &t);
+        git_section_rects = git::render(f, pane_area, g, cat, &t);
         None
     } else {
         let cursor = panes::draw_panes(f, &rects, bordered, app, &t);
@@ -132,7 +135,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let picker_open = app.picker.is_some();
     let mut picker_rects = Vec::new();
     if let Some(p) = &app.picker {
-        picker_rects = picker::draw_picker(f, area, p, &t);
+        picker_rects = picker::draw_picker(f, area, p, cat, &t);
     }
     app.picker_rects = picker_rects;
 
@@ -142,7 +145,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     // The new-worktree branch prompt (docs/18 WT).
     if let Some(buf) = &app.worktree_prompt {
-        picker::draw_worktree_prompt(f, area, buf, app.worktree_error.as_deref(), &t);
+        picker::draw_worktree_prompt(f, area, buf, app.worktree_error.as_deref(), cat, &t);
     }
 
     let cursor =
@@ -216,6 +219,14 @@ pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+/// Display width of `s` in terminal columns (CJK = 2 cells, etc.). Fixed-width
+/// chrome must measure with this, not `chars().count()`, so translated/CJK labels
+/// align (docs/21).
+pub(super) fn display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    s.width()
 }
 
 /// The lone-pane horizontal pad, suppressed for panes too narrow to spare it.

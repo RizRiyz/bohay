@@ -70,7 +70,7 @@ appearance:
   ui sidebar --width <n>     set the sidebar width (columns)
   ui sidebar --hide|--show   toggle the sidebar
 
-modules (extensions — docs/13):
+modules (extensions):
   module search [<query>]    find modules published to the `bohay-module` GitHub topic
   module list                list installed modules
   module info <id>           show a module's actions / panes / events / source
@@ -86,13 +86,13 @@ modules (extensions — docs/13):
   module log [<id>]          tail module command logs (--limit N)
   module config-dir <id>     print/create a module's config dir
 
-git (docs/17):
+git:
   git status                 branch, ahead/behind, working tree of the current node
   git branches               local branches with tracking
   git log [--limit N]        recent commits
   git open [<node>]          open the git tab for a node
 
-worktrees (docs/18):
+worktrees:
   worktree list              list the current repo's worktrees
   worktree create <branch>   create a worktree + node for <branch>
   worktree open <path>       open an existing worktree as a node
@@ -101,7 +101,7 @@ worktrees (docs/18):
 events:
   events                     stream live status changes
 
-remote (docs/18):
+remote:
   --remote <host> [ssh args] attach to a bohay session on <host> over plain ssh
 
 server:

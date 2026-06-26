@@ -6,8 +6,30 @@
 use super::*;
 use crate::git::model::{Checks, PrDetail, PullRequest};
 use crate::git::{
-    filtered_branches, filtered_commits, filtered_issues, filtered_prs, GitView, Load, Section,
+    filtered_branches, filtered_commits, filtered_issues, filtered_prs, GitView, Load, Scope,
+    Section,
 };
+use crate::i18n::Catalog;
+
+/// The view-selector label for `s` in the active language.
+fn section_label(s: Section, cat: &Catalog) -> &'static str {
+    match s {
+        Section::Commits => cat.sec_commits,
+        Section::Flow => cat.sec_flow,
+        Section::Branches => cat.sec_branches,
+        Section::Prs => cat.sec_prs,
+        Section::Issues => cat.sec_issues,
+        Section::Status => cat.sec_status,
+    }
+}
+
+/// The PR/issue scope label (`m` toggle) in the active language.
+fn scope_label(s: Scope, cat: &Catalog) -> &'static str {
+    match s {
+        Scope::ThisRepo => cat.scope_this_repo,
+        Scope::MyWork => cat.scope_my_work,
+    }
+}
 
 /// Renders the git tab; returns the clickable view-selector rects so the input
 /// layer can switch sections on a tab click.
@@ -15,17 +37,18 @@ pub(super) fn render(
     f: &mut Frame,
     area: Rect,
     g: &mut GitView,
+    cat: &Catalog,
     t: &Theme,
 ) -> Vec<(Section, Rect)> {
     if area.height < 4 || area.width < 12 {
         return Vec::new();
     }
-    let tab_rects = draw_header(f, Rect::new(area.x, area.y, area.width, 1), g, t);
+    let tab_rects = draw_header(f, Rect::new(area.x, area.y, area.width, 1), g, cat, t);
     hline(f, area.x, area.y + 1, area.width, t);
 
     let footer_y = area.bottom().saturating_sub(1);
     hline(f, area.x, footer_y.saturating_sub(1), area.width, t);
-    draw_footer(f, Rect::new(area.x, footer_y, area.width, 1), g, t);
+    draw_footer(f, Rect::new(area.x, footer_y, area.width, 1), g, cat, t);
 
     let body = Rect::new(
         area.x + 1,
@@ -36,44 +59,50 @@ pub(super) fn render(
     // The PR detail panel (GIT-6) overlays the section body when open; it scrolls
     // as a block like Flow/Status.
     if g.open_pr.is_some() {
-        g.scroll = draw_pr_detail(f, body, g, t);
+        g.scroll = draw_pr_detail(f, body, g, cat, t);
         return tab_rects;
     }
     // Flow / Status scroll as a block: they return the clamped scroll offset,
     // which we write back so the wheel/keys settle at the content's end.
     match g.section {
-        Section::Commits => draw_commits(f, body, g, t),
-        Section::Flow => g.scroll = draw_flow(f, body, g, t),
-        Section::Prs => draw_prs(f, body, g, t),
-        Section::Issues => draw_issues(f, body, g, t),
-        Section::Branches => draw_branches(f, body, g, t),
-        Section::Status => g.scroll = draw_status(f, body, g, t),
+        Section::Commits => draw_commits(f, body, g, cat, t),
+        Section::Flow => g.scroll = draw_flow(f, body, g, cat, t),
+        Section::Prs => draw_prs(f, body, g, cat, t),
+        Section::Issues => draw_issues(f, body, g, cat, t),
+        Section::Branches => draw_branches(f, body, g, cat, t),
+        Section::Status => g.scroll = draw_status(f, body, g, cat, t),
     }
     tab_rects
 }
 
-fn draw_prs(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
+fn draw_prs(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.prs {
         Load::Idle => {
-            let note = g.gh.note().unwrap_or("GitHub unavailable");
-            return message(f, area, &format!("GitHub PRs — {note}"), t.overlay0);
+            let note = g.gh.note().unwrap_or(cat.git_unavailable);
+            return message(
+                f,
+                area,
+                &format!("{} — {note}", cat.git_github_prs),
+                t.overlay0,
+            );
         }
-        Load::Loading => return message(f, area, "loading pull requests…", t.overlay0),
+        Load::Loading => return message(f, area, cat.git_loading_prs, t.overlay0),
         Load::Error(e) => return message(f, area, &format!("gh: {e}"), t.coral),
         Load::Loaded(v) => v,
     };
     if v.is_empty() {
-        return message(f, area, "no open pull requests ✓", t.green);
+        return message(f, area, cat.git_no_prs, t.green);
     }
     let title_w = area.width.saturating_sub(62).max(12) as usize;
     let header = Line::from(Span::styled(
         format!(
-            "{:<13}{:<6}{:<w$}{:<11}{:<11}CHECKS  +/-",
-            "STATUS",
+            "{:<13}{:<6}{:<w$}{:<11}{:<11}{}  +/-",
+            cat.col_status,
             "#",
-            "TITLE",
-            "AUTHOR",
-            "REVIEWER",
+            cat.col_title,
+            cat.col_author,
+            cat.col_reviewer,
+            cat.col_checks,
             w = title_w
         ),
         Style::new().fg(t.subtext0),
@@ -89,13 +118,13 @@ fn draw_prs(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
         area.height.saturating_sub(1),
     );
     let rows: Vec<Line> = filtered_prs(v, &g.filter)
-        .map(|p| pr_line(p, title_w, t))
+        .map(|p| pr_line(p, title_w, cat, t))
         .collect();
-    draw_list(f, list, rows, g.cursor, t);
+    draw_list(f, list, rows, g.cursor, cat, t);
 }
 
-fn pr_line(p: &PullRequest, title_w: usize, t: &Theme) -> Line<'static> {
-    let (badge, bcol) = pr_badge(p, t);
+fn pr_line(p: &PullRequest, title_w: usize, cat: &Catalog, t: &Theme) -> Line<'static> {
+    let (badge, bcol) = pr_badge(p, cat, t);
     let (gly, ccol) = check_glyph(p.checks, t);
     let reviewer = p.reviewers.first().map(String::as_str).unwrap_or("");
     // In "my work" scope each PR carries its repo; show it before the title.
@@ -120,17 +149,17 @@ fn pr_line(p: &PullRequest, title_w: usize, t: &Theme) -> Line<'static> {
 }
 
 /// PR status badge text + color (from draft/state/reviewDecision).
-fn pr_badge(p: &PullRequest, t: &Theme) -> (&'static str, Color) {
+fn pr_badge(p: &PullRequest, cat: &Catalog, t: &Theme) -> (&'static str, Color) {
     if p.is_draft {
-        ("Draft", t.overlay0)
+        (cat.badge_draft, t.overlay0)
     } else if p.state == "MERGED" {
-        ("Merged", t.accent)
+        (cat.badge_merged, t.accent)
     } else {
         match p.review_decision.as_str() {
-            "APPROVED" => ("Approved", t.green),
-            "CHANGES_REQUESTED" => ("Denied", t.coral),
-            "REVIEW_REQUIRED" => ("Review", t.amber),
-            _ => ("Open", t.subtext0),
+            "APPROVED" => (cat.badge_approved, t.green),
+            "CHANGES_REQUESTED" => (cat.badge_denied, t.coral),
+            "REVIEW_REQUIRED" => (cat.badge_review, t.amber),
+            _ => (cat.badge_open, t.subtext0),
         }
     }
 }
@@ -147,10 +176,10 @@ fn check_glyph(c: Checks, t: &Theme) -> (&'static str, Color) {
 /// The PR detail panel (GIT-6): description, branches, per-check CI, individual
 /// reviews, mergeability, and stats. Scrolls as a block; returns the clamped
 /// scroll offset (like Flow/Status).
-fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
+fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
     let d = match &g.detail {
         Load::Loading => {
-            message(f, area, "loading pull request…", t.overlay0);
+            message(f, area, cat.git_loading_pr, t.overlay0);
             return 0;
         }
         Load::Error(e) => {
@@ -169,7 +198,7 @@ fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     let mut rows: Vec<Line> = Vec::new();
 
     // Title + branches + badge.
-    let (badge, bcol) = detail_badge(d, t);
+    let (badge, bcol) = detail_badge(d, cat, t);
     rows.push(Line::from(vec![
         Span::styled(format!("#{}  ", d.number), Style::new().fg(t.subtext0)),
         Span::styled(d.title.clone(), Style::new().fg(t.text).bold()),
@@ -181,11 +210,14 @@ fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
             format!("{} → {}", d.head, d.base),
             Style::new().fg(t.accent),
         ),
-        Span::styled(format!("  by {}", d.author), Style::new().fg(t.subtext0)),
+        Span::styled(
+            format!("  {} {}", cat.detail_by, d.author),
+            Style::new().fg(t.subtext0),
+        ),
     ];
     if !updated.is_empty() {
         byline.push(Span::styled(
-            format!("  · updated {updated}"),
+            format!("  · {} {updated}", cat.detail_updated),
             Style::new().fg(t.subtext0),
         ));
     }
@@ -200,15 +232,26 @@ fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
         Span::styled(format!("-{}", d.deletions), Style::new().fg(t.coral)),
         Span::styled(
             format!(
-                "  · {} files · {} commits · {} comments",
-                d.changed_files, d.commits, d.comments
+                "  · {} {} · {} {} · {} {}",
+                d.changed_files,
+                cat.detail_files,
+                d.commits,
+                cat.detail_commits,
+                d.comments,
+                cat.detail_comments
             ),
             Style::new().fg(t.subtext0),
         ),
     ];
     match d.mergeable.as_str() {
-        "MERGEABLE" => stats.push(Span::styled("  · mergeable", Style::new().fg(t.green))),
-        "CONFLICTING" => stats.push(Span::styled("  · conflicts", Style::new().fg(t.coral))),
+        "MERGEABLE" => stats.push(Span::styled(
+            format!("  · {}", cat.detail_mergeable),
+            Style::new().fg(t.green),
+        )),
+        "CONFLICTING" => stats.push(Span::styled(
+            format!("  · {}", cat.detail_conflicts),
+            Style::new().fg(t.coral),
+        )),
         _ => {}
     }
     rows.push(Line::from(stats));
@@ -216,7 +259,7 @@ fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
 
     // Per-check CI.
     if !d.check_runs.is_empty() {
-        rows.push(head("Checks"));
+        rows.push(head(cat.detail_checks));
         for c in &d.check_runs {
             let (gly, col) = check_glyph(c.bucket, t);
             rows.push(Line::from(vec![
@@ -229,9 +272,9 @@ fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
 
     // Individual reviews.
     if !d.reviews.is_empty() {
-        rows.push(head("Reviews"));
+        rows.push(head(cat.detail_reviews));
         for r in &d.reviews {
-            let (gly, col, label) = review_glyph(&r.state, t);
+            let (gly, col, label) = review_glyph(&r.state, cat, t);
             rows.push(Line::from(vec![
                 Span::styled(format!("   {gly}  "), Style::new().fg(col)),
                 Span::styled(pad(&r.author, 18), Style::new().fg(t.text)),
@@ -244,17 +287,20 @@ fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     // Labels.
     if !d.labels.is_empty() {
         rows.push(Line::from(vec![
-            Span::styled("Labels  ", Style::new().fg(t.subtext1).bold()),
+            Span::styled(
+                format!("{}  ", cat.detail_labels),
+                Style::new().fg(t.subtext1).bold(),
+            ),
             Span::styled(d.labels.join(", "), Style::new().fg(t.amber)),
         ]));
         rows.push(Line::from(""));
     }
 
     // Description (word-wrapped).
-    rows.push(head("Description"));
+    rows.push(head(cat.detail_description));
     if d.body.trim().is_empty() {
         rows.push(Line::from(Span::styled(
-            "   (no description)",
+            format!("   {}", cat.detail_no_description),
             Style::new().fg(t.overlay0),
         )));
     } else {
@@ -281,29 +327,29 @@ fn draw_pr_detail(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
 }
 
 /// Big state badge for the detail header.
-fn detail_badge(d: &PrDetail, t: &Theme) -> (&'static str, Color) {
+fn detail_badge(d: &PrDetail, cat: &Catalog, t: &Theme) -> (&'static str, Color) {
     if d.state == "MERGED" {
-        ("Merged", t.accent)
+        (cat.badge_merged, t.accent)
     } else if d.state == "CLOSED" {
-        ("Closed", t.coral)
+        (cat.badge_closed, t.coral)
     } else if d.is_draft {
-        ("Draft", t.overlay0)
+        (cat.badge_draft, t.overlay0)
     } else {
         match d.review_decision.as_str() {
-            "APPROVED" => ("Approved", t.green),
-            "CHANGES_REQUESTED" => ("Changes requested", t.coral),
-            "REVIEW_REQUIRED" => ("Review required", t.amber),
-            _ => ("Open", t.subtext0),
+            "APPROVED" => (cat.badge_approved, t.green),
+            "CHANGES_REQUESTED" => (cat.badge_changes_requested, t.coral),
+            "REVIEW_REQUIRED" => (cat.badge_review_required, t.amber),
+            _ => (cat.badge_open, t.subtext0),
         }
     }
 }
 
-fn review_glyph(state: &str, t: &Theme) -> (&'static str, Color, &'static str) {
+fn review_glyph(state: &str, cat: &Catalog, t: &Theme) -> (&'static str, Color, &'static str) {
     match state {
-        "APPROVED" => ("✓", t.green, "approved"),
-        "CHANGES_REQUESTED" => ("✗", t.coral, "changes requested"),
-        "COMMENTED" => ("○", t.subtext0, "commented"),
-        "DISMISSED" => ("—", t.overlay0, "dismissed"),
+        "APPROVED" => ("✓", t.green, cat.rev_approved),
+        "CHANGES_REQUESTED" => ("✗", t.coral, cat.rev_changes_requested),
+        "COMMENTED" => ("○", t.subtext0, cat.rev_commented),
+        "DISMISSED" => ("—", t.overlay0, cat.rev_dismissed),
         _ => ("·", t.subtext0, ""),
     }
 }
@@ -337,18 +383,23 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn draw_issues(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
+fn draw_issues(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.issues {
         Load::Idle => {
-            let note = g.gh.note().unwrap_or("GitHub unavailable");
-            return message(f, area, &format!("GitHub issues — {note}"), t.overlay0);
+            let note = g.gh.note().unwrap_or(cat.git_unavailable);
+            return message(
+                f,
+                area,
+                &format!("{} — {note}", cat.git_github_issues),
+                t.overlay0,
+            );
         }
-        Load::Loading => return message(f, area, "loading issues…", t.overlay0),
+        Load::Loading => return message(f, area, cat.git_loading_issues, t.overlay0),
         Load::Error(e) => return message(f, area, &format!("gh: {e}"), t.coral),
         Load::Loaded(v) => v,
     };
     if v.is_empty() {
-        return message(f, area, "no open issues ✓", t.green);
+        return message(f, area, cat.git_no_issues, t.green);
     }
     let title_w = area.width.saturating_sub(52).max(12) as usize;
     let rows: Vec<Line> = filtered_issues(v, &g.filter)
@@ -368,25 +419,25 @@ fn draw_issues(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
             ])
         })
         .collect();
-    draw_list(f, area, rows, g.cursor, t);
+    draw_list(f, area, rows, g.cursor, cat, t);
 }
 
 /// The **flow** view: the trunk branch as a track, with the other branches
 /// diverging below — each with its commit dots, ahead/behind, and matched PR.
 /// A GitHub-flow-style picture built from the data already fetched.
-fn draw_flow(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
+fn draw_flow(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
     let branches = match &g.branches {
         Load::Loading => {
-            message(f, area, "loading flow…", t.overlay0);
+            message(f, area, cat.git_loading_flow, t.overlay0);
             return 0;
         }
         Load::Error(e) => {
-            message(f, area, &format!("git error: {e}"), t.coral);
+            message(f, area, &format!("{}: {e}", cat.git_error), t.coral);
             return 0;
         }
         Load::Loaded(v) if !v.is_empty() => v,
         _ => {
-            message(f, area, "no branches to chart", t.overlay0);
+            message(f, area, cat.git_no_branches, t.overlay0);
             return 0;
         }
     };
@@ -443,7 +494,7 @@ fn draw_flow(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
             ),
         ];
         if let Some(pr) = prs.iter().find(|p| p.head == b.name) {
-            let (badge, bcol) = pr_badge(pr, t);
+            let (badge, bcol) = pr_badge(pr, cat, t);
             spans.push(Span::styled(
                 format!("   [{badge}] #{} ↗ merge", pr.number),
                 Style::new().fg(bcol),
@@ -463,7 +514,14 @@ fn draw_flow(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     }
     f.render_widget(
         Paragraph::new(Span::styled(
-            "  ● commit   ↑ahead ↓behind   ↗ open PR → merges into trunk",
+            format!(
+                "  ● {}   ↑{} ↓{}   ↗ {} → {}",
+                cat.flow_commit,
+                cat.flow_ahead,
+                cat.flow_behind,
+                cat.flow_open_pr,
+                cat.flow_merges_trunk
+            ),
             Style::new().fg(t.overlay0),
         )),
         Rect::new(area.x, legend_y, area.width, 1),
@@ -471,7 +529,13 @@ fn draw_flow(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     scroll
 }
 
-fn draw_header(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> Vec<(Section, Rect)> {
+fn draw_header(
+    f: &mut Frame,
+    area: Rect,
+    g: &GitView,
+    cat: &Catalog,
+    t: &Theme,
+) -> Vec<(Section, Rect)> {
     let mut spans = vec![
         Span::styled(" ⎇ ", Style::new().fg(t.accent).bold()),
         Span::styled(g.repo_name.clone(), Style::new().fg(t.text).bold()),
@@ -498,7 +562,14 @@ fn draw_header(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> Vec<(Sectio
             ("· clean".to_string(), t.green)
         } else {
             (
-                format!("· {n} change{}", if n == 1 { "" } else { "s" }),
+                format!(
+                    "· {n} {}",
+                    if n == 1 {
+                        cat.git_change
+                    } else {
+                        cat.git_changes
+                    }
+                ),
                 t.amber,
             )
         };
@@ -509,7 +580,7 @@ fn draw_header(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> Vec<(Sectio
     // View selector, right-aligned — rendered per-tab so each is clickable.
     let labels: Vec<(Section, String)> = Section::ALL
         .iter()
-        .map(|s| (*s, format!(" {} ", s.label())))
+        .map(|s| (*s, format!(" {} ", section_label(*s, cat))))
         .collect();
     let total: u16 = labels.iter().map(|(_, l)| l.chars().count() as u16).sum();
     let mut x = area.right().saturating_sub(total).max(area.x);
@@ -534,7 +605,7 @@ fn draw_header(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> Vec<(Sectio
     rects
 }
 
-fn draw_footer(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
+fn draw_footer(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     if g.filtering {
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -549,72 +620,72 @@ fn draw_footer(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
     // The PR detail panel owns the footer while it's open.
     if g.open_pr.is_some() {
         let pairs = [
-            ("esc", "back"),
-            ("M", "merge"),
-            ("a", "approve"),
-            ("R", "ready"),
-            ("c", "checkout"),
-            ("d", "diff"),
-            ("o", "open"),
-            ("r", "refresh"),
+            ("esc", cat.act_back),
+            ("M", cat.act_merge),
+            ("a", cat.act_approve),
+            ("R", cat.act_ready),
+            ("c", cat.act_checkout),
+            ("d", cat.act_diff),
+            ("o", cat.act_open),
+            ("r", cat.act_refresh),
         ];
         f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
         return;
     }
     // Per-section hints as (key, label) pairs — the shared `hint_line` colors
     // the keys with the theme accent and the labels in light text.
-    let scope = g.scope.label();
+    let scope = scope_label(g.scope, cat);
     let pairs: Vec<(&str, &str)> = match g.section {
         Section::Prs => vec![
-            ("j/k", "move"),
-            ("⏎", "details"),
-            ("d", "diff"),
-            ("o", "open"),
+            ("j/k", cat.act_move),
+            ("⏎", cat.act_details),
+            ("d", cat.act_diff),
+            ("o", cat.act_open),
             ("m", scope),
-            ("c", "new"),
-            ("/", "filter"),
-            ("q", "close"),
+            ("c", cat.act_new),
+            ("/", cat.act_filter),
+            ("q", cat.act_close),
         ],
         Section::Issues => vec![
-            ("j/k", "move"),
-            ("⏎", "view"),
-            ("o", "open"),
+            ("j/k", cat.act_move),
+            ("⏎", cat.act_view),
+            ("o", cat.act_open),
             ("m", scope),
-            ("/", "filter"),
-            ("r", "refresh"),
-            ("q", "close"),
+            ("/", cat.act_filter),
+            ("r", cat.act_refresh),
+            ("q", cat.act_close),
         ],
         Section::Branches => vec![
-            ("j/k", "move"),
-            ("⏎", "checkout"),
-            ("d", "log"),
-            ("/", "filter"),
-            ("click", "tab"),
-            ("r", "refresh"),
-            ("q", "close"),
+            ("j/k", cat.act_move),
+            ("⏎", cat.act_checkout),
+            ("d", cat.act_log),
+            ("/", cat.act_filter),
+            ("click", cat.act_tab),
+            ("r", cat.act_refresh),
+            ("q", cat.act_close),
         ],
         Section::Commits => vec![
-            ("j/k", "move"),
-            ("⏎", "show"),
-            ("/", "filter"),
-            ("click", "tab"),
-            ("r", "refresh"),
-            ("q", "close"),
+            ("j/k", cat.act_move),
+            ("⏎", cat.act_show),
+            ("/", cat.act_filter),
+            ("click", cat.act_tab),
+            ("r", cat.act_refresh),
+            ("q", cat.act_close),
         ],
         Section::Flow | Section::Status => vec![
-            ("j/k", "scroll"),
-            ("click", "tab"),
-            ("r", "refresh"),
-            ("q", "close"),
+            ("j/k", cat.act_scroll),
+            ("click", cat.act_tab),
+            ("r", cat.act_refresh),
+            ("q", cat.act_close),
         ],
     };
     f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
 }
 
-fn draw_branches(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
+fn draw_branches(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.branches {
-        Load::Loading => return message(f, area, "loading branches…", t.overlay0),
-        Load::Error(e) => return message(f, area, &format!("git error: {e}"), t.coral),
+        Load::Loading => return message(f, area, cat.git_loading_branches, t.overlay0),
+        Load::Error(e) => return message(f, area, &format!("{}: {e}", cat.git_error), t.coral),
         Load::Loaded(v) => v,
         Load::Idle => return,
     };
@@ -646,13 +717,13 @@ fn draw_branches(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
             ])
         })
         .collect();
-    draw_list(f, area, rows, g.cursor, t);
+    draw_list(f, area, rows, g.cursor, cat, t);
 }
 
-fn draw_commits(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
+fn draw_commits(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) {
     let v = match &g.commits {
-        Load::Loading => return message(f, area, "loading commits…", t.overlay0),
-        Load::Error(e) => return message(f, area, &format!("git error: {e}"), t.coral),
+        Load::Loading => return message(f, area, cat.git_loading_commits, t.overlay0),
+        Load::Error(e) => return message(f, area, &format!("{}: {e}", cat.git_error), t.coral),
         Load::Loaded(v) => v,
         Load::Idle => return,
     };
@@ -684,17 +755,17 @@ fn draw_commits(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) {
             Line::from(spans)
         })
         .collect();
-    draw_list(f, area, rows, g.cursor, t);
+    draw_list(f, area, rows, g.cursor, cat, t);
 }
 
-fn draw_status(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
+fn draw_status(f: &mut Frame, area: Rect, g: &GitView, cat: &Catalog, t: &Theme) -> usize {
     let s = match &g.status {
         Load::Loading => {
-            message(f, area, "loading status…", t.overlay0);
+            message(f, area, cat.git_loading_status, t.overlay0);
             return 0;
         }
         Load::Error(e) => {
-            message(f, area, &format!("git error: {e}"), t.coral);
+            message(f, area, &format!("{}: {e}", cat.git_error), t.coral);
             return 0;
         }
         Load::Loaded(s) => s,
@@ -719,7 +790,7 @@ fn draw_status(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     // ── Repository overview (from local git, no `gh` needed) ──
     match &g.info {
         Load::Loaded(info) => {
-            header(&mut rows, "Repository".to_string());
+            header(&mut rows, cat.st_repository.to_string());
             if let Some(slug) = &info.slug {
                 rows.push(Line::from(vec![
                     Span::raw("   "),
@@ -749,7 +820,7 @@ fn draw_status(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
             rows.push(Line::from(""));
 
             if !info.contributors.is_empty() {
-                header(&mut rows, "Contributors".to_string());
+                header(&mut rows, cat.st_contributors.to_string());
                 let top = info
                     .contributors
                     .first()
@@ -791,7 +862,7 @@ fn draw_status(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     let clean = s.dirty_count() == 0 && s.stashes.is_empty();
     group(
         &mut rows,
-        format!("Staged ({})", s.staged.len()),
+        format!("{} ({})", cat.st_staged, s.staged.len()),
         s.staged
             .iter()
             .map(|c| file_line(c.code, &c.path, t.green, t))
@@ -799,7 +870,7 @@ fn draw_status(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     );
     group(
         &mut rows,
-        format!("Changed ({})", s.unstaged.len()),
+        format!("{} ({})", cat.st_changed, s.unstaged.len()),
         s.unstaged
             .iter()
             .map(|c| file_line(c.code, &c.path, t.amber, t))
@@ -807,7 +878,7 @@ fn draw_status(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     );
     group(
         &mut rows,
-        format!("Untracked ({})", s.untracked.len()),
+        format!("{} ({})", cat.st_untracked, s.untracked.len()),
         s.untracked
             .iter()
             .map(|p| file_line('?', p, t.overlay1, t))
@@ -815,16 +886,16 @@ fn draw_status(f: &mut Frame, area: Rect, g: &GitView, t: &Theme) -> usize {
     );
     group(
         &mut rows,
-        format!("Stashes ({})", s.stashes.len()),
+        format!("{} ({})", cat.st_stashes, s.stashes.len()),
         s.stashes
             .iter()
             .map(|p| Line::from(Span::styled(format!("   {p}"), Style::new().fg(t.subtext0))))
             .collect(),
     );
     if clean {
-        header(&mut rows, "Working tree".to_string());
+        header(&mut rows, cat.st_working_tree.to_string());
         rows.push(Line::from(Span::styled(
-            "   clean ✓",
+            format!("   {} ✓", cat.st_clean),
             Style::new().fg(t.green),
         )));
     }
@@ -848,9 +919,16 @@ fn file_line(code: char, path: &str, code_color: Color, t: &Theme) -> Line<'stat
 }
 
 /// A scrolling, cursor-highlighted list.
-fn draw_list(f: &mut Frame, area: Rect, rows: Vec<Line<'static>>, cursor: usize, t: &Theme) {
+fn draw_list(
+    f: &mut Frame,
+    area: Rect,
+    rows: Vec<Line<'static>>,
+    cursor: usize,
+    cat: &Catalog,
+    t: &Theme,
+) {
     if rows.is_empty() {
-        return message(f, area, "nothing here", t.overlay0);
+        return message(f, area, cat.git_nothing_here, t.overlay0);
     }
     let avail = area.height as usize;
     if avail == 0 {

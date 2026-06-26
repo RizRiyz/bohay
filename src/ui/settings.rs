@@ -17,7 +17,16 @@ pub(super) struct SettingsHits {
 pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> SettingsHits {
     dim_backdrop(f, area, t);
 
-    let w = area.width.saturating_sub(6).clamp(46, 74).min(area.width);
+    // Width must fit the whole tab bar — translated labels (esp. CJK) can be much
+    // wider than English, so size to the tabs instead of a fixed cap. The tabs
+    // are ` {icon} {label} ` pills; the loop starts at inner.x+1 (1 left margin),
+    // and the modal adds 2 border columns → need = tabs + 3. Floor 46 for content,
+    // capped at the terminal width.
+    let tabs_w: u16 = SettingsTab::ALL
+        .iter()
+        .map(|st| display_width(&format!(" {} {} ", st.icon(), st.label(app.catalog))) as u16)
+        .sum();
+    let w = (tabs_w + 4).max(46).min(area.width);
     let h = area.height.saturating_sub(4).clamp(14, 24).min(area.height);
     let modal = centered_rect(area, w, h);
 
@@ -39,7 +48,7 @@ pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> 
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" "),
-            Span::styled("Settings", Style::new().fg(t.text).bold()),
+            Span::styled(app.catalog.settings_title, Style::new().fg(t.text).bold()),
         ])),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
@@ -55,8 +64,8 @@ pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> 
     let mut x = inner.x + 1;
     let ty = inner.y + 2;
     for st in SettingsTab::ALL {
-        let label = format!(" {} {} ", st.icon(), st.label());
-        let cw = label.chars().count() as u16;
+        let label = format!(" {} {} ", st.icon(), st.label(app.catalog));
+        let cw = display_width(&label) as u16;
         if x + cw > inner.right() {
             break;
         }
@@ -84,21 +93,22 @@ pub(super) fn draw_settings(f: &mut Frame, area: Rect, app: &App, t: &Theme) -> 
     // ── footer hint (Keys tab gets its own rebind/reset hints) ──
     let footer_y = inner.bottom().saturating_sub(1);
     hline(f, inner.x, footer_y.saturating_sub(1), inner.width, t);
+    let c = app.catalog;
     let hints: &[(&str, &str)] = if tab == SettingsTab::Keys {
         &[
-            ("↑↓", "move"),
-            ("⇥", "section"),
-            ("⏎", "rebind"),
-            ("⌫", "reset"),
-            ("esc", "close"),
+            ("↑↓", c.act_move),
+            ("⇥", c.act_section),
+            ("⏎", c.act_rebind),
+            ("⌫", c.act_reset),
+            ("esc", c.act_close),
         ]
     } else {
         &[
-            ("↑↓", "move"),
-            ("⇥", "tab"),
-            ("←→", "adjust"),
-            ("⏎", "apply"),
-            ("esc", "close"),
+            ("↑↓", c.act_move),
+            ("⇥", c.act_tab),
+            ("←→", c.act_adjust),
+            ("⏎", c.act_apply),
+            ("esc", c.act_close),
         ]
     };
     f.render_widget(
@@ -127,6 +137,7 @@ fn draw_content(
 ) -> Content {
     let mut ctls = Vec::new();
     let mut arrows = Vec::new();
+    let cat = app.catalog;
     match tab {
         SettingsTab::Theme => {
             // Scroll the list so the selected theme is always visible (there are
@@ -167,6 +178,38 @@ fn draw_content(
                 ctls.push((i, row));
             }
         }
+        SettingsTab::Language => {
+            // Mirror the Theme list: each row shows the language's *own* name so a
+            // user who can't read English still recognizes it.
+            let avail = area.height.max(1) as usize;
+            let total = crate::i18n::LANGS.len();
+            let scroll = cursor
+                .saturating_sub(avail.saturating_sub(1))
+                .min(total.saturating_sub(avail));
+            for (vi, i) in (scroll..total).take(avail).enumerate() {
+                let code = crate::i18n::LANGS[i];
+                let name = crate::i18n::native_name(code);
+                let row = Rect::new(area.x, area.y + vi as u16, area.width, 1);
+                let sel = i == cursor;
+                if sel {
+                    fill_bg(f, row, t.sel_bg);
+                }
+                // Pad by display width so CJK names (width-2 cells) still align.
+                let pad = " ".repeat(18usize.saturating_sub(display_width(name)));
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(if sel { " ▸ " } else { "   " }, Style::new().fg(t.accent)),
+                        Span::styled(
+                            format!("{name}{pad}"),
+                            Style::new().fg(if sel { t.text } else { t.subtext1 }),
+                        ),
+                        Span::styled(code.to_string(), Style::new().fg(t.overlay0)),
+                    ])),
+                    row,
+                );
+                ctls.push((i, row));
+            }
+        }
         SettingsTab::Layout => {
             let l = &app.config.layout;
             // Index 0 is a real range (clickable ‹ › arrows); the rest are 0/1.
@@ -174,17 +217,17 @@ fn draw_content(
                 f,
                 area,
                 cursor == 0,
-                "Sidebar width",
+                cat.set_sidebar_width,
                 app.sidebar_width.to_string(),
                 t,
                 &mut arrows,
             );
             ctls.push((0, row));
             let toggles = [
-                ("Column gap", l.col_gap == 1),
-                ("Row gap", l.row_gap == 1),
-                ("Pane titles", l.show_titles),
-                ("Resume in new node", l.resume_in_new_node),
+                (cat.set_column_gap, l.col_gap == 1),
+                (cat.set_row_gap, l.row_gap == 1),
+                (cat.set_pane_titles, l.show_titles),
+                (cat.set_resume_node, l.resume_in_new_node),
             ];
             for (k, (label, on)) in toggles.into_iter().enumerate() {
                 ctls.push(ctl_row(f, area, k + 1, cursor, label, toggle(on, t), t));
@@ -200,12 +243,15 @@ fn draw_content(
         SettingsTab::Notifications => {
             let n = &app.config.notifications;
             let rows = [
-                ("Enabled", toggle(n.enabled, t)),
-                ("Notify on blocked", toggle(n.on_blocked, t)),
-                ("Notify on done", toggle(n.on_done, t)),
+                (cat.set_enabled, toggle(n.enabled, t)),
+                (cat.set_notify_blocked, toggle(n.on_blocked, t)),
+                (cat.set_notify_done, toggle(n.on_done, t)),
                 (
-                    "Test notification",
-                    Line::from(Span::styled("[ Send ]", Style::new().fg(t.accent).bold())),
+                    cat.set_test_notification,
+                    Line::from(Span::styled(
+                        format!("[ {} ]", cat.act_send),
+                        Style::new().fg(t.accent).bold(),
+                    )),
                 ),
             ];
             for (i, (label, val)) in rows.into_iter().enumerate() {
@@ -215,7 +261,10 @@ fn draw_content(
         SettingsTab::Integrations => {
             for (i, agent) in crate::integration::AGENTS.iter().enumerate() {
                 let val = if crate::integration::is_installed(agent) {
-                    Line::from(Span::styled("installed ", Style::new().fg(t.mint)))
+                    Line::from(Span::styled(
+                        format!("{} ", cat.act_installed),
+                        Style::new().fg(t.mint),
+                    ))
                 } else {
                     Line::from(Span::styled(
                         "[ Install ]",
@@ -261,7 +310,7 @@ fn draw_content(
                     Paragraph::new(Line::from(vec![
                         Span::styled(if sel { " ▸ " } else { "   " }, Style::new().fg(t.accent)),
                         Span::styled(
-                            cmd.label(),
+                            cmd.label(cat),
                             Style::new().fg(if sel { t.text } else { t.subtext1 }),
                         ),
                     ])),

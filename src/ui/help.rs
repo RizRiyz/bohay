@@ -25,10 +25,14 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     f.render_widget(block, modal);
 
     // Title — the prefix is the same for every row, so state it once.
+    let cat = app.catalog;
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Keyboard Shortcuts", Style::new().fg(t.text).bold()),
-            Span::styled("   press Ctrl+Space, then:", Style::new().fg(t.overlay0)),
+            Span::styled(
+                format!(" {}", cat.keyboard_shortcuts),
+                Style::new().fg(t.text).bold(),
+            ),
+            Span::styled("   Ctrl+Space …", Style::new().fg(t.overlay0)),
         ])),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
@@ -55,7 +59,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!("{key:>4} "), Style::new().fg(t.accent).bold()),
-                Span::styled(cmd.label(), Style::new().fg(t.subtext1)),
+                Span::styled(cmd.label(cat), Style::new().fg(t.subtext1)),
             ])),
             Rect::new(cx, y, col_w.saturating_sub(1), 1),
         );
@@ -67,9 +71,9 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     f.render_widget(
         Paragraph::new(hint_line(
             &[
-                ("1-9", "jump to tab"),
-                ("?", "this help"),
-                ("any key", "close"),
+                ("1-9", cat.act_jump_tab),
+                ("?", cat.act_this_help),
+                (cat.act_any_key, cat.act_close),
             ],
             t,
         )),

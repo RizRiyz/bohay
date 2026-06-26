@@ -88,30 +88,32 @@ impl Cmd {
         }
     }
 
-    /// Human label shown in the Keys list.
-    pub fn label(self) -> &'static str {
+    /// Human label shown in the Keys list / cheat-sheet, in the active language
+    /// (docs/21). `id()` stays the stable English key; only this display label
+    /// is localized.
+    pub fn label(self, cat: &crate::i18n::Catalog) -> &'static str {
         match self {
-            Cmd::FocusLeft => "Focus pane left",
-            Cmd::FocusDown => "Focus pane down",
-            Cmd::FocusUp => "Focus pane up",
-            Cmd::FocusRight => "Focus pane right",
-            Cmd::SplitRight => "Split pane right",
-            Cmd::SplitDown => "Split pane down",
-            Cmd::ClosePane => "Close pane",
-            Cmd::ZoomPane => "Zoom pane",
-            Cmd::NewTab => "New tab",
-            Cmd::NextTab => "Next tab",
-            Cmd::PrevTab => "Previous tab",
-            Cmd::NewNode => "New node (pick a folder)",
-            Cmd::CloseNode => "Close node",
-            Cmd::NextNode => "Next node",
-            Cmd::PrevNode => "Previous node",
-            Cmd::NewWorktree => "New git worktree",
-            Cmd::OpenGit => "Open git tab",
-            Cmd::OpenSettings => "Open settings",
-            Cmd::ToggleSidebar => "Toggle sidebar",
-            Cmd::ToggleAgents => "Agents: all / active",
-            Cmd::Detach => "Detach (leave server running)",
+            Cmd::FocusLeft => cat.cmd_focus_left,
+            Cmd::FocusDown => cat.cmd_focus_down,
+            Cmd::FocusUp => cat.cmd_focus_up,
+            Cmd::FocusRight => cat.cmd_focus_right,
+            Cmd::SplitRight => cat.cmd_split_right,
+            Cmd::SplitDown => cat.cmd_split_down,
+            Cmd::ClosePane => cat.cmd_close_pane,
+            Cmd::ZoomPane => cat.cmd_zoom_pane,
+            Cmd::NewTab => cat.cmd_new_tab,
+            Cmd::NextTab => cat.cmd_next_tab,
+            Cmd::PrevTab => cat.cmd_prev_tab,
+            Cmd::NewNode => cat.cmd_new_node,
+            Cmd::CloseNode => cat.cmd_close_node,
+            Cmd::NextNode => cat.cmd_next_node,
+            Cmd::PrevNode => cat.cmd_prev_node,
+            Cmd::NewWorktree => cat.cmd_new_worktree,
+            Cmd::OpenGit => cat.cmd_open_git,
+            Cmd::OpenSettings => cat.cmd_open_settings,
+            Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
+            Cmd::ToggleAgents => cat.cmd_toggle_agents,
+            Cmd::Detach => cat.cmd_detach,
         }
     }
 

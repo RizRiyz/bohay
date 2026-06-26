@@ -9,6 +9,7 @@ mod config;
 mod detect;
 mod event;
 mod git;
+mod i18n;
 mod ids;
 mod integration;
 mod ipc;
@@ -40,6 +41,15 @@ use crate::event::AppEvent;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        // Standard CLI conveniences (don't start the server).
+        Some("--version") | Some("-V") => {
+            println!("bohay {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--help") | Some("-h") => {
+            let help = [args[0].clone(), "help".to_string()];
+            std::process::exit(cli::run(&help)?);
+        }
         Some("server") if args.get(2).map(String::as_str) == Some("stop") => return server_stop(),
         Some("server") => return ipc::server::run(),
         Some("client") => return ipc::client::run(&persist::client_socket_path()),

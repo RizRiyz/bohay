@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::app::{FolderPicker, Row};
+use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
 
 /// Draw the picker over a dimmed backdrop; returns the clickable row rects
@@ -11,6 +12,7 @@ pub(super) fn draw_picker(
     f: &mut Frame,
     area: Rect,
     p: &FolderPicker,
+    cat: &Catalog,
     t: &Theme,
 ) -> Vec<(usize, Rect)> {
     dim_backdrop(f, area, t);
@@ -29,7 +31,7 @@ pub(super) fn draw_picker(
     // Title + the path being browsed.
     f.render_widget(
         Paragraph::new(Span::styled(
-            " Open Workspace",
+            format!(" {}", cat.open_workspace),
             Style::new().fg(t.text).bold(),
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
@@ -48,7 +50,10 @@ pub(super) fn draw_picker(
     if let Some(buf) = &p.creating {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" new folder: ", Style::new().fg(t.subtext0)),
+                Span::styled(
+                    format!(" {}: ", cat.act_new_folder),
+                    Style::new().fg(t.subtext0),
+                ),
                 Span::styled(buf.clone(), Style::new().fg(t.accent).bold()),
                 Span::styled("▏", Style::new().fg(t.accent)),
             ])),
@@ -69,11 +74,11 @@ pub(super) fn draw_picker(
         f.render_widget(
             Paragraph::new(hint_line(
                 &[
-                    ("↑↓", "move"),
-                    ("⏎", "select"),
-                    ("←", "up"),
-                    ("n", "new folder"),
-                    ("esc", "cancel"),
+                    ("↑↓", cat.act_move),
+                    ("⏎", cat.act_select),
+                    ("←", cat.act_up),
+                    ("n", cat.act_new_folder),
+                    ("esc", cat.act_cancel),
                 ],
                 t,
             )),
@@ -100,8 +105,8 @@ pub(super) fn draw_picker(
         }
         // (icon, label, color). Folders navigate; files are dimmed + inert.
         let (icon, label, fg) = match p.row(i) {
-            Row::OpenFolder => ("✓", "Open this folder".to_string(), t.accent),
-            Row::OpenWorktree => ("⎇", "Open with new worktree".to_string(), t.accent),
+            Row::OpenFolder => ("✓", cat.open_this_folder.to_string(), t.accent),
+            Row::OpenWorktree => ("⎇", cat.open_with_worktree.to_string(), t.accent),
             Row::Up => ("↑", "..".to_string(), t.subtext0),
             Row::Entry(idx) => {
                 let e = &p.entries[idx];
@@ -147,6 +152,7 @@ pub(super) fn draw_worktree_prompt(
     area: Rect,
     buf: &str,
     error: Option<&str>,
+    cat: &Catalog,
     t: &Theme,
 ) {
     dim_backdrop(f, area, t);
@@ -161,14 +167,14 @@ pub(super) fn draw_worktree_prompt(
     f.render_widget(block, modal);
     f.render_widget(
         Paragraph::new(Span::styled(
-            " New git worktree",
+            format!(" {}", cat.new_git_worktree),
             Style::new().fg(t.text).bold(),
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" branch: ", Style::new().fg(t.subtext0)),
+            Span::styled(format!(" {}: ", cat.branch), Style::new().fg(t.subtext0)),
             Span::styled(buf.to_string(), Style::new().fg(t.accent).bold()),
             Span::styled("▏", Style::new().fg(t.accent)),
         ])),
@@ -184,7 +190,10 @@ pub(super) fn draw_worktree_prompt(
         );
     } else {
         f.render_widget(
-            Paragraph::new(hint_line(&[("⏎", "create"), ("esc", "cancel")], t)),
+            Paragraph::new(hint_line(
+                &[("⏎", cat.act_create), ("esc", cat.act_cancel)],
+                t,
+            )),
             Rect::new(inner.x, bottom, inner.width, 1),
         );
     }

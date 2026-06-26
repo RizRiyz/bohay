@@ -14,16 +14,18 @@ pub enum SettingsTab {
     Keys,
     Modules,
     Integrations,
+    Language,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [
+    pub const ALL: [SettingsTab; 7] = [
         SettingsTab::Theme,
         SettingsTab::Layout,
         SettingsTab::Notifications,
         SettingsTab::Keys,
         SettingsTab::Modules,
         SettingsTab::Integrations,
+        SettingsTab::Language,
     ];
 
     pub fn icon(self) -> &'static str {
@@ -34,17 +36,20 @@ impl SettingsTab {
             SettingsTab::Keys => "⌨",
             SettingsTab::Modules => "❏",
             SettingsTab::Integrations => "⌁",
+            SettingsTab::Language => "⊕",
         }
     }
 
-    pub fn label(self) -> &'static str {
+    /// The tab label in the active UI language (docs/21).
+    pub fn label(self, cat: &crate::i18n::Catalog) -> &'static str {
         match self {
-            SettingsTab::Theme => "Theme",
-            SettingsTab::Layout => "Layout",
-            SettingsTab::Notifications => "Notify",
-            SettingsTab::Keys => "Keys",
-            SettingsTab::Modules => "Modules",
-            SettingsTab::Integrations => "Agents",
+            SettingsTab::Theme => cat.tab_theme,
+            SettingsTab::Layout => cat.tab_layout,
+            SettingsTab::Notifications => cat.tab_notify,
+            SettingsTab::Keys => cat.tab_keys,
+            SettingsTab::Modules => cat.tab_modules,
+            SettingsTab::Integrations => cat.tab_agents,
+            SettingsTab::Language => cat.tab_language,
         }
     }
 
@@ -95,6 +100,7 @@ impl App {
             SettingsTab::Keys => crate::app::Cmd::ALL.len(),
             SettingsTab::Modules => self.modules.modules.len(),
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
+            SettingsTab::Language => crate::i18n::LANGS.len(),
         }
     }
 
@@ -197,10 +203,10 @@ impl App {
     }
 
     fn settings_set_tab(&mut self, tab: SettingsTab) {
-        let cursor = if tab == SettingsTab::Theme {
-            theme_cursor(&self.config.theme)
-        } else {
-            0
+        let cursor = match tab {
+            SettingsTab::Theme => theme_cursor(&self.config.theme),
+            SettingsTab::Language => lang_cursor(&self.config.language),
+            _ => 0,
         };
         if let Some(ui) = self.settings.as_mut() {
             ui.tab = tab;
@@ -220,9 +226,11 @@ impl App {
         if let Some(ui) = self.settings.as_mut() {
             ui.cursor = new;
         }
-        // Theme previews live as the selection moves.
+        // Theme / Language preview live as the selection moves.
         if tab == SettingsTab::Theme {
             self.apply_theme(theme::THEMES[new]);
+        } else if tab == SettingsTab::Language {
+            self.apply_language(crate::i18n::LANGS[new]);
         }
     }
 
@@ -231,7 +239,8 @@ impl App {
             return;
         };
         match tab {
-            SettingsTab::Theme => self.settings_move(delta), // radio: left/right == up/down
+            // radio tabs: ‹ › move the selection like up/down
+            SettingsTab::Theme | SettingsTab::Language => self.settings_move(delta),
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
             SettingsTab::Notifications if cursor < 3 => self.toggle_notify(cursor),
             SettingsTab::Notifications => {} // the Test row only reacts to Enter/click
@@ -248,6 +257,9 @@ impl App {
         match tab {
             SettingsTab::Theme => {
                 self.apply_theme(theme::THEMES[cursor.min(theme::THEMES.len() - 1)])
+            }
+            SettingsTab::Language => {
+                self.apply_language(crate::i18n::LANGS[cursor.min(crate::i18n::LANGS.len() - 1)])
             }
             SettingsTab::Layout => self.adjust_layout(cursor, 1),
             SettingsTab::Notifications if cursor == 3 => self.test_notification(),
@@ -285,6 +297,13 @@ impl App {
         if self.downsample {
             self.theme = self.theme.to_256();
         }
+        config::save(&self.config);
+    }
+
+    /// Swap the UI language live + persist (docs/21) — mirrors `apply_theme`.
+    fn apply_language(&mut self, code: &str) {
+        self.config.language = code.to_string();
+        self.catalog = crate::i18n::by_code(code);
         config::save(&self.config);
     }
 
@@ -363,4 +382,11 @@ impl App {
 
 fn theme_cursor(name: &str) -> usize {
     theme::THEMES.iter().position(|n| *n == name).unwrap_or(0)
+}
+
+fn lang_cursor(code: &str) -> usize {
+    crate::i18n::LANGS
+        .iter()
+        .position(|c| *c == code)
+        .unwrap_or(0)
 }
