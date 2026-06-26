@@ -42,6 +42,10 @@ pub trait VtEngine: Send {
     /// the user's scroll position.
     fn detection_text(&self, n: u16) -> String;
 
+    /// Every visible row as a plain string (one char per cell, full width,
+    /// untrimmed) — used to copy a mouse text selection.
+    fn visible_rows(&self) -> Vec<String>;
+
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
 

@@ -1,6 +1,6 @@
 name: release
 
-# Tag a version to ship binaries:  git tag v0.1.0 && git push --tags
+# Tag a version to ship binaries:  git tag v0.1.0 && git push origin v0.1.0
 on:
   push:
     tags: ["v*"]
@@ -8,9 +8,28 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
 jobs:
+  # The matrix upload jobs attach assets to an existing GitHub Release, so create
+  # it first (idempotent — safe to re-run a tag).
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create the GitHub Release for this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                 --title "$GITHUB_REF_NAME" --generate-notes
+
   upload:
     name: ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -27,10 +46,10 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Builds (cross-compiling musl/aarch64 via `cross` automatically), packages
-      # `bohay-<tag>-<target>.{tar.gz,zip}` + a .sha256, and attaches them to the
-      # GitHub Release for this tag.
+      # `bohay-<tag>-<target>.{tar.gz,zip}` + a .sha256, and uploads them to the
+      # Release created above.
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: bohay

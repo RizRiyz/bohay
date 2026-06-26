@@ -110,6 +110,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
         cursor
     };
     app.git_section_rects = git_section_rects;
+    // Per-pane content rects so mouse drags map to grid cells for text selection
+    // (a git tab has no selectable terminal panes).
+    app.pane_content_rects = if app.active_is_git() {
+        Vec::new()
+    } else {
+        rects
+            .iter()
+            .filter_map(|(id, r)| pane_content(*r, bordered).map(|c| (*id, c)))
+            .collect()
+    };
     status::draw_status(f, status, app, &t);
 
     // The Settings modal draws last, on top of everything, and owns the cursor.
@@ -146,6 +156,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // The new-worktree branch prompt (docs/18 WT).
     if let Some(buf) = &app.worktree_prompt {
         picker::draw_worktree_prompt(f, area, buf, app.worktree_error.as_deref(), cat, &t);
+    }
+    // A transient toast (e.g. "Copied") flashes on top of everything.
+    if let Some((text, _)) = &app.toast {
+        draw_toast(f, area, text, &t);
     }
 
     let cursor =
@@ -227,6 +241,35 @@ pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
 pub(super) fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     s.width()
+}
+
+/// A small centered toast box near the bottom (e.g. "✓ Copied"). Drawn last, so
+/// it floats over everything; the loop clears it after ~1.4s.
+fn draw_toast(f: &mut Frame, area: Rect, text: &str, t: &Theme) {
+    use ratatui::widgets::{Borders, Clear};
+    let w = (display_width(text) as u16 + 6).min(area.width);
+    let h = 3u16;
+    if w < 6 || area.height < h + 3 {
+        return;
+    }
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.bottom().saturating_sub(h + 2); // just above the status line
+    let rect = Rect::new(x, y, w, h);
+    f.render_widget(Clear, rect);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.accent).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("✓ ", Style::new().fg(t.green)),
+            Span::styled(text.to_string(), Style::new().fg(t.text).bold()),
+        ]))
+        .alignment(Alignment::Center),
+        inner,
+    );
 }
 
 /// The lone-pane horizontal pad, suppressed for panes too narrow to spare it.

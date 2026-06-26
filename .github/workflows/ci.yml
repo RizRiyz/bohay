@@ -7,27 +7,33 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # Harden dependency downloads: retry transient failures and disable HTTP/2
+  # multiplexing, which causes intermittent crates.io "HTTP2 framing layer"
+  # download errors on GitHub runners.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
   test:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets
+      # `-D warnings` is scoped to clippy on our own crate — NOT a global
+      # RUSTFLAGS, which would also fail on harmless dependency warnings.
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
 
   windows:
     name: windows build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked

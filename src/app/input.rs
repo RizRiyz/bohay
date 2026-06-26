@@ -83,6 +83,45 @@ impl App {
             }
             return;
         }
+        // ── pane text selection: drag to select, release auto-copies (OSC 52) ──
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Begin a selection only inside a pane's content; otherwise drop
+                // any old one. Falls through to normal click handling (focus/etc).
+                self.selection = self
+                    .pane_content_at(m.column, m.row)
+                    .map(|(pane, content)| Selection {
+                        pane,
+                        content,
+                        anchor: (m.column, m.row),
+                        cursor: (m.column, m.row),
+                    });
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(sel) = self.selection.as_mut() {
+                    let c = sel.content;
+                    sel.cursor = (
+                        m.column.clamp(c.x, c.right().saturating_sub(1)),
+                        m.row.clamp(c.y, c.bottom().saturating_sub(1)),
+                    );
+                }
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // A real drag copies its text + flashes a toast; a plain click
+                // clears the (1-cell) selection so nothing stays highlighted.
+                match self.selection_text() {
+                    Some(text) => {
+                        self.pending_clipboard = Some(text);
+                        let msg = self.catalog.copied;
+                        self.show_toast(msg);
+                    }
+                    None => self.selection = None,
+                }
+                return;
+            }
+            _ => {}
+        }
         let scroll: i32 = match m.kind {
             MouseEventKind::Down(MouseButton::Left) => 0,
             MouseEventKind::ScrollUp => -3,
@@ -222,6 +261,77 @@ impl App {
             let id = *id;
             self.layout_mut().focus = id;
             self.mode = Mode::Normal;
+        }
+    }
+
+    /// The pane whose **content** rect covers terminal cell `(x, y)`.
+    fn pane_content_at(&self, x: u16, y: u16) -> Option<(PaneId, Rect)> {
+        self.pane_content_rects
+            .iter()
+            .find(|(_, r)| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+            .map(|(id, r)| (*id, *r))
+    }
+
+    /// Extract the current selection's text from the pane's grid (linear, with
+    /// trailing blanks trimmed). `None` for a click without a drag or empty text.
+    fn selection_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        if !sel.has_range() {
+            return None;
+        }
+        let rows = self
+            .panes
+            .get(&sel.pane)?
+            .engine
+            .lock()
+            .ok()?
+            .visible_rows();
+        let ((sx, sy), (ex, ey)) = sel.ordered();
+        let (cx, cy) = (sel.content.x, sel.content.y);
+        let mut out = String::new();
+        for ty in sy..=ey {
+            let li = (ty as usize).saturating_sub(cy as usize);
+            let chars: Vec<char> = rows
+                .get(li)
+                .map(|r| r.chars().collect())
+                .unwrap_or_default();
+            let left = if ty == sy {
+                sx.saturating_sub(cx) as usize
+            } else {
+                0
+            };
+            let right = if ty == ey {
+                ex.saturating_sub(cx) as usize
+            } else {
+                chars.len().saturating_sub(1)
+            };
+            let line: String = chars
+                .iter()
+                .skip(left)
+                .take(right.saturating_sub(left) + 1)
+                .collect();
+            if ty != sy {
+                out.push('\n');
+            }
+            out.push_str(line.trim_end());
+        }
+        let out = out.trim_end_matches('\n').to_string();
+        (!out.trim().is_empty()).then_some(out)
+    }
+
+    /// Show a transient toast (e.g. "Copied") bottom-center for ~1.4s.
+    pub fn show_toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), Instant::now() + Duration::from_millis(1400)));
+    }
+
+    /// Clear an expired toast; returns true when it changed (so the loop redraws
+    /// once to remove it, since idle frames aren't rendered).
+    pub fn tick_toast(&mut self, now: Instant) -> bool {
+        if self.toast.as_ref().is_some_and(|(_, exp)| now >= *exp) {
+            self.toast = None;
+            true
+        } else {
+            false
         }
     }
 

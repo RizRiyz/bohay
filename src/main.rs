@@ -102,6 +102,86 @@ pub(crate) fn emit_notification(msg: &str) {
     let _ = out.flush();
 }
 
+/// Copy `text` to the system clipboard (pane mouse-selection → release).
+///
+/// Two paths, because each covers the other's gaps:
+/// 1. The **native OS clipboard tool** (`pbcopy` / `wl-copy` / `xclip` / `clip`).
+///    The client always runs on the user's machine — even with `--remote` — so
+///    this lands in the *local* clipboard and works no matter the terminal.
+/// 2. **OSC 52** — a terminal escape; covers terminals that bridge it and setups
+///    where no clipboard tool is installed. Harmless if unsupported.
+pub(crate) fn emit_clipboard(text: &str) {
+    let _ = system_clipboard_copy(text);
+
+    use std::io::Write;
+    let b64 = base64_encode(text.as_bytes());
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "\x1b]52;c;{b64}\x1b\\");
+    let _ = out.flush();
+}
+
+/// Pipe `text` into the first available OS clipboard command.
+fn system_clipboard_copy(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("clip", &[])]
+    } else {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+    for (cmd, args) in tools {
+        let Ok(mut child) = Command::new(cmd)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue; // tool not installed — try the next
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no clipboard tool",
+    ))
+}
+
+/// Minimal standard base64 (no padding-dependency crate needed).
+fn base64_encode(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
     let mut terminal = ratatui::init();
@@ -307,6 +387,10 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         for msg in app.pending_notify.drain(..) {
             emit_notification(&msg);
         }
+        if let Some(text) = app.pending_clipboard.take() {
+            emit_clipboard(&text);
+        }
+        app.tick_toast(Instant::now());
         // Don't touch the cursor here — ratatui shows + positions it once per
         // draw. A per-frame `Hide` flickered it on any activity.
         terminal.draw(|f| ui::render(f, &mut app))?;
@@ -338,6 +422,17 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        // RFC 4648 test vectors — the OSC 52 clipboard payload must encode right.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode("héllo".as_bytes()), "aMOpbGxv");
+    }
 
     /// Render one frame of the full UI to an off-screen buffer and assert the
     /// chrome is present. Exercises App::new (real PTY spawn), the VtEngine, and
@@ -371,7 +466,6 @@ mod tests {
     /// stores as a literal `\t` cell — `set_symbol("\t")` tripped the assert.
     #[test]
     fn renders_pane_with_tab() {
-        use crate::terminal::vt::VtEngine;
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
         let id = app.layout().focus;

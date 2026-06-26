@@ -119,6 +119,53 @@ impl PaneStatus {
     }
 }
 
+/// A drag text-selection inside a pane. Coordinates are **terminal** cells; the
+/// pane's `content` rect maps them to grid positions for extraction/highlight.
+#[derive(Clone, Copy)]
+pub struct Selection {
+    pub pane: PaneId,
+    pub content: Rect,
+    pub anchor: (u16, u16),
+    pub cursor: (u16, u16),
+}
+
+impl Selection {
+    /// (start, end) terminal cells in reading order (top-left → bottom-right).
+    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        let key = |p: (u16, u16)| (p.1, p.0);
+        if key(self.anchor) <= key(self.cursor) {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    /// Whether terminal cell `(x, y)` is inside the linear selection (and the
+    /// pane's content area) — drives the render highlight.
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        let c = self.content;
+        if x < c.x || x >= c.right() || y < c.y || y >= c.bottom() {
+            return false;
+        }
+        let ((sx, sy), (ex, ey)) = self.ordered();
+        if y < sy || y > ey {
+            return false;
+        }
+        let left = if y == sy { sx } else { c.x };
+        let right = if y == ey {
+            ex
+        } else {
+            c.right().saturating_sub(1)
+        };
+        x >= left && x <= right
+    }
+
+    /// True only when the drag actually moved (so a plain click isn't a copy).
+    fn has_range(&self) -> bool {
+        self.anchor != self.cursor
+    }
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     pub status: HashMap<PaneId, PaneStatus>,
@@ -165,6 +212,14 @@ pub struct App {
     /// Notification messages queued by detection; the loop flushes them to the
     /// terminal (bell + desktop) and clears.
     pub pending_notify: Vec<String>,
+    /// Active mouse text selection in a pane (drag to select). Cleared on a new
+    /// click; on release its text is queued to `pending_clipboard`.
+    pub selection: Option<Selection>,
+    /// Text to copy to the client's system clipboard (via OSC 52) — set when a
+    /// selection finishes, drained + broadcast by the loop.
+    pub pending_clipboard: Option<String>,
+    /// A transient toast (text, expiry) shown bottom-center — e.g. "Copied".
+    pub toast: Option<(String, Instant)>,
     /// Downsample RGB → 256-color (for the local path on non-truecolor terms).
     pub downsample: bool,
     /// Throttle for refreshing pane working directories.
@@ -192,6 +247,9 @@ pub struct App {
     pub last_pane_area: Rect,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
+    /// Each pane's **content** rect (inside the border/title) — maps a mouse
+    /// position to a grid cell for text selection.
+    pub pane_content_rects: Vec<(PaneId, Rect)>,
     pub tab_rects: Vec<(usize, Rect)>,
     pub tab_close_rects: Vec<(usize, Rect)>,
     pub ws_rects: Vec<(usize, Rect)>,
@@ -283,6 +341,9 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_notify: Vec::new(),
+            selection: None,
+            pending_clipboard: None,
+            toast: None,
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
@@ -298,6 +359,7 @@ impl App {
             app_tx,
             last_pane_area: Rect::ZERO,
             pane_rects: Vec::new(),
+            pane_content_rects: Vec::new(),
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             node_branch_rects: Vec::new(),
@@ -462,6 +524,9 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_notify: Vec::new(),
+            selection: None,
+            pending_clipboard: None,
+            toast: None,
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
@@ -477,6 +542,7 @@ impl App {
             app_tx,
             last_pane_area: Rect::ZERO,
             pane_rects: Vec::new(),
+            pane_content_rects: Vec::new(),
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             node_branch_rects: Vec::new(),
@@ -1256,6 +1322,51 @@ mod tests {
     }
 
     #[test]
+    fn selection_spans_lines_linearly() {
+        // Content rect at (x=2, y=1), 10 wide × 5 tall.
+        let content = Rect::new(2, 1, 10, 5);
+        let sel = Selection {
+            pane: PaneId(1),
+            content,
+            anchor: (4, 1),
+            cursor: (6, 3),
+        };
+        // First row: from the anchor column to the right edge.
+        assert!(sel.contains(4, 1));
+        assert!(sel.contains(11, 1)); // last column (right() == 12)
+        assert!(!sel.contains(3, 1)); // before the anchor
+                                      // Middle row: the full width.
+        assert!(sel.contains(2, 2) && sel.contains(11, 2));
+        // Last row: up to the cursor column.
+        assert!(sel.contains(6, 3));
+        assert!(!sel.contains(7, 3)); // past the cursor
+                                      // Outside the row range / pane.
+        assert!(!sel.contains(5, 0) && !sel.contains(5, 4) && !sel.contains(99, 2));
+        // Dragging up-left selects the same range (anchor/cursor order-independent).
+        let rev = Selection {
+            anchor: (6, 3),
+            cursor: (4, 1),
+            ..sel
+        };
+        assert!(rev.contains(11, 1) && rev.contains(6, 3) && !rev.contains(7, 3));
+    }
+
+    #[test]
+    fn toast_shows_then_expires() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.toast.is_none());
+        app.show_toast("Copied");
+        assert!(app.toast.is_some());
+        // Not expired yet → no change.
+        assert!(!app.tick_toast(Instant::now()));
+        assert!(app.toast.is_some());
+        // Past the expiry → cleared, returns true so the loop redraws once.
+        assert!(app.tick_toast(Instant::now() + Duration::from_secs(5)));
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
     fn closing_last_pane_quits_and_ignores_further_events() {
         // Closing the last pane empties `workspaces` and sets `should_quit`; the
         // server loop drains the rest of the event batch before checking that
@@ -1415,7 +1526,7 @@ mod tests {
         assert_eq!(app.nodes_scroll, 0);
 
         let na = app.nodes_area;
-        let mut wheel = |app: &mut App, kind| {
+        let wheel = |app: &mut App, kind| {
             app.handle_event(AppEvent::Mouse(MouseEvent {
                 kind,
                 column: na.x + 2,
@@ -1982,7 +2093,6 @@ mod tests {
 #[cfg(test)]
 mod cwd_test {
     use super::*;
-    use std::sync::mpsc;
 
     #[test]
     #[ignore] // real-process timing test; flaky under parallel load. Run with --ignored.

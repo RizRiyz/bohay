@@ -108,6 +108,8 @@ fn draw_one_pane(
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), content);
 
     let downsample = app.downsample;
+    // A mouse text-selection in this pane highlights its cells.
+    let sel = app.selection.filter(|s| s.pane == id);
     let cursor_pos = match pane.engine.lock() {
         Ok(engine) => {
             {
@@ -136,6 +138,10 @@ fn draw_one_pane(
                     }
                     if cell.bg != Color::Reset {
                         style = style.bg(conv(cell.bg));
+                    }
+                    // Highlight the cell if it's inside the mouse selection.
+                    if sel.is_some_and(|s| s.contains(x, y)) {
+                        style = style.bg(t.sel_bg);
                     }
                     // ratatui panics if a control char reaches the buffer; the
                     // VT grid can hold stray C0/C1 bytes, so render them blank.

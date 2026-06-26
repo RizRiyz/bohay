@@ -89,6 +89,7 @@ where
                 // sends a full Frame to a freshly-attached client first.)
             }
             Ok(ServerMessage::Notify(msg)) => crate::emit_notification(&msg),
+            Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
             Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => break,
             Ok(_) => {}
             Err(_) => break, // server gone

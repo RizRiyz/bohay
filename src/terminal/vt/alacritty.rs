@@ -157,6 +157,24 @@ impl VtEngine for AlacrittyEngine {
             .join("\n")
     }
 
+    fn visible_rows(&self) -> Vec<String> {
+        let grid = self.term.grid();
+        let rows = grid.screen_lines();
+        let mut lines = vec![String::new(); rows];
+        for indexed in grid.display_iter() {
+            let r = indexed.point.line.0;
+            if r < 0 || r as usize >= rows {
+                continue;
+            }
+            if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let c = indexed.cell.c;
+            lines[r as usize].push(if c == '\0' { ' ' } else { c });
+        }
+        lines
+    }
+
     fn title(&self) -> Option<String> {
         self.title.lock().ok().and_then(|g| g.clone())
     }

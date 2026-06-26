@@ -449,7 +449,6 @@ fn header(text: &str, t: &Theme) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::app::App;
     use ratatui::{backend::TestBackend, Terminal};
 

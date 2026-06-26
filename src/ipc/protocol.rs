@@ -36,6 +36,9 @@ pub enum ServerMessage {
     FrameDiff(FrameDiff),
     /// Ring the bell + raise a desktop notification on the client's terminal.
     Notify(String),
+    /// Set the client's system clipboard (OSC 52) to this text — sent when a
+    /// mouse selection finishes, so drag-to-select auto-copies.
+    Clipboard(String),
     /// Tell the client to detach (server keeps running).
     Detach,
     ServerShutdown {
@@ -436,7 +439,7 @@ mod tests {
     fn downsample_to_256() {
         // near-black → a dark index (grayscale or cube corner), always Indexed.
         match to_256(Color::Rgb(0x11, 0x11, 0x16)) {
-            Color::Indexed(i) => assert!(i < 16 || i >= 232, "got {i}"),
+            Color::Indexed(i) => assert!(!(16..232).contains(&i), "got {i}"),
             other => panic!("expected indexed, got {other:?}"),
         }
         assert!(matches!(

@@ -63,6 +63,10 @@ the full cheat-sheet.
 
 Every shortcut is remappable in **Settings → Keys**.
 
+**Copy text** by dragging across a pane — release copies the selection to your system clipboard
+and flashes a *Copied* toast. It writes the native clipboard (`pbcopy` / `wl-copy` / `xclip` /
+`clip`) **and** emits OSC 52, so it works locally and over SSH.
+
 ## CLI & agent API
 
 Every TUI action is a scriptable command over a local socket — what you do in the UI, an agent

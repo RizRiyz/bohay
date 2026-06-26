@@ -112,6 +112,14 @@ pub fn run() -> Result<()> {
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));
         }
+        // A finished mouse selection copies to the client's clipboard (OSC 52).
+        if let Some(text) = app.pending_clipboard.take() {
+            broadcast(&mut clients, ServerMessage::Clipboard(text));
+        }
+        // An expired toast forces one render so it disappears (idle frames don't).
+        if app.tick_toast(Instant::now()) {
+            activity = true;
+        }
 
         if activity && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
             if size != backend_size {

@@ -168,9 +168,14 @@ mod tests {
         assert_eq!(from_empty.theme, "noir");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         // Round-trip preserves values.
-        let mut c2 = Config::default();
-        c2.theme = "mono".into();
-        c2.notifications.enabled = true;
+        let c2 = Config {
+            theme: "mono".into(),
+            notifications: NotifyConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let json = serde_json::to_string(&c2).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back.theme, "mono");
