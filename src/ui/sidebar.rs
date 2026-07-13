@@ -131,7 +131,12 @@ pub(super) fn draw_sidebar(
         Span::styled("bohay", Style::new().fg(t.text).bold()),
     ];
     if cx + 7 + 6 < menu.x {
-        brand.push(Span::styled("  v0.1", Style::new().fg(t.overlay0)));
+        // `concat!`+`env!` bakes the crate version in at compile time (no per-frame
+        // alloc), so the sidebar always matches the released version.
+        brand.push(Span::styled(
+            concat!("  v", env!("CARGO_PKG_VERSION")),
+            Style::new().fg(t.overlay0),
+        ));
     }
     line_at(f, area.y + 1, Line::from(brand));
     let menu_hover = app
