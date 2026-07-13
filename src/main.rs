@@ -54,8 +54,7 @@ fn main() -> Result<()> {
             let help = [args[0].clone(), "help".to_string()];
             std::process::exit(cli::run(&help)?);
         }
-        Some("server") if args.get(2).map(String::as_str) == Some("stop") => return server_stop(),
-        Some("server") => return ipc::server::run(),
+        Some("server") => return server_cmd(&args),
         Some("client") => return ipc::client::run(&persist::client_socket_path()),
         // Remote attach (docs/18 RA): the bridge runs on the remote host (via
         // ssh); `--remote <host>` launches it from the local side.
@@ -315,20 +314,123 @@ fn wait_for_socket(sock: &Path) -> Result<()> {
     Err(anyhow!("bohay server did not start in time"))
 }
 
-fn server_stop() -> Result<()> {
-    match ipc::transport::connect(&persist::socket_path()) {
-        Ok(mut s) => {
-            writeln!(s, r#"{{"id":"1","method":"server.stop","params":{{}}}}"#)?;
-            let mut line = String::new();
-            BufReader::new(s).read_line(&mut line)?;
-            print!("{line}");
-            Ok(())
-        }
-        Err(_) => {
-            println!("no bohay server running");
-            Ok(())
+/// `bohay server <start|stop|restart|status>` — manage the background server.
+/// Bare `bohay server` (no subcommand) is the internal headless role that
+/// `spawn_server` launches via setsid; users go through the subcommands.
+fn server_cmd(args: &[String]) -> Result<()> {
+    match args.get(2).map(String::as_str) {
+        None => ipc::server::run(), // internal role: run the server in the foreground
+        Some("start") => server_start(),
+        Some("stop") => server_stop(),
+        Some("restart") => server_restart(),
+        Some("status") => server_status(),
+        Some(other) => {
+            eprintln!("unknown server command: {other}");
+            eprintln!("usage: bohay server <start|stop|restart|status>");
+            std::process::exit(2);
         }
     }
+}
+
+/// Spawn the detached server if one isn't already up.
+fn server_start() -> Result<()> {
+    let sock = persist::client_socket_path();
+    if server_running(&sock) {
+        println!("bohay server already running");
+        return Ok(());
+    }
+    spawn_server()?;
+    wait_for_socket(&sock)?;
+    println!("bohay server started");
+    Ok(())
+}
+
+fn server_stop() -> Result<()> {
+    let sock = persist::client_socket_path();
+    if send_server_stop() {
+        // The server acks before it actually exits, so wait for it to release the
+        // socket — then `stop` returning means it's really down (and a following
+        // `status` reports "not running", not a half-shutdown "running").
+        wait_for_shutdown(&sock);
+        println!("bohay server stopped");
+    } else {
+        println!("no bohay server running");
+    }
+    Ok(())
+}
+
+/// Stop (if running), wait for the socket to close, then start a fresh server —
+/// the way to load a newly-installed binary without rebooting a live session.
+fn server_restart() -> Result<()> {
+    let sock = persist::client_socket_path();
+    if send_server_stop() {
+        wait_for_shutdown(&sock);
+    }
+    spawn_server()?;
+    wait_for_socket(&sock)?;
+    println!("bohay server restarted");
+    Ok(())
+}
+
+/// Poll (bounded) until the server releases its socket, so `stop`/`restart`
+/// return only once the old server is truly gone.
+fn wait_for_shutdown(sock: &Path) {
+    for _ in 0..100 {
+        if !server_running(sock) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Report whether a server is up and, if so, the version it's *running* — which
+/// can differ from this binary when a new install hasn't been restarted yet.
+fn server_status() -> Result<()> {
+    let sock = persist::client_socket_path();
+    if !server_running(&sock) {
+        println!("bohay server: not running");
+        return Ok(());
+    }
+    match server_version() {
+        Some(running) => {
+            println!("bohay server: running (v{running})");
+            let binary = env!("CARGO_PKG_VERSION");
+            if running != binary {
+                println!(
+                    "  note: this binary is v{binary} — run `bohay server restart` to load it"
+                );
+            }
+        }
+        None => println!("bohay server: running"),
+    }
+    Ok(())
+}
+
+/// Send `server.stop` to a running server; returns whether one answered.
+fn send_server_stop() -> bool {
+    match ipc::transport::connect(&persist::socket_path()) {
+        Ok(mut s) => {
+            let _ = writeln!(s, r#"{{"id":"1","method":"server.stop","params":{{}}}}"#);
+            // Read the ack so the server has processed the request before we return.
+            let mut line = String::new();
+            let _ = BufReader::new(s).read_line(&mut line);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Ask the running server its version via `ping`. `None` if unreachable/unparsable.
+fn server_version() -> Option<String> {
+    let mut s = ipc::transport::connect(&persist::socket_path()).ok()?;
+    writeln!(s, r#"{{"id":"1","method":"ping","params":{{}}}}"#).ok()?;
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&line).ok()?;
+    v.get("result")?
+        .get("version")?
+        .as_str()
+        .map(String::from)
 }
 
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {

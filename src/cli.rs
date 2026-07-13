@@ -108,7 +108,10 @@ remote:
   --remote <host> [ssh args] attach to a bohay session on <host> over plain ssh
 
 server:
+  server status              is the server running, and what version
+  server start               start the background server if it isn't up
   server stop                stop the server (and all panes)
+  server restart             stop + start (load a newly-installed binary)
   integration install claude install the claude resume hook
 ";
 
