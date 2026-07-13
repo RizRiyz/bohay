@@ -5,7 +5,9 @@ use super::*;
 
 impl App {
     /// Recompute every pane's agent state. Cheap; called a few times a second.
-    pub fn detect_tick(&mut self, now: Instant) {
+    /// Returns whether anything the sidebar shows changed, so the loop repaints a
+    /// silent agent's Working→Done transition even when no other event fires.
+    pub fn detect_tick(&mut self, now: Instant) -> bool {
         // Refresh working directories ~once a second so spaces follow the user.
         if now.duration_since(self.last_cwd_at) >= Duration::from_secs(1) {
             self.last_cwd_at = now;
@@ -20,7 +22,7 @@ impl App {
         // grid; agent state (blocked/working/done) is human-paced, so ~100ms is
         // plenty — running it at the render frame rate (up to 60fps) just burns CPU.
         if now.duration_since(self.last_detect_at) < Duration::from_millis(100) {
-            return;
+            return false;
         }
         self.last_detect_at = now;
         let focus = self.layout().focus;
@@ -78,6 +80,8 @@ impl App {
         if agent_appeared {
             self.session_dirty = true;
         }
+        // A state transition (or a newly-resumable agent) changes the sidebar.
+        let changed = !changes.is_empty() || agent_appeared;
         let (notify_on, on_blocked, on_done) = {
             let n = &self.config.notifications;
             (n.enabled, n.on_blocked, n.on_done)
@@ -117,6 +121,7 @@ impl App {
                 }
             }
         }
+        changed
     }
 
     // ── api dispatch ──────────────────────────────────────────────────────────
@@ -137,7 +142,7 @@ impl App {
 
     fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
         match method {
-            "ping" => Ok(json!({"type":"pong","version":"0.1.0","protocol":1})),
+            "ping" => Ok(json!({"type":"pong","version": env!("CARGO_PKG_VERSION"),"protocol":1})),
             "server.stop" => {
                 self.should_quit = true;
                 Ok(json!({"type":"ok"}))

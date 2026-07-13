@@ -1156,6 +1156,31 @@ mod tests {
     }
 
     #[test]
+    fn plain_keystroke_does_not_mark_the_ui_dirty() {
+        // Typing into a pane must NOT trigger a bohay redraw — the character goes to
+        // the shell, whose echo arrives as a separate PtyData event that repaints.
+        // Rendering on the keystroke too would double the frame rate while typing.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        assert!(
+            !app.handle_event(key('x', KeyModifiers::NONE)),
+            "a plain keystroke forwarded to the pane must not be dirty"
+        );
+        // The pane's echo of that character is what actually changes the screen.
+        let id = app.layout().focus;
+        assert!(
+            app.handle_event(AppEvent::PtyData(id)),
+            "pane output must mark the frame dirty"
+        );
+        // The prefix chord DOES change the UI (status bar shows PREFIX).
+        assert!(
+            app.handle_event(key(' ', KeyModifiers::CONTROL)),
+            "entering prefix mode must repaint"
+        );
+    }
+
+    #[test]
     fn session_roundtrip() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();

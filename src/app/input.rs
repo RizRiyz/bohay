@@ -4,38 +4,56 @@
 use super::*;
 
 impl App {
-    pub fn handle_event(&mut self, ev: AppEvent) {
+    /// Apply an event; returns whether it changed the rendered UI (→ the loop
+    /// should redraw). Input forwarded to a pane returns `false` — the screen only
+    /// changes when the pane echoes (a separate `PtyData` event), so we don't waste
+    /// a full render per keystroke.
+    pub fn handle_event(&mut self, ev: AppEvent) -> bool {
         // Closing the last workspace empties `workspaces` and sets `should_quit`; the
         // loop drains the rest of the event batch before it checks that flag, so
         // ignore events here once there's nothing left to act on (`layout()`
         // would otherwise index an empty `workspaces`).
         if self.workspaces.is_empty() {
-            return;
+            return false;
         }
         match ev {
             AppEvent::Key(k) => self.handle_key(k),
-            AppEvent::Mouse(m) => self.handle_mouse(m),
+            AppEvent::Mouse(m) => {
+                self.handle_mouse(m);
+                true // conservative: hover/selection/clicks can change the UI
+            }
             AppEvent::Paste(s) => {
                 if let Some(p) = self.focused() {
                     p.send(s.as_bytes());
                 }
+                false // goes to the pane; its echo (PtyData) renders it
             }
-            AppEvent::Resize(_, _) => {}
+            AppEvent::Resize(_, _) => true,
             AppEvent::PtyData(id) => {
                 if let Some(s) = self.status.get_mut(&id) {
                     s.last_activity = Instant::now();
                 }
+                true // the pane's screen advanced
             }
-            AppEvent::PtyExit(id) => self.close_pane(id),
+            AppEvent::PtyExit(id) => {
+                self.close_pane(id);
+                true
+            }
             AppEvent::ModuleCommandFinished {
                 log_id,
                 code,
                 out,
                 err,
-            } => self.module_command_finished(log_id, code, out, err),
-            AppEvent::GitData { view, payload } => self.git_data(view, payload),
+            } => {
+                self.module_command_finished(log_id, code, out, err);
+                true
+            }
+            AppEvent::GitData { view, payload } => {
+                self.git_data(view, payload);
+                true
+            }
             // Handled by the server loop; never reaches here at runtime.
-            AppEvent::ClientConnected { .. } | AppEvent::ClientDetach { .. } => {}
+            AppEvent::ClientConnected { .. } | AppEvent::ClientDetach { .. } => false,
         }
     }
 
@@ -339,29 +357,33 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    /// Returns whether this key changed the **bohay UI** (so the server should
+    /// render). Plain input forwarded to a pane returns `false`: the pane's echo
+    /// arrives as a separate `PtyData` event and renders then, so we don't burn a
+    /// full render on the keystroke itself.
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
-            return;
+            return false; // ignored — nothing changed
         }
         // The help cheat-sheet overlay swallows the next key press and closes.
         if self.help_open {
             self.help_open = false;
-            return;
+            return true;
         }
         // The Settings modal captures all input while open.
         if self.settings.is_some() {
             self.handle_settings_key(key);
-            return;
+            return true;
         }
         // The folder picker captures all input while open.
         if self.picker.is_some() {
             self.handle_picker_key(key);
-            return;
+            return true;
         }
         // The new-worktree branch prompt captures all input while open.
         if self.worktree_prompt.is_some() {
             self.handle_worktree_prompt_key(key);
-            return;
+            return true;
         }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the
         // `Ctrl+Space` prefix still works for global ops (switch tab/workspace, …).
@@ -371,7 +393,7 @@ impl App {
             } else {
                 self.handle_git_key(key);
             }
-            return;
+            return true;
         }
         match self.mode {
             Mode::Prefix => {
@@ -381,18 +403,18 @@ impl App {
                     if let Some(p) = self.focused() {
                         p.send(&[0x00]);
                     }
-                    return;
+                    return true; // left prefix mode → the status bar updates
                 }
                 // Fixed convenience keys (not rebindable): `1`–`9` jump to a tab,
                 // `?` opens the shortcut cheat-sheet.
                 if let KeyCode::Char(c) = key.code {
                     if c.is_ascii_digit() && c != '0' {
                         self.switch_tab(c as usize - '1' as usize);
-                        return;
+                        return true;
                     }
                     if c == '?' {
                         self.help_open = true;
-                        return;
+                        return true;
                     }
                 }
                 // Everything else resolves through the keybinding registry
@@ -404,17 +426,19 @@ impl App {
                 {
                     self.run_cmd(cmd);
                 }
+                true // a prefix command (and leaving prefix mode) changes the UI
             }
             Mode::Normal => {
                 if is_prefix(&key) {
                     self.mode = Mode::Prefix;
-                    return;
+                    return true; // entered prefix mode → the status bar updates
                 }
                 if let Some(bytes) = encode_key(&key) {
                     if let Some(p) = self.focused() {
                         p.send(&bytes);
                     }
                 }
+                false // plain input → the pane; its echo (PtyData) renders it
             }
         }
     }

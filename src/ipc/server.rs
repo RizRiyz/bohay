@@ -127,7 +127,11 @@ pub fn run() -> Result<()> {
             last_save = Instant::now();
         }
 
-        app.detect_tick(Instant::now());
+        // A state transition here (e.g. a silent agent reaching Done) has no PtyData
+        // to ride on, so repaint when detection reports a visible change.
+        if app.detect_tick(Instant::now()) {
+            activity = true;
+        }
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));
         }
@@ -232,10 +236,9 @@ fn apply(
             *size = (c.max(1), r.max(1));
             true
         }
-        other => {
-            app.handle_event(other);
-            true
-        }
+        // Redraw only if the event actually changed the UI — a plain keystroke
+        // forwarded to a pane does not (its echo arrives as a separate `PtyData`).
+        other => app.handle_event(other),
     }
 }
 

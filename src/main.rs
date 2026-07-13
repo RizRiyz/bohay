@@ -358,7 +358,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(ev) => app.handle_event(ev),
+            Ok(ev) => {
+                app.handle_event(ev); // --local redraws every loop, so ignore the dirty bool
+            }
             Err(RecvTimeoutError::Timeout) => app.spinner = app.spinner.wrapping_add(1),
             Err(RecvTimeoutError::Disconnected) => break,
         }
