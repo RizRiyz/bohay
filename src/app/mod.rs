@@ -1687,6 +1687,40 @@ mod tests {
     }
 
     #[test]
+    fn workspace_open_focuses_existing_or_creates_new() {
+        // `bohay` attaching from a new folder → `workspace.open` adds it; from a
+        // folder that's already a workspace → it just focuses it (no duplicate).
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let initial = app.ws().cwd.clone();
+        let n = app.workspaces.len();
+
+        let open = |app: &mut App, path: &std::path::Path| {
+            let (reply, _r) = mpsc::channel();
+            app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: "workspace.open".into(),
+                params: json!({ "path": path.display().to_string() }),
+                reply,
+            });
+        };
+
+        // Re-opening the initial folder just focuses it — no new workspace.
+        open(&mut app, &initial);
+        assert_eq!(app.workspaces.len(), n, "existing folder isn't duplicated");
+
+        // Opening a different folder adds + focuses it.
+        let other = std::env::temp_dir();
+        open(&mut app, &other);
+        assert_eq!(
+            app.workspaces.len(),
+            n + 1,
+            "new folder becomes a workspace"
+        );
+        assert_eq!(app.ws().cwd, other, "the new workspace is focused");
+    }
+
+    #[test]
     fn resume_session_opens_pane() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();

@@ -203,11 +203,37 @@ fn run_local() -> Result<()> {
 
 fn autodetect_and_attach() -> Result<()> {
     let sock = persist::client_socket_path();
-    if !server_running(&sock) {
+    let fresh = !server_running(&sock);
+    if fresh {
         spawn_server()?;
         wait_for_socket(&sock)?;
     }
+    // A fresh server already opened the launch folder (its `App::new` uses the cwd
+    // it inherited). When attaching to an *existing* server, ask it to open (or
+    // focus) the folder we launched in, so `bohay <in a new folder>` adds it.
+    if !fresh {
+        open_cwd_workspace();
+    }
     ipc::client::run(&sock)
+}
+
+/// Ask the running server to open the current directory as a workspace (add +
+/// focus if new). Best-effort — a failure just means no auto-open.
+fn open_cwd_workspace() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Ok(mut s) = ipc::transport::connect(&persist::socket_path()) else {
+        return;
+    };
+    let req = serde_json::json!({
+        "id": "1",
+        "method": "workspace.open",
+        "params": { "path": cwd.display().to_string() },
+    });
+    let _ = writeln!(s, "{req}");
+    let mut line = String::new();
+    let _ = BufReader::new(s).read_line(&mut line); // wait for the ack before attaching
 }
 
 /// Remote bridge role (docs/18 RA-1), run *on the remote host* by ssh. Ensure a

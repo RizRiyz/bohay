@@ -272,6 +272,17 @@ impl App {
                 self.new_workspace();
                 Ok(json!({"type":"workspace","workspace": self.active_ws.to_string()}))
             }
+            "workspace.open" | "node.open" => {
+                // Open `path` as a workspace, or focus it if it's already one. Used
+                // when `bohay` attaches to a running server from a new folder, so the
+                // launch directory shows up as a workspace.
+                let path = PathBuf::from(req_str(p, "path")?);
+                match self.workspaces.iter().position(|w| w.cwd == path) {
+                    Some(i) => self.active_ws = i,
+                    None => self.create_workspace_at(path),
+                }
+                Ok(json!({"type":"workspace","workspace": self.active_ws.to_string()}))
+            }
             "workspace.focus" | "node.focus" => {
                 if let Some(i) = param_usize(p, "workspace").or_else(|| param_usize(p, "node")) {
                     if i < self.workspaces.len() {

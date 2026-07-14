@@ -46,6 +46,7 @@ usage: bohay <command> [args]
 workspaces:
   workspace list             list workspaces
   workspace new              create a workspace in the current directory
+  workspace open <path>      open <path> as a workspace (or focus it if already open)
   workspace focus <i>        focus workspace i (0-based)
   workspace close [<i>]      close a workspace (default: active)
 
@@ -612,6 +613,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
 
         ("workspace" | "node", "new") => ("workspace.new".into(), json!({})),
+        ("workspace" | "node", "open") => ("workspace.open".into(), one("path", arg0())),
         ("workspace" | "node", "focus") => ("workspace.focus".into(), one("workspace", arg0())),
         ("workspace" | "node", "close") => ("workspace.close".into(), one("workspace", arg0())),
         ("workspace" | "node", _) => ("workspace.list".into(), json!({})),
