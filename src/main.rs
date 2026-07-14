@@ -428,10 +428,7 @@ fn server_version() -> Option<String> {
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).ok()?;
     let v: serde_json::Value = serde_json::from_str(&line).ok()?;
-    v.get("result")?
-        .get("version")?
-        .as_str()
-        .map(String::from)
+    v.get("result")?.get("version")?.as_str().map(String::from)
 }
 
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {
