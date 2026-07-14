@@ -28,6 +28,7 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
         left.extend(hint("n/p", cat.act_tab, t));
         left.extend(hint("N", cat.workspace, t));
         left.extend(hint("g", "git", t));
+        left.extend(hint("o", "orch", t));
     } else {
         left.push(Span::styled(
             " ⌃Space ",

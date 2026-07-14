@@ -29,6 +29,7 @@ pub enum Cmd {
     PrevWorkspace,
     NewWorktree,
     OpenGit,
+    OpenBoard,
     OpenSettings,
     ToggleSidebar,
     ToggleAgents,
@@ -55,6 +56,7 @@ impl Cmd {
         Cmd::PrevWorkspace,
         Cmd::NewWorktree,
         Cmd::OpenGit,
+        Cmd::OpenBoard,
         Cmd::OpenSettings,
         Cmd::ToggleSidebar,
         Cmd::ToggleAgents,
@@ -81,6 +83,7 @@ impl Cmd {
             Cmd::PrevWorkspace => "prev_node",
             Cmd::NewWorktree => "new_worktree",
             Cmd::OpenGit => "open_git",
+            Cmd::OpenBoard => "open_board",
             Cmd::OpenSettings => "open_settings",
             Cmd::ToggleSidebar => "toggle_sidebar",
             Cmd::ToggleAgents => "toggle_agents",
@@ -110,6 +113,7 @@ impl Cmd {
             Cmd::PrevWorkspace => cat.cmd_prev_workspace,
             Cmd::NewWorktree => cat.cmd_new_worktree,
             Cmd::OpenGit => cat.cmd_open_git,
+            Cmd::OpenBoard => cat.cmd_open_board,
             Cmd::OpenSettings => cat.cmd_open_settings,
             Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
@@ -137,6 +141,7 @@ impl Cmd {
             Cmd::PrevWorkspace => "W",
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
+            Cmd::OpenBoard => "o",
             Cmd::OpenSettings => ",",
             Cmd::ToggleSidebar => "b",
             Cmd::ToggleAgents => "a",
@@ -235,9 +240,12 @@ impl App {
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
             Cmd::ClosePane => {
-                // On a git tab there's no real pane — close the dashboard tab.
+                // A git tab / orchestration board has no real pane — close the
+                // dashboard tab instead.
                 if self.active_is_git() {
                     self.close_git_tab();
+                } else if self.active_is_orch() {
+                    self.close_orch_board();
                 } else {
                     self.close_pane(self.layout().focus);
                 }
@@ -255,6 +263,7 @@ impl App {
             Cmd::PrevWorkspace => self.cycle_workspace(-1),
             Cmd::NewWorktree => self.open_worktree_prompt(),
             Cmd::OpenGit => self.open_git_tab_active(),
+            Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
             Cmd::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             Cmd::ToggleAgents => self.agents_active_only = !self.agents_active_only,

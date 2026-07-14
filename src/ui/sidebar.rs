@@ -493,21 +493,21 @@ mod tests {
         }];
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
 
-        // Default = All: the toggle is drawn and the history row shows.
+        // Default = Active: the toggle is drawn but the history row is hidden.
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert_eq!(app.agents_filter_rects.len(), 2, "All/Active toggle drawn");
         assert!(buffer_contains(&term, "Active"), "toggle label present");
         assert!(
-            buffer_contains(&term, "resume"),
-            "All shows session history"
+            !buffer_contains(&term, "resume"),
+            "Active (the default) hides session history"
         );
 
-        // Active-only: the history row is hidden.
-        app.agents_active_only = true;
+        // All: the history row shows.
+        app.agents_active_only = false;
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
-            !buffer_contains(&term, "resume"),
-            "Active hides session history"
+            buffer_contains(&term, "resume"),
+            "All shows session history"
         );
     }
 }

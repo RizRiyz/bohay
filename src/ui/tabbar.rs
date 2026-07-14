@@ -61,11 +61,16 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
 
     let end = (scroll + max_vis).min(n);
     for i in scroll..end {
-        // A git tab is labeled `⎇ git`; pane tabs are numbered.
+        // A git tab is labeled `⎇ git`, the orchestration board `◇ orch`; pane
+        // tabs are numbered. Both dashboard labels are kept the same length so the
+        // icon centers identically (a longer label left-aligns in the cell).
         let is_git = ws.tabs.get(i).is_some_and(|tb| tb.is_git());
+        let is_orch = ws.tabs.get(i).is_some_and(|tb| tb.is_orch());
         let title = |w: usize| {
             if is_git {
                 format!("{:^w$}", "⎇ git", w = w)
+            } else if is_orch {
+                format!("{:^w$}", "◇ orch", w = w)
             } else {
                 format!("{:^w$}", i + 1, w = w)
             }

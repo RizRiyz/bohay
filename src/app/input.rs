@@ -52,6 +52,10 @@ impl App {
                 self.git_data(view, payload);
                 true
             }
+            AppEvent::TaskGateFinished { task, code, out } => {
+                self.task_gate_finished(&task, code, out);
+                true
+            }
             // Handled by the server loop; never reaches here at runtime.
             AppEvent::ClientConnected { .. } | AppEvent::ClientDetach { .. } => false,
         }
@@ -172,6 +176,11 @@ impl App {
                 self.git_scroll(scroll);
                 return;
             }
+            // Wheel over the orchestration board scrolls its list (docs/22).
+            if self.active_is_orch() && hit(self.orch_area) {
+                self.orch_scroll_by(scroll);
+                return;
+            }
             // Otherwise forward scroll as arrow keys to the pane under the cursor.
             if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
                 if let Some(pane) = self.panes.get(id) {
@@ -279,6 +288,17 @@ impl App {
                 return;
             }
         }
+        // Clicking a task row on the board selects it (docs/22, ORCH-7).
+        if self.active_is_orch() {
+            let body_top = self.orch_area.y + 2; // header + separator
+            if hit(self.orch_area) && m.row >= body_top {
+                let idx = self.orch_scroll + (m.row - body_top) as usize;
+                if idx < self.orch.tasks.len() {
+                    self.orch_cursor = idx;
+                }
+            }
+            return;
+        }
         if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
             let id = *id;
             self.layout_mut().focus = id;
@@ -385,11 +405,18 @@ impl App {
             self.handle_worktree_prompt_key(key);
             return true;
         }
+        // The board's new-task form captures all input while open (ORCH-7).
+        if self.orch_form.is_some() {
+            self.handle_orch_form_key(key);
+            return true;
+        }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the
         // `Ctrl+Space` prefix still works for global ops (switch tab/workspace, …).
-        if self.mode == Mode::Normal && self.active_is_git() {
+        if self.mode == Mode::Normal && (self.active_is_git() || self.active_is_orch()) {
             if is_prefix(&key) {
                 self.mode = Mode::Prefix;
+            } else if self.active_is_orch() {
+                self.handle_orch_key(key);
             } else {
                 self.handle_git_key(key);
             }

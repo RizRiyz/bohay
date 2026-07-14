@@ -40,4 +40,11 @@ pub enum AppEvent {
         view: u64,
         payload: crate::git::GitPayload,
     },
+    /// A task's quality-gate command finished (ORCH-5): exit 0 → Done, else held
+    /// at Review with the captured output.
+    TaskGateFinished {
+        task: String,
+        code: Option<i32>,
+        out: String,
+    },
 }

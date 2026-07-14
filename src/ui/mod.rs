@@ -52,6 +52,7 @@ impl<'a> RenderTarget<'a> {
     }
 }
 
+mod board;
 mod borders;
 mod git;
 mod help;
@@ -149,9 +150,22 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     } else {
         None
     };
-    // A git tab fills the pane area with its dashboard instead of terminals.
+    // A git tab / orchestration board fills the pane area with a dashboard
+    // instead of terminals.
     let mut git_section_rects = Vec::new();
-    let cursor = if let Some(g) = app.active_git_mut() {
+    let cursor = if app.active_is_orch() {
+        app.orch_area = pane_area;
+        app.orch_scroll = board::render(
+            f,
+            pane_area,
+            &app.orch,
+            app.orch_scroll,
+            app.orch_cursor,
+            cat,
+            &t,
+        );
+        None
+    } else if let Some(g) = app.active_git_mut() {
         git_section_rects = git::render(f, pane_area, g, cat, &t);
         None
     } else {
@@ -169,7 +183,7 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     app.git_section_rects = git_section_rects;
     // Per-pane content rects so mouse drags map to grid cells for text selection
     // (a git tab has no selectable terminal panes).
-    app.pane_content_rects = if app.active_is_git() {
+    app.pane_content_rects = if app.active_is_git() || app.active_is_orch() {
         Vec::new()
     } else {
         rects
@@ -214,18 +228,25 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     if let Some(buf) = &app.worktree_prompt {
         picker::draw_worktree_prompt(f, area, buf, app.worktree_error.as_deref(), cat, &t);
     }
+    // The board's new-task form (docs/22 ORCH-7).
+    if let Some(form) = &app.orch_form {
+        board::draw_form(f, area, form, cat, &t);
+    }
     // A transient toast (e.g. "Copied") flashes on top of everything.
     if let Some((text, _)) = &app.toast {
         draw_toast(f, area, text, &t);
     }
 
-    let cursor =
-        if settings_hits.is_some() || picker_open || app.help_open || app.worktree_prompt.is_some()
-        {
-            None
-        } else {
-            cursor
-        };
+    let cursor = if settings_hits.is_some()
+        || picker_open
+        || app.help_open
+        || app.worktree_prompt.is_some()
+        || app.orch_form.is_some()
+    {
+        None
+    } else {
+        cursor
+    };
     if let Some(p) = cursor {
         f.set_cursor_position(p);
     }
