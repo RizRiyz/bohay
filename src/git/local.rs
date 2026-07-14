@@ -246,6 +246,112 @@ pub fn checkout(cwd: &Path, branch: &str) -> Result<(), String> {
     run(cwd, &["switch", branch]).map(|_| ())
 }
 
+// ── merge gate (docs/22, ORCH-6) ────────────────────────────────────────────
+
+/// The result of integrating a topic branch into the integration branch.
+#[derive(Debug, PartialEq)]
+pub enum MergeOutcome {
+    /// Merged cleanly (a merge commit now sits on the integration branch).
+    Merged,
+    /// The listed files clashed; the merge was aborted — nothing committed.
+    Conflict(Vec<String>),
+}
+
+/// Like [`run`] but returns the exit status + streams instead of erroring on a
+/// non-zero exit — a merge "fails" on conflict, but we need its output to react.
+fn run_status(cwd: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("git not found: {e}"))?;
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+fn branch_exists(repo: &Path, branch: &str) -> bool {
+    run(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// The repo's default branch — `main`/`master` if present, else current `HEAD`.
+pub fn default_branch(repo: &Path) -> String {
+    for b in ["main", "master"] {
+        if branch_exists(repo, b) {
+            return b.to_string();
+        }
+    }
+    run(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "main".to_string())
+}
+
+/// Reuse (or create at `dir`) a dedicated worktree checked out to `branch`,
+/// branching from `base` if new. All merge work happens here so the user's own
+/// checkout is **never** touched (the core ORCH-6 safety property).
+fn ensure_worktree(repo: &Path, dir: &Path, branch: &str, base: &str) -> Result<PathBuf, String> {
+    if let Ok(wts) = worktrees(repo) {
+        if let Some(w) = wts
+            .into_iter()
+            .find(|w| w.branch.as_deref() == Some(branch))
+        {
+            return Ok(w.path);
+        }
+    }
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let ds = dir.to_string_lossy().to_string();
+    if branch_exists(repo, branch) {
+        run(repo, &["worktree", "add", &ds, branch])?;
+    } else {
+        run(repo, &["worktree", "add", "-b", branch, &ds, base])?;
+    }
+    Ok(dir.to_path_buf())
+}
+
+/// Merge `topic` into `integ_branch` inside an isolated worktree at `integ_dir`
+/// (created from `base` on first use). On conflict the merge is aborted and the
+/// clashing files returned — nothing is committed and the user's tree is untouched.
+/// Serialized by the single-writer app loop, so only one integration runs at once.
+pub fn integrate_branch(
+    repo: &Path,
+    integ_dir: &Path,
+    integ_branch: &str,
+    base: &str,
+    topic: &str,
+) -> Result<MergeOutcome, String> {
+    let integ_path = ensure_worktree(repo, integ_dir, integ_branch, base)?;
+    let (ok, _out, err) = run_status(&integ_path, &["merge", "--no-ff", "--no-edit", topic])?;
+    if ok {
+        return Ok(MergeOutcome::Merged);
+    }
+    // Collect the conflicting files, then abort so nothing is left half-merged.
+    let conflicts: Vec<String> = run(&integ_path, &["diff", "--name-only", "--diff-filter=U"])
+        .unwrap_or_default()
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let _ = run(&integ_path, &["merge", "--abort"]);
+    if conflicts.is_empty() {
+        // A non-conflict failure (e.g. unknown branch) — surface the real error.
+        return Err(err.trim().to_string());
+    }
+    Ok(MergeOutcome::Conflict(conflicts))
+}
+
 /// Repository overview for the Status tab: remote, commit count, age, and the
 /// contributor list. All optional — a repo with no remote/history still works.
 pub fn repo_info(cwd: &Path) -> Result<RepoInfo, String> {
@@ -418,5 +524,67 @@ detached
         assert!(a.is_some(), "repo has a common dir");
         assert_eq!(a, b, "the worktree shares the repo's common dir");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn integrate_branch_merges_clean_then_flags_a_conflict() {
+        // ORCH-6: a non-overlapping branch integrates cleanly; a branch that
+        // clashes with already-integrated work is reported as a conflict and
+        // aborted — and the user's own checkout is never touched throughout.
+        let base_dir = std::env::temp_dir().join(format!("bohay-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let g = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+        };
+        let write = |name: &str, content: &str| std::fs::write(repo.join(name), content).unwrap();
+
+        g(&["init", "-q", "-b", "main"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        write("X", "base\n");
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "base"]);
+        // feat1: changes X and adds A.
+        g(&["checkout", "-q", "-b", "feat1"]);
+        write("X", "one\n");
+        write("A", "a\n");
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "feat1"]);
+        // feat2: changes X differently, off the same base.
+        g(&["checkout", "-q", "main"]);
+        g(&["checkout", "-q", "-b", "feat2"]);
+        write("X", "two\n");
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "feat2"]);
+        g(&["checkout", "-q", "main"]);
+
+        let integ_dir = base_dir.join("integ");
+        // feat1 integrates cleanly.
+        let r1 = integrate_branch(&repo, &integ_dir, "bohay/integration", "main", "feat1").unwrap();
+        assert_eq!(r1, MergeOutcome::Merged);
+        // The user's checkout is untouched (still main, X == base).
+        assert_eq!(std::fs::read_to_string(repo.join("X")).unwrap(), "base\n");
+
+        // feat2 now conflicts with the integrated feat1 change to X.
+        let r2 = integrate_branch(&repo, &integ_dir, "bohay/integration", "main", "feat2").unwrap();
+        match r2 {
+            MergeOutcome::Conflict(files) => {
+                assert!(
+                    files.iter().any(|f| f == "X"),
+                    "X should conflict: {files:?}"
+                )
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        // Still untouched after the aborted merge.
+        assert_eq!(std::fs::read_to_string(repo.join("X")).unwrap(), "base\n");
+
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 }

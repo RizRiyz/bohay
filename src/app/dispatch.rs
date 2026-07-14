@@ -624,11 +624,179 @@ impl App {
                 }
                 Ok(json!({"type":"ok"}))
             }
+            // ── ORCH-1/2: task ledger + path leases (docs/22, M0) ──────────
+            "task.add" => {
+                let title = req_str(p, "title")?.to_string();
+                let task = self
+                    .orch
+                    .add_task(
+                        title,
+                        str_array(p, "paths"),
+                        str_array(p, "deps"),
+                        opt_str(p, "gate"),
+                    )
+                    .map_err(orch_err)?;
+                self.orch.save();
+                self.emit_event("task.added", task_json(&task));
+                Ok(json!({ "type": "task", "task": task_json(&task) }))
+            }
+            "task.list" => Ok(json!({
+                "type": "task_list",
+                "tasks": serde_json::to_value(&self.orch.tasks).unwrap_or(Value::Null),
+            })),
+            "task.get" => {
+                let id = req_str(p, "id")?;
+                match self.orch.task(id) {
+                    Some(t) => Ok(json!({ "type": "task", "task": task_json(t) })),
+                    None => Err(("not_found".into(), format!("no such task: {id}"))),
+                }
+            }
+            "task.claim" => {
+                let id = req_str(p, "id")?.to_string();
+                let pane = self.orch_pane(p)?;
+                let task = self.orch.claim(&id, pane).map_err(orch_err)?;
+                self.orch.save();
+                self.emit_event("task.claimed", task_json(&task));
+                Ok(json!({ "type": "task", "task": task_json(&task) }))
+            }
+            "task.start" => {
+                // ORCH-3: spawn an isolated worker (worktree + pane) for the task.
+                let id = req_str(p, "id")?.to_string();
+                let (pane, path) =
+                    self.task_start(&id, opt_str(p, "branch"), opt_str(p, "agent"))?;
+                let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
+                Ok(json!({
+                    "type": "task",
+                    "task": task,
+                    "pane": pane.0.to_string(),
+                    "worktree": path.display().to_string(),
+                }))
+            }
+            "task.update" => {
+                let id = req_str(p, "id")?.to_string();
+                if let Some(s) = p.get("status").and_then(|v| v.as_str()) {
+                    let st = crate::orch::TaskStatus::parse(s).ok_or_else(|| {
+                        ("bad_request".to_string(), format!("unknown status: {s}"))
+                    })?;
+                    self.orch.set_status(&id, st).map_err(orch_err)?;
+                }
+                if let Some(o) = p.get("output").and_then(|v| v.as_str()) {
+                    self.orch.add_output(&id, o.to_string()).map_err(orch_err)?;
+                }
+                if let Some(n) = p.get("note").and_then(|v| v.as_str()) {
+                    self.orch.add_note(&id, n.to_string()).map_err(orch_err)?;
+                }
+                self.orch.save();
+                let t = self.orch.task(&id).cloned();
+                let jv = t.as_ref().map(task_json).unwrap_or(Value::Null);
+                self.emit_event("task.updated", jv.clone());
+                Ok(json!({ "type": "task", "task": jv }))
+            }
+            "task.done" => {
+                // ORCH-5: if the task has a quality gate, `complete_task` runs it
+                // async and holds the task at Running until it passes (→ Done, and
+                // dependents announced) or fails (→ Review). No gate → done now.
+                let id = req_str(p, "id")?.to_string();
+                let gate_running = self.complete_task(&id)?;
+                let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
+                Ok(json!({ "type": "task", "task": task, "gate_running": gate_running }))
+            }
+            "task.merge" => {
+                // ORCH-6: integrate the task's branch via the isolated merge gate.
+                let id = req_str(p, "id")?.to_string();
+                self.merge_task(&id)
+            }
+            "task.next" => {
+                // ORCH-4 scheduler: hand out the next ready task. `--start` spawns
+                // an isolated worker (ORCH-3); otherwise claim it for this pane.
+                match self.orch.next_ready() {
+                    None => Ok(json!({ "type": "none", "message": "no ready tasks" })),
+                    Some(id) => {
+                        if p.get("start").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            let (pane, path) = self.task_start(&id, None, opt_str(p, "agent"))?;
+                            let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
+                            Ok(json!({
+                                "type": "task", "task": task,
+                                "pane": pane.0.to_string(),
+                                "worktree": path.display().to_string(),
+                            }))
+                        } else {
+                            let pane = self.orch_pane(p)?;
+                            let task = self.orch.claim(&id, pane).map_err(orch_err)?;
+                            self.orch.save();
+                            self.emit_event("task.claimed", task_json(&task));
+                            Ok(json!({ "type": "task", "task": task_json(&task) }))
+                        }
+                    }
+                }
+            }
+            "task.heartbeat" => {
+                // ORCH-5 compaction gate: a worker reports its context usage.
+                let id = req_str(p, "id")?.to_string();
+                let ctx = p.get("context").and_then(|v| v.as_f64()).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "context (0..1) is required".to_string(),
+                    )
+                })?;
+                let over = self.orch.heartbeat(&id, ctx).map_err(orch_err)?;
+                self.orch.save();
+                if over {
+                    self.emit_event("task.needs_compaction", json!({ "id": id, "context": ctx }));
+                }
+                Ok(json!({ "type": "ok", "over_threshold": over }))
+            }
+            "task.release" => {
+                let id = req_str(p, "id")?.to_string();
+                let task = self.orch.release_task(&id).map_err(orch_err)?;
+                let released = self.orch.release_task_leases(&id);
+                self.orch.save();
+                self.emit_event("task.released", task_json(&task));
+                Ok(json!({ "type": "task", "task": task_json(&task), "released_leases": released }))
+            }
+            "lease.acquire" => {
+                let task = opt_str(p, "task").unwrap_or_default();
+                let pane = self.orch_pane(p)?;
+                let lease = self
+                    .orch
+                    .acquire_lease(pane, task, str_array(p, "paths"))
+                    .map_err(orch_err)?;
+                self.orch.save();
+                self.emit_event(
+                    "lease.acquired",
+                    serde_json::to_value(&lease).unwrap_or(Value::Null),
+                );
+                Ok(
+                    json!({ "type": "lease", "lease": serde_json::to_value(&lease).unwrap_or(Value::Null) }),
+                )
+            }
+            "lease.release" => {
+                let id = req_str(p, "id")?;
+                self.orch.release_lease(id).map_err(orch_err)?;
+                self.orch.save();
+                self.emit_event("lease.released", json!({ "id": id }));
+                Ok(json!({ "type": "ok" }))
+            }
+            "lease.list" => Ok(json!({
+                "type": "lease_list",
+                "leases": serde_json::to_value(&self.orch.leases).unwrap_or(Value::Null),
+            })),
             other => Err((
                 "invalid_request".to_string(),
                 format!("unknown method: {other}"),
             )),
         }
+    }
+
+    /// The pane a task/lease call acts for: the passed `pane`, else the caller's
+    /// `$BOHAY_PANE_ID`. Orchestration is pane-keyed, so this is required.
+    fn orch_pane(&self, p: &Value) -> Result<u32, (String, String)> {
+        self.resolve_pane(p).map(|id| id.0).ok_or_else(|| {
+            (
+                "no_pane".to_string(),
+                "no pane id — run inside a bohay pane or pass a pane id".to_string(),
+            )
+        })
     }
 
     fn resolve_pane(&self, p: &Value) -> Option<PaneId> {
@@ -683,6 +851,33 @@ fn req_str<'a>(p: &'a Value, key: &str) -> Result<&'a str, (String, String)> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ("invalid_request".to_string(), format!("{key} is required")))
+}
+
+/// Optional string param.
+fn opt_str(p: &Value, key: &str) -> Option<String> {
+    p.get(key).and_then(|v| v.as_str()).map(String::from)
+}
+
+/// A `["a","b"]` string-array param (missing/wrong-typed → empty).
+fn str_array(p: &Value, key: &str) -> Vec<String> {
+    p.get(key)
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An orchestration `Reject` → the API `(code, message)` error shape.
+fn orch_err(r: crate::orch::Reject) -> (String, String) {
+    (r.code.to_string(), r.message)
+}
+
+/// A `Task` as a JSON value for API results + bus events.
+fn task_json(t: &crate::orch::Task) -> Value {
+    serde_json::to_value(t).unwrap_or(Value::Null)
 }
 
 /// A trimmed JSON view of an installed module for `module.list`.

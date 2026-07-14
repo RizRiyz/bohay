@@ -21,6 +21,7 @@ use crate::persist::{self, SessionSnapshot};
 use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
+mod board;
 mod dispatch;
 mod git;
 mod input;
@@ -54,16 +55,60 @@ pub struct Tab {
     /// instead of panes. The `layout` holds a placeholder leaf (no real pane is
     /// spawned), so all existing `layout()` code keeps working unchanged.
     pub git: Option<Box<crate::git::GitView>>,
+    /// When `true`, this is the **orchestration board** (docs/22, ORCH-7): render
+    /// the task/lease dashboard from `App.orch` instead of panes. Same placeholder
+    /// -leaf trick as a git tab; mutually exclusive with `git`.
+    pub orch: bool,
 }
 
 impl Tab {
     /// A normal pane tab.
     fn panes(layout: TileLayout) -> Tab {
-        Tab { layout, git: None }
+        Tab {
+            layout,
+            git: None,
+            orch: false,
+        }
     }
 
     pub fn is_git(&self) -> bool {
         self.git.is_some()
+    }
+
+    pub fn is_orch(&self) -> bool {
+        self.orch
+    }
+}
+
+/// The in-TUI **new-task form** (ORCH-7): create an orchestration task without the
+/// CLI. Fields are plain text; `paths`/`deps` are whitespace-split on submit.
+#[derive(Default)]
+pub struct OrchForm {
+    pub title: String,
+    pub paths: String,
+    pub deps: String,
+    pub gate: String,
+    /// Active field: 0=title · 1=paths · 2=deps · 3=gate.
+    pub field: usize,
+    pub error: Option<String>,
+}
+
+impl OrchForm {
+    pub const FIELDS: usize = 4;
+
+    /// The currently-edited field's text.
+    pub fn active_mut(&mut self) -> &mut String {
+        match self.field {
+            0 => &mut self.title,
+            1 => &mut self.paths,
+            2 => &mut self.deps,
+            _ => &mut self.gate,
+        }
+    }
+
+    /// The four fields' current values, in order, for rendering.
+    pub fn values(&self) -> [&String; 4] {
+        [&self.title, &self.paths, &self.deps, &self.gate]
     }
 }
 
@@ -205,6 +250,17 @@ pub struct App {
     /// Structure changed since the last save; the loop persists when set.
     pub session_dirty: bool,
     pub events: EventBus,
+    /// Multi-agent orchestration ledger + path leases (docs/22, ORCH-1/2). Kept
+    /// in its own file (`orch.json`), independent of the session snapshot.
+    pub orch: crate::orch::OrchState,
+    /// Scroll offset of the orchestration board tab (docs/22, ORCH-7).
+    pub orch_scroll: usize,
+    /// Selected task row on the board (for keyboard/mouse actions).
+    pub orch_cursor: usize,
+    /// The in-TUI new-task form, when open (ORCH-7).
+    pub orch_form: Option<OrchForm>,
+    /// The board's content rect, for mouse-wheel hit-testing.
+    pub orch_area: Rect,
     /// Cursor position from the last render (for headless frame streaming).
     pub last_cursor: Option<(u16, u16)>,
     /// Foreground client asked to detach (prefix+q). Distinct from quit.
@@ -239,8 +295,8 @@ pub struct App {
     pub agents_scroll: usize,
     pub workspaces_area: Rect,
     pub agents_area: Rect,
-    /// AGENTS list filter: `false` (default) shows live agents + resumable
-    /// session history; `true` shows only live (active) agents.
+    /// AGENTS list filter: `true` (default) shows only live (active) agents;
+    /// `false` also shows the resumable session history.
     pub agents_active_only: bool,
     /// Last active workspace shown, to auto-reveal it on a programmatic change.
     pub last_active_ws_shown: usize,
@@ -341,6 +397,11 @@ impl App {
             spinner: 0,
             session_dirty: true,
             events: api::new_bus(),
+            orch: crate::orch::OrchState::load(),
+            orch_scroll: 0,
+            orch_cursor: 0,
+            orch_form: None,
+            orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
             pending_notify: Vec::new(),
@@ -357,7 +418,7 @@ impl App {
                 .unwrap_or_else(Instant::now),
             workspaces_scroll: 0,
             agents_scroll: 0,
-            agents_active_only: false,
+            agents_active_only: true,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             last_active_ws_shown: 0,
@@ -425,8 +486,20 @@ impl App {
                         tabs.push(Tab {
                             layout: TileLayout::new(placeholder),
                             git: Some(Box::new(view)),
+                            orch: false,
                         });
                     }
+                    continue;
+                }
+                // An orchestration board (docs/22): re-create the placeholder tab;
+                // its data lives in the shared `orch.json` ledger, loaded already.
+                if tab.orch {
+                    let placeholder = PaneId::alloc();
+                    tabs.push(Tab {
+                        layout: TileLayout::new(placeholder),
+                        git: None,
+                        orch: true,
+                    });
                     continue;
                 }
                 let mut remap = HashMap::new();
@@ -527,6 +600,11 @@ impl App {
             spinner: 0,
             session_dirty: false,
             events: api::new_bus(),
+            orch: crate::orch::OrchState::load(),
+            orch_scroll: 0,
+            orch_cursor: 0,
+            orch_form: None,
+            orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
             pending_notify: Vec::new(),
@@ -543,7 +621,7 @@ impl App {
                 .unwrap_or_else(Instant::now),
             workspaces_scroll: 0,
             agents_scroll: 0,
-            agents_active_only: false,
+            agents_active_only: true,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
             last_active_ws_shown: 0,
@@ -954,6 +1032,16 @@ impl App {
         self.panes.remove(&id);
         self.status.remove(&id);
         self.module_panes.remove(&id); // untrack a module pane (MOD-2)
+                                       // Auto-release any orchestration leases the dead pane held (ORCH-2), so a
+                                       // crashed/closed worker can't hold file paths forever.
+        let released = self.orch.release_pane_leases(id.0);
+        if !released.is_empty() {
+            self.orch.save();
+            self.emit_event(
+                "lease.released",
+                serde_json::json!({ "pane": id.0.to_string(), "leases": released }),
+            );
+        }
         self.session_dirty = true;
         if self.layout_mut().remove(id) {
             self.close_active_tab();
@@ -1513,6 +1601,92 @@ mod tests {
     }
 
     #[test]
+    fn orchestration_flow_over_the_api() {
+        // End-to-end wiring of ORCH-1/2 through the JSON control API (docs/22 M0):
+        // add → dep-gated claim → path leases (overlap denied) → done releases the
+        // lease + unlocks the dependent. `test_env` gives a fresh empty BOHAY_HOME so
+        // orch.json writes to a temp dir and App::new loads a clean ledger.
+        let _env = crate::persist::test_env("orch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let a = app.layout().focus;
+        // A second real pane for the lease-conflict case.
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('v', KeyModifiers::NONE));
+        let b = *app.layout().leaves().iter().find(|id| **id != a).unwrap();
+
+        fn call(app: &mut App, method: &str, params: Value) -> Value {
+            let (reply, _r) = mpsc::channel();
+            let resp = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: method.into(),
+                params,
+                reply,
+            });
+            serde_json::from_str(&resp).unwrap()
+        }
+
+        // Two tasks; t2 depends on t1.
+        let r = call(
+            &mut app,
+            "task.add",
+            json!({"title":"auth","paths":["src/auth/**"]}),
+        );
+        assert_eq!(r["result"]["task"]["id"], "t1");
+        call(&mut app, "task.add", json!({"title":"api","deps":["t1"]}));
+
+        // t2 can't be claimed while its dependency is unfinished.
+        let r = call(
+            &mut app,
+            "task.claim",
+            json!({"id":"t2","pane": a.0.to_string()}),
+        );
+        assert_eq!(r["error"]["code"], "deps_unmet");
+
+        // Claim t1, lease its paths for pane A.
+        let r = call(
+            &mut app,
+            "task.claim",
+            json!({"id":"t1","pane": a.0.to_string()}),
+        );
+        assert_eq!(r["result"]["task"]["status"], "claimed");
+        let r = call(
+            &mut app,
+            "lease.acquire",
+            json!({"task":"t1","paths":["src/auth/**"],"pane": a.0.to_string()}),
+        );
+        assert_eq!(r["result"]["lease"]["id"], "l1");
+
+        // Pane B asking for an overlapping path is denied with the holder.
+        let r = call(
+            &mut app,
+            "lease.acquire",
+            json!({"task":"t2","paths":["src/auth/token.rs"],"pane": b.0.to_string()}),
+        );
+        assert_eq!(r["error"]["code"], "lease_conflict");
+
+        // Finishing t1 releases its lease and unlocks t2.
+        let r = call(&mut app, "task.done", json!({"id":"t1"}));
+        assert_eq!(r["result"]["task"]["status"], "done");
+        let r = call(
+            &mut app,
+            "task.claim",
+            json!({"id":"t2","pane": b.0.to_string()}),
+        );
+        assert_eq!(r["result"]["task"]["status"], "claimed");
+        // The formerly-conflicting path is now free for pane B.
+        let r = call(
+            &mut app,
+            "lease.acquire",
+            json!({"task":"t2","paths":["src/auth/token.rs"],"pane": b.0.to_string()}),
+        );
+        assert!(
+            r.get("result").is_some(),
+            "lease should be granted after release: {r}"
+        );
+    }
+
+    #[test]
     fn resume_session_opens_pane() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -1613,6 +1787,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.resumable = vec![sess("s0", "/p/a"), sess("s1", "/p/b")];
+        app.agents_active_only = false; // show the resumable history (this tests its ✕)
 
         let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let mut draw = |app: &mut App| {

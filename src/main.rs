@@ -15,6 +15,7 @@ mod integration;
 mod ipc;
 mod layout;
 mod module;
+mod orch;
 mod persist;
 mod platform;
 mod terminal;
@@ -609,6 +610,43 @@ mod tests {
         assert!(text.contains("AGENTS"), "agents header missing");
         assert!(text.contains("tab"), "tab status missing");
         assert!(text.contains("NORMAL"), "status mode missing");
+    }
+
+    /// The orchestration board tab (docs/22, ORCH-7) renders its header, a task
+    /// row, and the leases section into the off-screen buffer without panicking.
+    #[test]
+    fn renders_orch_board() {
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        app.orch
+            .add_task(
+                "Wire the auth module".into(),
+                vec!["src/auth/**".into()],
+                vec![],
+                None,
+            )
+            .unwrap();
+        app.orch.claim("t1", 1).unwrap();
+        app.orch
+            .acquire_lease(1, "t1".into(), vec!["src/auth/**".into()])
+            .unwrap();
+        app.open_orch_board();
+        assert!(app.active_is_orch(), "board tab is active");
+
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::render(f, &mut app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for cell in buf.content() {
+            text.push_str(cell.symbol());
+        }
+        assert!(text.contains("ORCHESTRATION"), "board header missing");
+        assert!(text.contains("Wire the auth module"), "task title missing");
+        assert!(text.contains("claimed"), "task status missing");
+        assert!(text.contains("LEASES"), "leases section missing");
+        assert!(text.contains("◇ orch"), "board tab label missing");
     }
 
     /// Regression: a pane whose grid holds a control char must not panic

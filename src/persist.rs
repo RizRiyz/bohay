@@ -37,6 +37,10 @@ pub struct TabSnap {
     /// A git tab (docs/17) — restored as the dashboard (no panes), re-fetched.
     #[serde(default)]
     pub git: bool,
+    /// The orchestration board (docs/22, ORCH-7) — restored as the placeholder
+    /// dashboard tab; its data lives in the shared `orch.json` ledger.
+    #[serde(default)]
+    pub orch: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -140,6 +144,18 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                     focus: tab.layout.focus.0,
                     panes: Vec::new(),
                     git: true,
+                    orch: false,
+                });
+                continue;
+            }
+            // An orchestration board (docs/22) has no real panes either.
+            if tab.is_orch() {
+                tabs.push(TabSnap {
+                    tree: tab.layout.to_tree(),
+                    focus: tab.layout.focus.0,
+                    panes: Vec::new(),
+                    git: false,
+                    orch: true,
                 });
                 continue;
             }
@@ -190,6 +206,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                 focus: tab.layout.focus.0,
                 panes,
                 git: false,
+                orch: false,
             });
         }
         workspaces.push(WsSnap {

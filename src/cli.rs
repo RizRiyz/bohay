@@ -24,6 +24,8 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "module"
                 | "git"
                 | "worktree"
+                | "task"
+                | "lease"
                 | "wait"
                 | "help"
                 | "doctor"
@@ -100,6 +102,25 @@ worktrees:
   worktree create <branch>   create a worktree + workspace for <branch>
   worktree open <path>       open an existing worktree as a workspace
   worktree remove <path>     remove a worktree (its branch is kept)
+
+orchestration (multiple agents, one project — docs/22):
+  task add \"<title>\" [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
+  task list                  list all tasks + their status/assignee
+  task get <id>              show one task
+  task claim <id>            claim a task for this pane (deps must be done)
+  task next [--start] [--agent <cmd>]   claim the next ready task (--start spawns
+                             an isolated worker); for an agent loop draining the queue
+  task start <id> [--branch <b>] [--agent <cmd>]   spawn an isolated worker:
+                             a git worktree + pane, auto-claimed and path-leased
+  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task update <id> [--status <s>] [--output <o>] [--note <n>]
+  task done <id>             mark done + release its leases
+  task merge <id>            integrate the task's branch into bohay/integration
+                             (isolated worktree; conflicts block the task)
+  task release <id>          return a claimed task to the queue
+  lease acquire <glob>... --task <id>   reserve file paths (denied if they overlap)
+  lease release <id>         release a lease
+  lease list                 list active path leases
 
 events:
   events                     stream live status changes
@@ -720,8 +741,131 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("worktree", "remove") => ("worktree.remove".into(), one("path", arg0())),
         ("worktree", _) => ("worktree.list".into(), json!({})),
 
+        // ── orchestration (docs/22, M0): task ledger + path leases ──────────
+        ("task", "add") => {
+            let title = rest.iter().find(|a| !a.starts_with("--")).cloned();
+            let mut obj = serde_json::Map::new();
+            obj.insert("title".into(), json!(title.unwrap_or_default()));
+            obj.insert("paths".into(), json!(multi_flag(args, "--paths")));
+            obj.insert("deps".into(), json!(multi_flag(args, "--dep")));
+            if let Some(g) = flag(args, "--gate") {
+                obj.insert("gate".into(), json!(g));
+            }
+            ("task.add".into(), Value::Object(obj))
+        }
+        ("task", "get") => ("task.get".into(), one("id", arg0())),
+        ("task", "next") => {
+            let mut obj = serde_json::Map::new();
+            if args.iter().any(|a| a == "--start") {
+                obj.insert("start".into(), json!(true));
+            }
+            if let Some(a) = flag(args, "--agent") {
+                obj.insert("agent".into(), json!(a));
+            }
+            let pv = pane();
+            if !pv.is_null() {
+                obj.insert("pane".into(), pv);
+            }
+            ("task.next".into(), Value::Object(obj))
+        }
+        ("task", "heartbeat") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(id) = arg0() {
+                obj.insert("id".into(), json!(id));
+            }
+            if let Some(c) = flag(args, "--context").and_then(|s| s.parse::<f64>().ok()) {
+                obj.insert("context".into(), json!(c));
+            }
+            ("task.heartbeat".into(), Value::Object(obj))
+        }
+        ("task", "start") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(id) = arg0() {
+                obj.insert("id".into(), json!(id));
+            }
+            if let Some(b) = flag(args, "--branch") {
+                obj.insert("branch".into(), json!(b));
+            }
+            if let Some(a) = flag(args, "--agent") {
+                obj.insert("agent".into(), json!(a));
+            }
+            ("task.start".into(), Value::Object(obj))
+        }
+        ("task", "claim") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(id) = arg0() {
+                obj.insert("id".into(), json!(id));
+            }
+            let pv = pane();
+            if !pv.is_null() {
+                obj.insert("pane".into(), pv);
+            }
+            ("task.claim".into(), Value::Object(obj))
+        }
+        ("task", "done") => ("task.done".into(), one("id", arg0())),
+        ("task", "merge") => ("task.merge".into(), one("id", arg0())),
+        ("task", "release") => ("task.release".into(), one("id", arg0())),
+        ("task", "update") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(id) = arg0() {
+                obj.insert("id".into(), json!(id));
+            }
+            if let Some(s) = flag(args, "--status") {
+                obj.insert("status".into(), json!(s));
+            }
+            if let Some(o) = flag(args, "--output") {
+                obj.insert("output".into(), json!(o));
+            }
+            if let Some(n) = flag(args, "--note") {
+                obj.insert("note".into(), json!(n));
+            }
+            ("task.update".into(), Value::Object(obj))
+        }
+        ("task", _) => ("task.list".into(), json!({})),
+
+        ("lease", "acquire") => {
+            // Positional paths up to the first flag, plus `--task <id>`.
+            let paths: Vec<String> = rest
+                .iter()
+                .take_while(|a| !a.starts_with("--"))
+                .cloned()
+                .collect();
+            let mut obj = serde_json::Map::new();
+            obj.insert("paths".into(), json!(paths));
+            if let Some(t) = flag(args, "--task") {
+                obj.insert("task".into(), json!(t));
+            }
+            let pv = pane();
+            if !pv.is_null() {
+                obj.insert("pane".into(), pv);
+            }
+            ("lease.acquire".into(), Value::Object(obj))
+        }
+        ("lease", "release") => ("lease.release".into(), one("id", arg0())),
+        ("lease", _) => ("lease.list".into(), json!({})),
+
         _ => return Err(anyhow!("unknown command. Try `bohay help`.")),
     })
+}
+
+/// Collect values that follow every occurrence of `--name` up to the next flag,
+/// e.g. `--paths a b c` → `[a,b,c]`, and repeated `--dep t1 --dep t2` → `[t1,t2]`.
+fn multi_flag(args: &[String], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name {
+            let mut j = i + 1;
+            while j < args.len() && !args[j].starts_with("--") {
+                out.push(args[j].clone());
+                j += 1;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Value following `--name` in argv, if present.
@@ -766,6 +910,61 @@ mod tests {
         assert_eq!(m, "tab.new");
         let (m, _) = parse(&argv("bohay agent list")).unwrap();
         assert_eq!(m, "agent.list");
+    }
+
+    #[test]
+    fn maps_orchestration_commands() {
+        std::env::remove_var("BOHAY_PANE_ID");
+
+        let (m, p) = parse(&argv(
+            "bohay task add title --paths src/auth src/api --dep t1 --gate cargo",
+        ))
+        .unwrap();
+        assert_eq!(m, "task.add");
+        assert_eq!(p.get("title").and_then(|v| v.as_str()), Some("title"));
+        assert_eq!(
+            p.get("paths").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(2)
+        );
+        assert_eq!(
+            p.get("deps").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(p.get("gate").and_then(|v| v.as_str()), Some("cargo"));
+
+        let (m, _) = parse(&argv("bohay task list")).unwrap();
+        assert_eq!(m, "task.list");
+        let (m, p) = parse(&argv("bohay task claim t3")).unwrap();
+        assert_eq!(m, "task.claim");
+        assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("t3"));
+        let (m, _) = parse(&argv("bohay task done t3")).unwrap();
+        assert_eq!(m, "task.done");
+
+        let (m, p) = parse(&argv("bohay lease acquire src/auth/** --task t1")).unwrap();
+        assert_eq!(m, "lease.acquire");
+        assert_eq!(
+            p.get("paths").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(1)
+        );
+        assert_eq!(p.get("task").and_then(|v| v.as_str()), Some("t1"));
+
+        // ORCH-3/4/5/6 verbs.
+        let (m, p) = parse(&argv("bohay task start t1 --branch feat --agent claude")).unwrap();
+        assert_eq!(m, "task.start");
+        assert_eq!(p.get("branch").and_then(|v| v.as_str()), Some("feat"));
+        assert_eq!(p.get("agent").and_then(|v| v.as_str()), Some("claude"));
+
+        let (m, p) = parse(&argv("bohay task next --start --agent claude")).unwrap();
+        assert_eq!(m, "task.next");
+        assert_eq!(p.get("start").and_then(|v| v.as_bool()), Some(true));
+
+        let (m, p) = parse(&argv("bohay task heartbeat t1 --context 0.7")).unwrap();
+        assert_eq!(m, "task.heartbeat");
+        assert_eq!(p.get("context").and_then(|v| v.as_f64()), Some(0.7));
+
+        let (m, p) = parse(&argv("bohay task merge t1")).unwrap();
+        assert_eq!(m, "task.merge");
+        assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("t1"));
     }
 
     #[test]

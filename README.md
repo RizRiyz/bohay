@@ -172,6 +172,11 @@ worktree for a branch and opens it as its own workspace, nested under the repo.
 back through the same socket API — any language, no SDK. `bohay module search` to discover,
 `bohay module install owner/repo`. See the [module guide](MODULE-GUIDE.md).
 
+**Orchestration** — run multiple agents on one project in parallel without conflicts: an
+interactive task board (`Ctrl+Space o` — `a` add, `s` start, `d` done, `m` merge), path leases so
+workers can't collide, isolated git-worktree workers, quality gates on completion, and a safe merge
+gate that never touches your checkout.
+
 ## Configuration
 
 State lives in **`~/.bohay/`** (`$BOHAY_HOME` overrides). Theme, layout, notifications, keys,
