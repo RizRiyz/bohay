@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "bohay"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
