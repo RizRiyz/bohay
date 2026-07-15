@@ -5,3 +5,6 @@ docs/
 CLAUDE.md
 RELEASING.md
 homebrew-bohay/
+
+# Local-only maintainer identity map (contains email; not for GitHub).
+.mailmap

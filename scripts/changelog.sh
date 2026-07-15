@@ -64,7 +64,8 @@ section '🧹 Maintenance' 'chore|ci|build|docs|test'
 other
 
 # ── contributors ──
-authors="$(git log "$RANGE" --no-merges --pretty=tformat:'%an' | sort -u | sed 's/^/- /')"
+# %aN (not %an) applies .mailmap, so one person's several git names collapse to one.
+authors="$(git log "$RANGE" --no-merges --pretty=tformat:'%aN' | sort -u | sed 's/^/- /')"
 [ -n "$authors" ] && printf '### Contributors\n\n%s\n\n' "$authors"
 
 # ── compare footer ──
