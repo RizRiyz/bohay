@@ -134,7 +134,9 @@ server:
   server start               start the background server if it isn't up
   server stop                stop the server (and all panes)
   server restart             stop + start (load a newly-installed binary)
-  integration install claude install the claude resume hook
+  integration install|uninstall <claude|copilot|codex|opencode>
+                             add/remove bohay's session-resume hook (uninstall
+                             removes only bohay's hook, never the agent)
 ";
 
 pub fn run(args: &[String]) -> Result<i32> {

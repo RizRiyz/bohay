@@ -9,14 +9,6 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Agents whose native session bohay knows how to resume.
-pub fn is_resumable(agent: &str) -> bool {
-    matches!(
-        agent,
-        "claude" | "copilot" | "codex" | "cursor" | "cursor-agent"
-    )
-}
-
 /// A resumable agent session discovered on disk.
 #[derive(Clone)]
 pub struct SessionInfo {
@@ -26,12 +18,96 @@ pub struct SessionInfo {
     pub updated: SystemTime,
 }
 
+/// Zero-config discovery of an agent's sessions from its own on-disk store.
+struct Discovery {
+    /// Root of the agent's session store.
+    base: fn() -> PathBuf,
+    /// Recent sessions (newest first, ≤ `limit`), one per project cwd.
+    recent: fn(&Path, usize) -> Vec<SessionInfo>,
+    /// The newest session id whose project matches `cwd`.
+    latest: fn(&Path, &Path) -> Option<String>,
+}
+
+/// One agent bohay can resume: how to find its sessions (optional — some agents
+/// have no readable store) and how to build its resume command from a shell-quoted
+/// session id. Adding an agent (docs/23) is one entry here, not scattered edits.
+struct SessionSource {
+    name: &'static str,
+    discover: Option<Discovery>,
+    /// Build the resume command from an already shell-quoted id (`q`).
+    resume: fn(&str) -> String,
+}
+
+static SOURCES: &[SessionSource] = &[
+    SessionSource {
+        name: "claude",
+        discover: Some(Discovery {
+            base: claude_base,
+            recent: claude_recent,
+            latest: claude_latest,
+        }),
+        resume: |q| format!("claude --resume {q}\r"),
+    },
+    SessionSource {
+        name: "copilot",
+        discover: Some(Discovery {
+            base: copilot_base,
+            recent: copilot_recent,
+            latest: copilot_latest,
+        }),
+        resume: |q| format!("copilot --resume={q}\r"),
+    },
+    SessionSource {
+        name: "opencode",
+        discover: Some(Discovery {
+            base: opencode_base,
+            recent: opencode_recent,
+            latest: opencode_latest,
+        }),
+        resume: |q| format!("opencode --session {q}\r"),
+    },
+    SessionSource {
+        name: "codex",
+        discover: Some(Discovery {
+            base: codex_base,
+            recent: codex_recent,
+            latest: codex_latest,
+        }),
+        resume: |q| format!("codex resume {q}\r"),
+    },
+    // Resume-only (no readable session store): usable when a hook reports the id.
+    SessionSource {
+        name: "cursor",
+        discover: None,
+        resume: |q| format!("cursor-agent --resume {q}\r"),
+    },
+];
+
+/// Resolve an agent name (normalizing known aliases) to its source.
+fn source(agent: &str) -> Option<&'static SessionSource> {
+    let agent = if agent == "cursor-agent" {
+        "cursor"
+    } else {
+        agent
+    };
+    SOURCES.iter().find(|s| s.name == agent)
+}
+
+/// Agents whose native session bohay knows how to resume.
+pub fn is_resumable(agent: &str) -> bool {
+    source(agent).is_some()
+}
+
 /// The most recently active resumable sessions across known agents, newest
 /// first, at most one per `(agent, cwd)`, capped at `limit`. Used to populate
 /// the AGENTS sidebar with sessions you can reopen.
 pub fn recent_sessions(limit: usize) -> Vec<SessionInfo> {
-    let mut out = claude_recent(&claude_base(), limit);
-    out.extend(copilot_recent(&copilot_base(), limit));
+    let mut out = Vec::new();
+    for src in SOURCES {
+        if let Some(d) = &src.discover {
+            out.extend((d.recent)(&(d.base)(), limit));
+        }
+    }
     out.sort_by_key(|s| std::cmp::Reverse(s.updated));
     let mut seen = std::collections::HashSet::new();
     out.retain(|s| seen.insert((s.agent.clone(), s.cwd.clone())));
@@ -43,11 +119,8 @@ pub fn recent_sessions(limit: usize) -> Vec<SessionInfo> {
 /// from the agent's on-disk store. `None` if there is nothing to resume or the
 /// agent isn't one we can introspect.
 pub fn latest_session(agent: &str, cwd: &Path) -> Option<String> {
-    match agent {
-        "claude" => claude_latest(&claude_base(), cwd),
-        "copilot" => copilot_latest(&copilot_base(), cwd),
-        _ => None,
-    }
+    let d = source(agent)?.discover.as_ref()?;
+    (d.latest)(&(d.base)(), cwd)
 }
 
 /// The shell command that resumes an agent's native session, if supported.
@@ -56,14 +129,9 @@ pub fn resume_command(agent: &str, session_id: &str) -> Option<String> {
     if !safe_id(session_id) {
         return None;
     }
+    let src = source(agent)?;
     let q = format!("'{}'", session_id.replace('\'', "'\\''"));
-    Some(match agent {
-        "claude" => format!("claude --resume {q}\r"),
-        "copilot" => format!("copilot --resume={q}\r"),
-        "codex" => format!("codex resume {q}\r"),
-        "cursor" | "cursor-agent" => format!("cursor-agent --resume {q}\r"),
-        _ => return None,
-    })
+    Some((src.resume)(&q))
 }
 
 fn safe_id(id: &str) -> bool {
@@ -87,6 +155,33 @@ fn claude_base() -> PathBuf {
 
 fn copilot_base() -> PathBuf {
     home().join(".copilot")
+}
+
+/// opencode's session store (docs/23): `$XDG_DATA_HOME/opencode/storage`, else
+/// `~/.local/share/opencode/storage`, else `~/.opencode/storage` — first existing.
+fn opencode_base() -> PathBuf {
+    let candidates = [
+        std::env::var_os("XDG_DATA_HOME")
+            .map(|d| PathBuf::from(d).join("opencode").join("storage")),
+        Some(
+            home()
+                .join(".local")
+                .join("share")
+                .join("opencode")
+                .join("storage"),
+        ),
+        Some(home().join(".opencode").join("storage")),
+    ];
+    for c in candidates.iter().flatten() {
+        if c.exists() {
+            return c.clone();
+        }
+    }
+    home()
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("storage")
 }
 
 // ── Claude Code ─────────────────────────────────────────────────────────────
@@ -269,6 +364,198 @@ fn copilot_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
     out
 }
 
+// ── opencode (sst/opencode) ─────────────────────────────────────────────────
+// Sessions live at `<base>/session/<projectID>/<sessionID>.json` (some versions
+// also mirror `<base>/session-metadata/<projectID>/<sessionID>.json`). Each JSON's
+// `directory` field is the folder the session started in; match by cwd, newest
+// wins. The `id`/`directory` fields are stable across the schema; we read the file
+// mtime for recency so we don't depend on the exact `time` shape (docs/23).
+
+/// `(mtime, path)` for every session JSON under `base` — a **stat-only** scan (no
+/// reads). Callers sort by mtime and read only the newest few, so discovery stays
+/// bounded even with a huge session history (it runs every ~4s on the loop).
+fn opencode_session_files(base: &Path) -> Vec<(SystemTime, PathBuf)> {
+    let mut out = Vec::new();
+    for sub in ["session", "session-metadata"] {
+        let Ok(projects) = std::fs::read_dir(base.join(sub)) else {
+            continue;
+        };
+        for proj in projects.flatten() {
+            let Ok(files) = std::fs::read_dir(proj.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let path = f.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(mtime) = f.metadata().and_then(|m| m.modified()) {
+                    out.push((mtime, path));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Read one session JSON → `(id, directory)`. `None` if unreadable / malformed /
+/// missing either field (tolerant of schema drift).
+fn read_opencode_session(path: &Path) -> Option<(String, PathBuf)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let id = v.get("id").and_then(|x| x.as_str())?;
+    let dir = v.get("directory").and_then(|x| x.as_str())?;
+    Some((id.to_string(), PathBuf::from(dir)))
+}
+
+fn opencode_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    let mut files = opencode_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (updated, path) in files {
+        if out.len() >= limit {
+            break; // read+parse only up to `limit` distinct projects, newest first
+        }
+        if let Some((id, cwd)) = read_opencode_session(&path) {
+            if seen.insert(cwd.clone()) {
+                out.push(SessionInfo {
+                    agent: "opencode".to_string(),
+                    session_id: id,
+                    cwd,
+                    updated,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn opencode_latest(base: &Path, cwd: &Path) -> Option<String> {
+    let mut files = opencode_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    // Newest-first; stop at the first session in this directory (no full scan).
+    for (_, path) in files {
+        if let Some((id, dir)) = read_opencode_session(&path) {
+            if dir == cwd {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+// ── OpenAI Codex CLI ────────────────────────────────────────────────────────
+// Transcripts are JSONL "rollout" files under `<base>/sessions/YYYY/MM/DD/
+// rollout-*.jsonl`; the meta (first line) carries the `session_id` and `cwd`.
+// Match by cwd, newest wins. Resume: `codex resume <id>` (docs/23 NI-6).
+
+fn codex_base() -> PathBuf {
+    if let Some(d) = std::env::var_os("CODEX_HOME") {
+        return PathBuf::from(d);
+    }
+    home().join(".codex")
+}
+
+/// `(mtime, path)` for every `rollout-*.jsonl` under `<base>/sessions/` (walked
+/// recursively over the `YYYY/MM/DD` tree). Stat-only — callers read the newest
+/// few so discovery stays bounded on the every-4s scan.
+fn codex_rollout_files(base: &Path) -> Vec<(SystemTime, PathBuf)> {
+    fn walk(dir: &Path, out: &mut Vec<(SystemTime, PathBuf)>, depth: u8) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let path = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if depth < 4 {
+                    walk(&path, out, depth + 1); // sessions/YYYY/MM/DD
+                }
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+            {
+                if let Ok(mtime) = e.metadata().and_then(|m| m.modified()) {
+                    out.push((mtime, path));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&base.join("sessions"), &mut out, 0);
+    out
+}
+
+/// Read a rollout's `session_id` + `cwd` from its early lines (the meta record).
+/// Tolerant of the exact schema: scans the first few JSON lines for the fields,
+/// nested under `payload` or at the top level.
+fn read_codex_session(path: &Path) -> Option<(String, PathBuf)> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file)
+        .lines()
+        .take(10)
+        .map_while(Result::ok)
+    {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        // Fields sit at the top level or under a `payload` object.
+        let obj = v.get("payload").unwrap_or(&v);
+        let id = obj
+            .get("id")
+            .or_else(|| obj.get("session_id"))
+            .or_else(|| obj.get("conversation_id"))
+            .and_then(|x| x.as_str());
+        let cwd = obj
+            .get("cwd")
+            .or_else(|| obj.get("workdir"))
+            .and_then(|x| x.as_str());
+        if let (Some(id), Some(cwd)) = (id, cwd) {
+            return Some((id.to_string(), PathBuf::from(cwd)));
+        }
+    }
+    None
+}
+
+fn codex_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    let mut files = codex_rollout_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (updated, path) in files {
+        if out.len() >= limit {
+            break;
+        }
+        if let Some((id, cwd)) = read_codex_session(&path) {
+            if seen.insert(cwd.clone()) {
+                out.push(SessionInfo {
+                    agent: "codex".to_string(),
+                    session_id: id,
+                    cwd,
+                    updated,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn codex_latest(base: &Path, cwd: &Path) -> Option<String> {
+    let mut files = codex_rollout_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    for (_, path) in files {
+        if let Some((id, dir)) = read_codex_session(&path) {
+            if dir == cwd {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,9 +577,93 @@ mod tests {
         assert!(resume_command("copilot", "x9")
             .unwrap()
             .contains("copilot --resume="));
+        assert!(resume_command("opencode", "ses_1")
+            .unwrap()
+            .contains("opencode --session"));
+        // Aliases + resume-only agents resolve through the registry.
+        assert!(resume_command("codex", "c1")
+            .unwrap()
+            .contains("codex resume"));
+        assert!(resume_command("cursor-agent", "z")
+            .unwrap()
+            .contains("cursor-agent --resume"));
+        assert!(is_resumable("opencode") && is_resumable("cursor-agent"));
+        assert!(!is_resumable("gemini")); // detectable, but no resume path
         assert!(resume_command("unknown", "x").is_none());
         assert!(resume_command("claude", "").is_none()); // empty id
         assert!(resume_command("claude", "a b").is_none()); // unsafe char
+    }
+
+    #[test]
+    fn opencode_discovers_session_by_directory() {
+        // Sessions carry a `directory` field; discovery matches by cwd, dedups per
+        // project, and skips a malformed sibling file (docs/23 NI-3).
+        let base = tmp("opencode");
+        let proj = base.join("session").join("p1");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(
+            proj.join("a.json"),
+            r#"{"id":"ses_a","directory":"/work/app","time":{"created":1}}"#,
+        )
+        .unwrap();
+        fs::write(
+            proj.join("b.json"),
+            r#"{"id":"ses_b","directory":"/work/api"}"#,
+        )
+        .unwrap();
+        fs::write(proj.join("broken.json"), "{ not json").unwrap();
+
+        assert_eq!(
+            opencode_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("ses_a")
+        );
+        assert_eq!(
+            opencode_latest(&base, Path::new("/work/api")).as_deref(),
+            Some("ses_b")
+        );
+        assert!(opencode_latest(&base, Path::new("/no/such")).is_none());
+        let recent = opencode_recent(&base, 10);
+        assert_eq!(
+            recent.len(),
+            2,
+            "two project dirs; the broken file is skipped"
+        );
+        assert!(recent.iter().all(|s| s.agent == "opencode"));
+    }
+
+    #[test]
+    fn codex_discovers_rollout_session_by_cwd() {
+        // Rollouts nest under sessions/YYYY/MM/DD/. The meta line carries session_id
+        // + cwd, either top-level or under `payload`; match by cwd (docs/23 NI-6).
+        let base = tmp("codex");
+        let day = base.join("sessions").join("2025").join("01").join("22");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(
+            day.join("rollout-2025-01-22T10-00-00-aaa.jsonl"),
+            "{\"session_id\":\"aaa\",\"cwd\":\"/work/app\"}\n{\"type\":\"message\"}\n",
+        )
+        .unwrap();
+        let day2 = base.join("sessions").join("2025").join("01").join("23");
+        fs::create_dir_all(&day2).unwrap();
+        fs::write(
+            day2.join("rollout-2025-01-23T09-00-00-bbb.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"bbb\",\"cwd\":\"/work/api\"}}\n",
+        )
+        .unwrap();
+        fs::write(day.join("notes.txt"), "ignored").unwrap(); // non-rollout skipped
+
+        assert_eq!(
+            codex_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("aaa")
+        );
+        assert_eq!(
+            codex_latest(&base, Path::new("/work/api")).as_deref(),
+            Some("bbb")
+        );
+        assert!(codex_latest(&base, Path::new("/no/such")).is_none());
+        let recent = codex_recent(&base, 10);
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().all(|s| s.agent == "codex"));
     }
 
     #[test]
