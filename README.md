@@ -21,6 +21,7 @@
 - **Zero-config resume** — reopens each agent's native session where you left off (Claude Code, Copilot).
 - **Built-in git tab** — branches, commit flow, PRs, issues, and a repo overview via `git` + `gh`.
 - **Worktrees as workspaces** — work on several branches at once; the sidebar nests them per repo.
+- **Multi-agent orchestration** — run agents in parallel on one project: a task board, path leases so they can't collide, isolated worktree workers, and a safe merge gate.
 - **Remote over SSH** — run a session on another machine, drive it from your laptop. No port-forwarding.
 - **Agent API** — every UI action is a shell command; agents can `wait` on output/status and `attach` into a pane.
 - **Make it yours** — 10 themes, fully remappable keys, an extension system, and a UI in 8 languages.
@@ -71,7 +72,8 @@ the full cheat-sheet.
 | `x` | close pane | `N` | new workspace (pick a folder) |
 | `z` | zoom pane | `w` `W` | cycle workspaces |
 | `b` | toggle sidebar | `g` / `G` | git tab / new worktree |
-| `,` | open Settings | `q` `d` | detach |
+| `o` | orchestration board | `,` | open Settings |
+| `q` `d` | detach | | |
 
 Every shortcut is remappable in **Settings → Keys**.
 
@@ -99,6 +101,7 @@ bohay events                       # stream agent-status changes
 workspaces
   workspace list                          list workspaces
   workspace new                           create a workspace in the current directory
+  workspace open <path>                   open <path> as a workspace (or focus it)
   workspace focus <i>                     focus workspace i (0-based)
   workspace close [<i>]                   close a workspace (default: active)
 
@@ -132,6 +135,16 @@ worktrees
   worktree open <path>               open an existing worktree as a workspace
   worktree remove <path>             remove a worktree (its branch is kept)
 
+orchestration (multiple agents, one project — Ctrl+Space o for the board)
+  task add "<title>" [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
+  task list | get <id> | update <id> | claim <id> | release <id>
+  task next [--start] [--agent <cmd>]   claim the next ready task (--start = worktree worker)
+  task start <id> [--branch <b>] [--agent <cmd>]   spawn an isolated worktree worker
+  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task done <id>                     mark done (runs its quality gate)
+  task merge <id>                    integrate the branch into bohay/integration (safely)
+  lease acquire <glob>... --task <id> | list | release <id>
+
 modules (extensions)
   module search [<query>]            find modules on the `bohay-module` GitHub topic
   module list | info <id> | actions
@@ -147,7 +160,8 @@ appearance / events / server
   ui sidebar --width <n> | --hide | --show
   events                             stream live status changes
   --remote <host> [ssh args]         attach to a session on <host> over plain ssh
-  ping | server stop | integration install claude
+  ping | server status | start | stop | restart
+  integration install|uninstall <claude|copilot|codex|opencode>   session-resume hook
 ```
 
 When a command runs **inside** a bohay pane it defaults to that pane (via the injected
@@ -181,7 +195,8 @@ gate that never touches your checkout.
 
 State lives in **`~/.bohay/`** (`$BOHAY_HOME` overrides). Theme, layout, notifications, keys,
 language, and modules are all in the **Settings** menu (the **Menu** button, or `Ctrl+Space ,`)
-and persist to `config.json`.
+and persist to `config.json`. The session snapshot is in `session.json`, and the orchestration
+task ledger in `orch.json` (kept separate so it survives independently of your panes/tabs).
 
 ## Development
 

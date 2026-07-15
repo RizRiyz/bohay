@@ -374,9 +374,15 @@ impl App {
             .push("bohay — test notification".to_string());
     }
 
+    /// Toggle an agent's integration hook: install if absent, uninstall if present.
+    /// Uninstall removes only bohay's hook — never the agent itself.
     fn install_integration(&mut self, cursor: usize) {
         if let Some(agent) = crate::integration::AGENTS.get(cursor) {
-            let _ = crate::integration::install(agent);
+            if crate::integration::is_installed(agent) {
+                let _ = crate::integration::uninstall(agent);
+            } else {
+                let _ = crate::integration::install(agent);
+            }
         }
     }
 }

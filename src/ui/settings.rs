@@ -266,10 +266,11 @@ fn draw_content(
         SettingsTab::Integrations => {
             for (i, agent) in crate::integration::AGENTS.iter().enumerate() {
                 let val = if crate::integration::is_installed(agent) {
-                    Line::from(Span::styled(
-                        format!("{} ", cat.act_installed),
-                        Style::new().fg(t.mint),
-                    ))
+                    // Installed → clicking removes bohay's hook (not the agent).
+                    Line::from(vec![
+                        Span::styled(format!("✓ {} ", cat.act_installed), Style::new().fg(t.mint)),
+                        Span::styled("· ⏎ remove", Style::new().fg(t.overlay0)),
+                    ])
                 } else {
                     Line::from(Span::styled(
                         "[ Install ]",
