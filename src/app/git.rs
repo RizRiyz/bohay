@@ -694,13 +694,18 @@ mod tests {
         app.open_git_tab(0);
         assert!(app.active_is_git(), "git tab opened for a repo");
 
-        // Pump the async local fetches.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut n = 0;
-        while n < 3 && Instant::now() < deadline {
-            if let Ok(ev) = rx.recv_timeout(Duration::from_millis(150)) {
+        // Pump the async fetches until branches load. The git tab kicks off one
+        // fetch per view (commits/branches/PRs/issues/status) on separate
+        // threads, so event order and count are nondeterministic — and the
+        // `gh`-backed views can resolve first (with errors when `gh` is absent,
+        // e.g. in CI). Draining a fixed number of events would race; wait for
+        // the branches event specifically, bounded by a deadline.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(app.active_git().unwrap().branches, Load::Loaded(_))
+            && Instant::now() < deadline
+        {
+            if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
                 app.handle_event(ev);
-                n += 1;
             }
         }
         match &app.active_git().unwrap().branches {
