@@ -34,7 +34,17 @@ pub use keys::Cmd;
 pub use picker::{FolderPicker, Row};
 pub use settings::{SettingsTab, SettingsUi};
 
+/// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
+
+/// Anti-jitter dwell: how long a pane must stay *quiet* before its published
+/// status is allowed to fall back to Idle/Done. Agents stream in bursts — a
+/// single turn has natural gaps (thinking, tool calls, API latency) far longer
+/// than `ACTIVITY_WINDOW` — so without this the status flaps Working↔Idle↔Done
+/// many times per turn. Transitions *into* an active state (Working/Blocked)
+/// are not delayed, so the sidebar still reacts instantly; only the fall back to
+/// quiet is debounced. See `detect_tick` and docs/07.
+const QUIET_DWELL: Duration = Duration::from_millis(2500);
 
 /// Sidebar width in columns. `sidebar_width` is adjustable at runtime and in the
 /// Settings → Layout tab; these bound it. Colors come from the `Theme`, also
@@ -147,6 +157,11 @@ pub struct PaneStatus {
     /// only when the pane is focused (seen). Stops a bursty/streaming agent —
     /// which flaps Working↔Idle↔Done — from ringing the bell on every pause.
     notify_armed: bool,
+    /// The state the raw classifier currently *wants*, awaiting the debounce
+    /// dwell before it becomes the published `state`. Together with
+    /// `candidate_since` this is the hysteresis gate (see `QUIET_DWELL`).
+    candidate: State,
+    candidate_since: Instant,
 }
 
 impl PaneStatus {
@@ -160,6 +175,8 @@ impl PaneStatus {
             prev_working: false,
             done: false,
             notify_armed: true,
+            candidate: State::Idle,
+            candidate_since: Instant::now(),
         }
     }
 }
@@ -309,6 +326,11 @@ pub struct App {
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
     /// position to a grid cell for text selection.
     pub pane_content_rects: Vec<(PaneId, Rect)>,
+    /// When `Some`, keyboard **scroll mode** is active on this pane: plain keys
+    /// scroll its scrollback (see `handle_scroll_mode_key`) instead of reaching
+    /// the agent. Entered by wheel-up or `Shift+↑`; left by `q`/typing. A
+    /// Mac-friendly path that needs no `Ctrl+Space` prefix.
+    pub scroll_pane: Option<PaneId>,
     pub tab_rects: Vec<(usize, Rect)>,
     pub tab_close_rects: Vec<(usize, Rect)>,
     pub ws_rects: Vec<(usize, Rect)>,
@@ -427,6 +449,7 @@ impl App {
             last_pane_area: Rect::ZERO,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
+            scroll_pane: None,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             workspace_branch_rects: Vec::new(),
@@ -630,6 +653,7 @@ impl App {
             last_pane_area: Rect::ZERO,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
+            scroll_pane: None,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             workspace_branch_rects: Vec::new(),
@@ -1031,6 +1055,9 @@ impl App {
     fn close_pane(&mut self, id: PaneId) {
         self.panes.remove(&id);
         self.status.remove(&id);
+        if self.scroll_pane == Some(id) {
+            self.scroll_pane = None; // don't leave scroll mode pointing at a dead pane
+        }
         self.module_panes.remove(&id); // untrack a module pane (MOD-2)
                                        // Auto-release any orchestration leases the dead pane held (ORCH-2), so a
                                        // crashed/closed worker can't hold file paths forever.
@@ -1598,6 +1625,30 @@ mod tests {
             .unwrap();
         assert_eq!(sess.agent, "claude");
         assert_eq!(sess.session_id, "abc-123");
+    }
+
+    #[test]
+    fn detect_tick_keeps_session_brand_when_screen_lacks_name() {
+        // Regression: a pane with a resolved agent_session (from the integration
+        // hook / disk discovery) must keep its brand — e.g. "claude" — even when
+        // the on-screen banner doesn't contain the word "claude" that moment, so
+        // classify() falls back to the bare shell name. Otherwise the reported
+        // agent (and the notch logo keyed off it) flaps to "zsh".
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+
+        let (reply, _r) = mpsc::channel();
+        app.handle_api(&ApiRequest {
+            id: "1".into(),
+            method: "pane.report_session".into(),
+            params: json!({"pane": focus.0.to_string(), "agent": "claude", "session_id": "abc-123"}),
+            reply,
+        });
+        // A fresh shell pane's grid holds no "claude" banner, so the detect tick's
+        // classify() falls back to the shell command — the exact trigger.
+        app.detect_tick(Instant::now());
+        assert_eq!(app.status.get(&focus).unwrap().agent, "claude");
     }
 
     #[test]
@@ -2287,8 +2338,9 @@ mod tests {
         );
     }
 
-    // A bursty/streaming agent flaps Working↔Idle↔Done; the bell must fire once,
-    // not on every pause — and re-arm only after the user looks at the pane.
+    // A bursty/streaming agent has long pauses *within* one turn. The debounce
+    // (QUIET_DWELL) must hold the status at Working through those pauses, only
+    // commit Done on sustained quiet, ring once, and re-arm after the user looks.
     #[test]
     fn done_bell_fires_once_until_focused() {
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -2300,42 +2352,128 @@ mod tests {
         let bogus = PaneId::alloc();
         app.layout_mut().focus = bogus;
 
-        let now = std::time::Instant::now();
-        let idle_at = now - ACTIVITY_WINDOW - Duration::from_millis(50);
-        let arm_working_then_idle = |app: &mut App| {
+        let t0 = std::time::Instant::now();
+        // Make the pane read raw-Idle (stale output) relative to `base`.
+        let go_quiet = |app: &mut App, base: std::time::Instant| {
+            app.status.get_mut(&id).unwrap().last_activity =
+                base - ACTIVITY_WINDOW - Duration::from_millis(50);
+        };
+        let state = |app: &App| app.status.get(&id).unwrap().state;
+
+        // Prime: the pane was Working.
+        {
             let s = app.status.get_mut(&id).unwrap();
             s.state = State::Working;
             s.prev_working = true;
-            s.last_activity = idle_at; // stale → classifies Idle → Done
-        };
+        }
 
-        // Detection is throttled to ~100ms, so each simulated tick advances time.
-        let step = Duration::from_millis(150);
+        // (1) A pause shorter than the dwell must NOT flip to Done — the whole
+        // point: status stays steady through a streaming gap, and no bell.
+        go_quiet(&mut app, t0);
+        app.detect_tick(t0); // candidate=Done, but not yet committed
+        app.detect_tick(t0 + Duration::from_millis(500));
+        assert_eq!(state(&app), State::Working, "a short pause stays Working");
+        assert!(app.pending_notify.is_empty(), "a short pause does not ring");
 
-        // First completion rings exactly once.
-        arm_working_then_idle(&mut app);
-        app.detect_tick(now);
-        assert_eq!(app.pending_notify.len(), 1, "first completion rings once");
+        // (2) Sustained quiet past the dwell → Done, ringing exactly once.
+        app.detect_tick(t0 + QUIET_DWELL + Duration::from_millis(100));
+        assert_eq!(state(&app), State::Done, "sustained quiet commits Done");
+        assert_eq!(app.pending_notify.len(), 1, "genuine completion rings once");
 
-        // Flap (working again, then idle again) does NOT re-ring — bell disarmed.
+        // (3) Work again, then complete again → does NOT re-ring (bell disarmed).
         app.pending_notify.clear();
-        app.status.get_mut(&id).unwrap().last_activity = now; // recent → Working
-        app.detect_tick(now + step);
-        app.status.get_mut(&id).unwrap().last_activity = idle_at; // → Done again
-        app.detect_tick(now + step * 2);
-        assert!(app.pending_notify.is_empty(), "flapping does not re-ring");
+        let t1 = t0 + QUIET_DWELL + Duration::from_millis(300);
+        app.status.get_mut(&id).unwrap().last_activity = t1; // fresh → Working
+        app.detect_tick(t1); // commits Working instantly
+        assert_eq!(
+            state(&app),
+            State::Working,
+            "activity returns to Working at once"
+        );
+        go_quiet(&mut app, t1);
+        app.detect_tick(t1 + QUIET_DWELL + Duration::from_millis(100)); // arm candidate=Done
+        app.detect_tick(t1 + 2 * QUIET_DWELL + Duration::from_millis(200)); // commit Done
+        assert_eq!(
+            state(&app),
+            State::Done,
+            "second completion still reaches Done"
+        );
+        assert!(
+            app.pending_notify.is_empty(),
+            "re-completion does not re-ring"
+        );
 
-        // Looking at the pane re-arms it; a later completion rings again.
+        // (4) Looking at the pane re-arms the bell; a later completion rings again.
+        let t2 = t1 + 3 * QUIET_DWELL;
         app.layout_mut().focus = id;
-        app.detect_tick(now + step * 3);
+        app.detect_tick(t2); // focus re-arms + clears done
         app.layout_mut().focus = bogus;
-        arm_working_then_idle(&mut app);
-        app.detect_tick(now + step * 4);
+        let t3 = t2 + Duration::from_millis(200);
+        app.status.get_mut(&id).unwrap().last_activity = t3;
+        app.detect_tick(t3); // Working
+        go_quiet(&mut app, t3);
+        app.detect_tick(t3 + QUIET_DWELL + Duration::from_millis(100)); // arm candidate=Done
+        app.detect_tick(t3 + 2 * QUIET_DWELL + Duration::from_millis(200)); // commit Done
         assert_eq!(
             app.pending_notify.len(),
             1,
             "after the user looks, a new completion rings"
         );
+    }
+
+    // Keyboard scroll mode: Shift+↑ enters, plain keys navigate the scrollback
+    // (numbers jump, j/k lines), and `q`/`0` return to live + exit — no prefix.
+    #[test]
+    fn scroll_mode_navigates_and_exits() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        // Give the focused pane real scrollback history.
+        if let Some(p) = app.panes.get(&id) {
+            if let Ok(mut e) = p.engine.lock() {
+                for i in 0..200 {
+                    e.advance(format!("line {i}\r\n").as_bytes());
+                }
+            }
+        }
+        let off = |app: &App| app.panes.get(&id).unwrap().scroll_state().0;
+        let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let mut send = |app: &mut App, k: KeyEvent| {
+            app.handle_event(AppEvent::Key(k));
+        };
+
+        assert!(app.scroll_pane.is_none());
+        // Shift+↑ enters scroll mode and scrolls up — no Ctrl+Space needed.
+        send(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.scroll_pane, Some(id), "Shift+Up enters scroll mode");
+        assert!(off(&app) > 0, "and scrolls up into history");
+
+        // `1` jumps to the oldest, `9` near the newest.
+        send(&mut app, plain('1'));
+        let top = off(&app);
+        assert!(top > 3, "1 jumps to the top of history: {top}");
+        send(&mut app, plain('9'));
+        assert!(off(&app) < top, "9 is nearer the live bottom");
+
+        // `k`/`j` move one line.
+        let before = off(&app);
+        send(&mut app, plain('k'));
+        assert_eq!(off(&app), before + 1, "k scrolls up a line");
+        send(&mut app, plain('j'));
+        assert_eq!(off(&app), before, "j scrolls down a line");
+
+        // `q` returns to live and leaves the mode.
+        send(&mut app, plain('q'));
+        assert!(app.scroll_pane.is_none(), "q exits scroll mode");
+        assert_eq!(off(&app), 0, "and snaps back to live");
+
+        // `0` also returns to live and exits.
+        send(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.scroll_pane, Some(id));
+        send(&mut app, plain('0'));
+        assert!(app.scroll_pane.is_none(), "0 returns to live and exits");
+        assert_eq!(off(&app), 0);
     }
 }
 

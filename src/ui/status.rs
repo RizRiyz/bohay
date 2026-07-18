@@ -7,8 +7,25 @@ use super::*;
 
 pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) {
     f.render_widget(Block::new().style(Style::new().bg(t.crust)), area);
-    let prefix = app.mode == Mode::Prefix;
     let cat = app.catalog;
+
+    // Keyboard scroll mode owns the whole status line with its own hints.
+    if app.scroll_pane.is_some() {
+        let mut left: Vec<Span> = vec![Span::raw(" ")];
+        left.push(Span::styled(
+            format!(" {} ", cat.mode_scroll),
+            Style::new().fg(t.crust).bg(t.accent).bold(),
+        ));
+        left.push(Span::raw("  "));
+        left.extend(hint("1-9", cat.scroll_jump, t));
+        left.extend(hint("j/k f/b ↑↓", cat.act_scroll, t));
+        left.extend(hint("g/G", cat.scroll_ends, t));
+        left.extend(hint("q", cat.scroll_live, t));
+        f.render_widget(Paragraph::new(Line::from(left)), area);
+        return;
+    }
+
+    let prefix = app.mode == Mode::Prefix;
 
     let mut left: Vec<Span> = vec![Span::raw(" ")];
     if prefix {

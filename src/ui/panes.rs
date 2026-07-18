@@ -110,6 +110,7 @@ fn draw_one_pane(
     let downsample = app.downsample;
     // A mouse text-selection in this pane highlights its cells.
     let sel = app.selection.filter(|s| s.pane == id);
+    let mut scrolled = 0usize;
     let cursor_pos = match pane.engine.lock() {
         Ok(engine) => {
             {
@@ -152,6 +153,7 @@ fn draw_one_pane(
                     target.set_style(style);
                 });
             }
+            scrolled = engine.scroll_offset();
             let cur = engine.cursor();
             if focused && cur.visible && cur.x < content.width && cur.y < content.height {
                 Some((content.x + cur.x, content.y + cur.y))
@@ -161,5 +163,23 @@ fn draw_one_pane(
         }
         Err(_) => None,
     };
+
+    // Scrollback indicator: when the viewport is above the live bottom, show how
+    // far up (in lines) at the content's top-right so the state is never a
+    // mystery. Any keystroke — or scrolling back down — returns to live.
+    if scrolled > 0 && content.height > 0 {
+        let label = format!(" ↑{scrolled} ");
+        let w = crate::ui::display_width(&label) as u16;
+        if w < content.width {
+            let badge = Rect::new(content.x + content.width - w, content.y, w, 1);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    label,
+                    Style::new().fg(t.crust).bg(t.accent),
+                ))),
+                badge,
+            );
+        }
+    }
     cursor_pos
 }

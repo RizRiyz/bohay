@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// Debounce dwell for committing a newly-desired agent state (hysteresis).
+/// Active states publish instantly (responsive sidebar); the fall back to a
+/// quiet state waits `QUIET_DWELL` so streaming pauses don't flap the status.
+fn commit_dwell(to: State) -> Duration {
+    match to {
+        State::Working | State::Blocked => Duration::ZERO,
+        _ => QUIET_DWELL,
+    }
+}
+
 impl App {
     /// Recompute every pane's agent state. Cheap; called a few times a second.
     /// Returns whether anything the sidebar shows changed, so the loop repaints a
@@ -50,7 +60,6 @@ impl App {
             let det = detect::classify(title.as_deref(), &bottom, recent, &base);
 
             if let Some(s) = self.status.get_mut(&id) {
-                let old = s.state;
                 let focused = id == focus;
                 if focused {
                     s.seen = true;
@@ -58,21 +67,49 @@ impl App {
                     // Looking at the pane re-arms its bell for the next event.
                     s.notify_armed = true;
                 }
+                // The done-latch and working history track the *raw* reading.
                 if s.prev_working && det.state == State::Idle && !focused {
                     s.done = true;
                 }
                 s.prev_working = det.state == State::Working;
-                s.state = if s.done && det.state == State::Idle {
+                // The screen-scraped name wins only when it's a *known* agent. If
+                // the banner text doesn't currently show one (so classify fell back
+                // to the bare shell name), don't downgrade a pane that already has a
+                // resolved agent_session: keep its disk/hook identity so the brand —
+                // and the notch logo keyed off it — stays stable across an agent's
+                // quiet moments (Claude showing "Opus 4.8" but not "claude", etc.).
+                let detected = if detect::is_agent(&det.agent) {
+                    det.agent
+                } else {
+                    match &s.agent_session {
+                        Some(sess) if detect::is_agent(&sess.agent) => sess.agent.clone(),
+                        _ => det.agent,
+                    }
+                };
+                let agent_changed = s.agent != detected;
+                s.agent = detected;
+                if agent_changed && crate::agent::is_resumable(&s.agent) {
+                    agent_appeared = true;
+                }
+                // The state the raw reading wants right now.
+                let desired = if s.done && det.state == State::Idle {
                     State::Done
                 } else {
                     det.state
                 };
-                let agent_changed = s.agent != det.agent;
-                s.agent = det.agent;
-                if agent_changed && crate::agent::is_resumable(&s.agent) {
-                    agent_appeared = true;
+                // Debounce with asymmetric hysteresis: a fresh `desired` only
+                // becomes the published `state` once it has held for its dwell.
+                // Active states (Working/Blocked) commit instantly so the sidebar
+                // stays responsive; falling back to Idle/Done needs a sustained
+                // quiet period (`QUIET_DWELL`), so the pauses within one agent turn
+                // don't flap the status or spam events/notifications.
+                if desired != s.candidate {
+                    s.candidate = desired;
+                    s.candidate_since = now;
                 }
-                if s.state != old {
+                let dwell = commit_dwell(desired);
+                if s.state != desired && now.duration_since(s.candidate_since) >= dwell {
+                    s.state = desired;
                     changes.push((id, s.state, s.agent.clone()));
                 }
             }

@@ -171,6 +171,52 @@ impl Pane {
         let _ = self.input_tx.send(bytes.to_vec());
     }
 
+    /// Scroll this pane's scrollback viewport `delta` lines (positive = up into
+    /// history). No-op on the alternate screen (the running app owns scrolling).
+    pub fn scroll(&self, delta: i32) {
+        if let Ok(mut e) = self.engine.lock() {
+            e.scroll(delta);
+        }
+    }
+
+    /// Jump the viewport to the top of retained scrollback.
+    pub fn scroll_to_top(&self) {
+        if let Ok(mut e) = self.engine.lock() {
+            e.scroll_to_top();
+        }
+    }
+
+    /// Snap the viewport back to the live bottom.
+    pub fn scroll_to_bottom(&self) {
+        if let Ok(mut e) = self.engine.lock() {
+            e.scroll_to_bottom();
+        }
+    }
+
+    /// `(offset, history_len)` — the current scroll position and the total
+    /// scrollback, read together under one lock (for scroll mode's `1`–`9` jump).
+    pub fn scroll_state(&self) -> (usize, usize) {
+        self.engine
+            .lock()
+            .map(|e| (e.scroll_offset(), e.history_len()))
+            .unwrap_or((0, 0))
+    }
+
+    /// Whether the child is on the alternate screen — callers forward wheel
+    /// input to the app there instead of scrolling scrollback.
+    pub fn alt_screen(&self) -> bool {
+        self.engine.lock().map(|e| e.alt_screen()).unwrap_or(false)
+    }
+
+    /// `(mouse_report, sgr)` — whether the child tracks the mouse, and whether
+    /// it wants SGR-encoded reports. Read together under one lock.
+    pub fn mouse_mode(&self) -> (bool, bool) {
+        self.engine
+            .lock()
+            .map(|e| (e.mouse_report(), e.sgr_mouse()))
+            .unwrap_or((false, false))
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if cols == 0 || rows == 0 || (cols, rows) == self.size {
             return;

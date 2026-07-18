@@ -72,6 +72,7 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) 
         Paragraph::new(hint_line(
             &[
                 ("1-9", cat.act_jump_tab),
+                ("⇧↑ / wheel", cat.act_scroll),
                 ("?", cat.act_this_help),
                 (cat.act_any_key, cat.act_close),
             ],

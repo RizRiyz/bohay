@@ -49,6 +49,40 @@ pub trait VtEngine: Send {
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
 
+    /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
+    /// up into history**, negative back toward the live bottom. Clamped to the
+    /// retained history. No-op while on the alternate screen.
+    fn scroll(&mut self, delta: i32);
+
+    /// Jump the viewport to the very top of retained scrollback.
+    fn scroll_to_top(&mut self);
+
+    /// Snap the viewport back to the live bottom (offset 0).
+    fn scroll_to_bottom(&mut self);
+
+    /// How many lines the viewport is scrolled **above** the live bottom;
+    /// `0` means it's live. Drives the scrollback indicator + cursor hiding.
+    fn scroll_offset(&self) -> usize;
+
+    /// Total lines of retained scrollback history (the maximum `scroll_offset`).
+    /// Lets scroll mode jump to a proportional position (the `1`–`9` keys).
+    fn history_len(&self) -> usize;
+
+    /// Whether the child is on the **alternate screen** (a full-screen app like
+    /// vim/less/a TUI agent). The alt screen has no scrollback, so callers
+    /// forward wheel input to the app instead of scrolling a history buffer.
+    fn alt_screen(&self) -> bool;
+
+    /// Whether the child requested **mouse reporting** (any tracking mode). When
+    /// true the app owns the mouse — including the wheel — so callers forward
+    /// wheel/click events to it as escape sequences (e.g. a TUI agent scrolling
+    /// its own transcript) rather than scrolling bohay's scrollback.
+    fn mouse_report(&self) -> bool;
+
+    /// Whether mouse reports should use the modern **SGR** (1006) encoding
+    /// rather than the legacy X10 byte encoding.
+    fn sgr_mouse(&self) -> bool;
+
     /// Dump the visible screen as ANSI so it can be replayed into a fresh
     /// engine on restore (session persistence). Trailing blanks are trimmed.
     fn snapshot_ansi(&self) -> String;

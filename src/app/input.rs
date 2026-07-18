@@ -24,6 +24,7 @@ impl App {
             }
             AppEvent::Paste(s) => {
                 if let Some(p) = self.focused() {
+                    p.scroll_to_bottom(); // pasting is input → snap to live
                     p.send(s.as_bytes());
                 }
                 false // goes to the pane; its echo (PtyData) renders it
@@ -181,13 +182,53 @@ impl App {
                 self.orch_scroll_by(scroll);
                 return;
             }
-            // Otherwise forward scroll as arrow keys to the pane under the cursor.
-            if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
-                if let Some(pane) = self.panes.get(id) {
-                    let seq: &[u8] = if scroll < 0 { b"\x1b[A" } else { b"\x1b[B" };
-                    for _ in 0..scroll.abs() {
-                        pane.send(seq);
+            // Otherwise the wheel scrolls the pane under the cursor.
+            if let Some(id) = self
+                .pane_rects
+                .iter()
+                .find(|(_, rect)| hit(*rect))
+                .map(|(id, _)| *id)
+            {
+                let up = scroll < 0;
+                // Pane-local, 1-based coordinates for a forwarded mouse event.
+                let content = self
+                    .pane_content_rects
+                    .iter()
+                    .find(|(pid, _)| *pid == id)
+                    .map(|(_, r)| *r);
+                // Set after the pane borrow ends: `Some(v)` writes `scroll_pane = v`.
+                let mut set_scroll: Option<Option<PaneId>> = None;
+                if let Some(pane) = self.panes.get(&id) {
+                    let (mouse_report, sgr) = pane.mouse_mode();
+                    if mouse_report {
+                        // The app tracks the mouse (e.g. a TUI agent like Claude
+                        // Code on the alternate screen) — forward the wheel so it
+                        // scrolls its own transcript, exactly like a real terminal.
+                        let base = content.unwrap_or(Rect::new(0, 0, 1, 1));
+                        let col = m.column.saturating_sub(base.x) + 1;
+                        let row = m.row.saturating_sub(base.y) + 1;
+                        let seq = mouse_wheel_seq(up, col, row, sgr);
+                        for _ in 0..3 {
+                            pane.send(&seq);
+                        }
+                    } else if !pane.alt_screen() {
+                        // Primary screen with real history: scroll bohay's
+                        // scrollback viewport (`scroll` is -3 up / +3 down, and a
+                        // positive delta scrolls up into history — so negate it).
+                        pane.scroll(-scroll);
+                        // Engage keyboard scroll mode while scrolled up (so the
+                        // number/j/k keys work); disengage once back at live.
+                        set_scroll = Some((pane.scroll_state().0 > 0).then_some(id));
+                    } else {
+                        // Alt screen, no mouse tracking: best-effort arrow keys.
+                        let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                        for _ in 0..scroll.abs() {
+                            pane.send(seq);
+                        }
                     }
+                }
+                if let Some(v) = set_scroll {
+                    self.scroll_pane = v;
                 }
             }
             return;
@@ -306,6 +347,112 @@ impl App {
         }
     }
 
+    /// Scroll the focused pane's scrollback for a fixed prefix key (PageUp/Down
+    /// a page at a time, Home/End to the top / live bottom).
+    fn scroll_focused_pane(&mut self, code: KeyCode) {
+        let focus = self.layout().focus;
+        // A "page" is the visible content height minus one row of overlap.
+        let page = self
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == focus)
+            .map(|(_, r)| r.height.saturating_sub(1).max(1) as i32)
+            .unwrap_or(10);
+        if let Some(p) = self.focused() {
+            match code {
+                KeyCode::PageUp => p.scroll(page),
+                KeyCode::PageDown => p.scroll(-page),
+                KeyCode::Home => p.scroll_to_top(),
+                KeyCode::End => p.scroll_to_bottom(),
+                _ => {}
+            }
+        }
+    }
+
+    /// The focused pane's content height minus one row — a "page" for scrolling.
+    fn focused_page(&self) -> i32 {
+        let focus = self.layout().focus;
+        self.pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == focus)
+            .map(|(_, r)| r.height.saturating_sub(1).max(1) as i32)
+            .unwrap_or(10)
+    }
+
+    /// Enter keyboard scroll mode on the focused pane, scrolling up `lines` to
+    /// start. Returns false (no-op) for an alt-screen pane — its history isn't in
+    /// bohay's scrollback, so the app owns scrolling there.
+    fn enter_scroll_mode(&mut self, lines: i32) -> bool {
+        let id = self.layout().focus;
+        match self.panes.get(&id) {
+            Some(p) if !p.alt_screen() => {
+                p.scroll(lines);
+                self.scroll_pane = Some(id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Handle one key while in keyboard scroll mode; always consumes it. Plain
+    /// keys navigate the focused pane's scrollback and never reach the agent:
+    /// `j`/`k`/arrows = lines, `f`/`b`/Space/PageUp/Down = pages, `g`/`G` =
+    /// top/live, `1`–`9` = jump (1 oldest … 9 newest), `0`/`G`/`q`/`Esc`/typing =
+    /// back to live. See [`App::scroll_pane`].
+    fn handle_scroll_mode_key(&mut self, key: KeyEvent) -> bool {
+        let Some(id) = self.scroll_pane else {
+            return false;
+        };
+        let page = self.focused_page();
+        let mut exit = false;
+        if let Some(pane) = self.panes.get(&id) {
+            match key.code {
+                KeyCode::Char('k') | KeyCode::Up => pane.scroll(1),
+                KeyCode::Char('j') | KeyCode::Down => pane.scroll(-1),
+                KeyCode::Char('b') | KeyCode::PageUp => pane.scroll(page),
+                KeyCode::Char('f') | KeyCode::Char(' ') | KeyCode::PageDown => pane.scroll(-page),
+                KeyCode::Char('g') | KeyCode::Home => pane.scroll_to_top(),
+                KeyCode::Char('G') | KeyCode::End => {
+                    pane.scroll_to_bottom();
+                    exit = true;
+                }
+                KeyCode::Char(d @ '0'..='9') => {
+                    let digit = d as i32 - '0' as i32;
+                    let (cur, len) = pane.scroll_state();
+                    // 1 = oldest (top of history) … 9 = newest; 0 = live bottom.
+                    let target = if digit == 0 {
+                        0
+                    } else {
+                        len as i32 * (10 - digit) / 9
+                    };
+                    pane.scroll(target - cur as i32);
+                    if digit == 0 {
+                        exit = true;
+                    }
+                }
+                KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => {
+                    pane.scroll_to_bottom();
+                    exit = true;
+                }
+                _ => {
+                    // Any other key leaves scroll mode (snap to live) and is
+                    // forwarded, so typing to the agent resumes with no lost key.
+                    pane.scroll_to_bottom();
+                    exit = true;
+                    if let Some(bytes) = encode_key(&key) {
+                        pane.send(&bytes);
+                    }
+                }
+            }
+        } else {
+            exit = true; // the pane vanished
+        }
+        if exit {
+            self.scroll_pane = None;
+        }
+        true
+    }
+
     /// The pane whose **content** rect covers terminal cell `(x, y)`.
     fn pane_content_at(&self, x: u16, y: u16) -> Option<(PaneId, Rect)> {
         self.pane_content_rects
@@ -410,6 +557,11 @@ impl App {
             self.handle_orch_form_key(key);
             return true;
         }
+        // Keyboard scroll mode owns every key until it's left (`q`/`Esc`/typing);
+        // no `Ctrl+Space` prefix involved — the Mac-friendly path.
+        if self.scroll_pane.is_some() {
+            return self.handle_scroll_mode_key(key);
+        }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the
         // `Ctrl+Space` prefix still works for global ops (switch tab/workspace, …).
         if self.mode == Mode::Normal && (self.active_is_git() || self.active_is_orch()) {
@@ -444,6 +596,22 @@ impl App {
                         return true;
                     }
                 }
+                // Fixed scrollback keys (like the digits above): scroll the
+                // focused pane's history. `[`/`]` page up/down (no Fn needed on a
+                // Mac), and so do PageUp/PageDown; Home/End jump to the top / live
+                // bottom (Fn+↑/↓/←/→ on a MacBook).
+                let scroll_code = match key.code {
+                    KeyCode::Char('[') => Some(KeyCode::PageUp),
+                    KeyCode::Char(']') => Some(KeyCode::PageDown),
+                    c @ (KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End) => {
+                        Some(c)
+                    }
+                    _ => None,
+                };
+                if let Some(code) = scroll_code {
+                    self.scroll_focused_pane(code);
+                    return true;
+                }
                 // Everything else resolves through the keybinding registry
                 // (defaults + user overrides; see `app/keys.rs`). `key_string`
                 // ignores modifiers, so the command key works whether you
@@ -460,8 +628,24 @@ impl App {
                     self.mode = Mode::Prefix;
                     return true; // entered prefix mode → the status bar updates
                 }
+                // `Shift+↑` / `Shift+PageUp` enter keyboard scroll mode (no prefix,
+                // works on a stock Mac keyboard). From there plain keys navigate.
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                if shift && matches!(key.code, KeyCode::Up | KeyCode::PageUp) {
+                    let by = if key.code == KeyCode::Up {
+                        3
+                    } else {
+                        self.focused_page()
+                    };
+                    if self.enter_scroll_mode(by) {
+                        return true;
+                    }
+                }
                 if let Some(bytes) = encode_key(&key) {
                     if let Some(p) = self.focused() {
+                        // Typing snaps the view back to the live bottom, so you
+                        // always see what you type (like every terminal).
+                        p.scroll_to_bottom();
                         p.send(&bytes);
                     }
                 }
@@ -480,6 +664,20 @@ fn is_prefix(key: &KeyEvent) -> bool {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     matches!(key.code, KeyCode::Null)
         || (ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('@')))
+}
+
+/// Encode one mouse-wheel notch as the bytes a mouse-tracking app expects.
+/// `up` selects the wheel-up/down button; `col`/`row` are 1-based, pane-local.
+fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
+    let btn: u16 = if up { 64 } else { 65 };
+    if sgr {
+        // SGR (1006): ESC [ < btn ; col ; row M  (M = press; wheel has no release).
+        format!("\x1b[<{btn};{col};{row}M").into_bytes()
+    } else {
+        // Legacy X10: ESC [ M then (32+btn) (32+col) (32+row), each byte capped.
+        let enc = |v: u16| (32 + v.min(223)) as u8;
+        vec![0x1b, b'[', b'M', enc(btn), enc(col), enc(row)]
+    }
 }
 
 /// Encode a crossterm key event into the bytes a terminal program expects.
@@ -534,4 +732,33 @@ fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
 
 fn csi(final_byte: u8) -> Vec<u8> {
     vec![0x1b, b'[', final_byte]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sgr_wheel_encodes_button_and_coords() {
+        // Wheel up = button 64, down = 65; coords are 1-based, pane-local.
+        assert_eq!(mouse_wheel_seq(true, 5, 3, true), b"\x1b[<64;5;3M".to_vec());
+        assert_eq!(
+            mouse_wheel_seq(false, 12, 40, true),
+            b"\x1b[<65;12;40M".to_vec()
+        );
+    }
+
+    #[test]
+    fn legacy_wheel_encodes_offset_bytes_and_caps() {
+        // X10: ESC [ M then 32+btn, 32+col, 32+row (each capped at 255).
+        assert_eq!(
+            mouse_wheel_seq(true, 1, 1, false),
+            vec![0x1b, b'[', b'M', 32 + 64, 33, 33]
+        );
+        // Coordinates past 223 saturate so the byte never overflows.
+        assert_eq!(
+            mouse_wheel_seq(false, 500, 500, false),
+            vec![0x1b, b'[', b'M', 32 + 65, 255, 255]
+        );
+    }
 }
