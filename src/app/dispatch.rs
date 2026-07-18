@@ -88,9 +88,24 @@ impl App {
         };
         for (id, st, agent) in changes {
             // Publishes to subscribers and fires any module `[[events]]` hooks.
+            // Carry the pane's cwd + project basename so consumers (e.g. the notch
+            // companion, docs/24) can label the row without a second call.
+            let (cwd, project) = self
+                .panes
+                .get(&id)
+                .map(|p| {
+                    let proj = p
+                        .cwd
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (p.cwd.to_string_lossy().to_string(), proj)
+                })
+                .unwrap_or_default();
             self.emit_event(
                 "pane.agent_status_changed",
-                json!({ "pane": id.0.to_string(), "status": state_str(st), "agent": agent }),
+                json!({ "pane": id.0.to_string(), "status": state_str(st), "agent": agent, "cwd": cwd, "project": project }),
             );
             // Queue a bell/desktop notification on the configured transitions —
             // but only if this pane's bell is armed, so a streaming agent that
@@ -253,6 +268,21 @@ impl App {
                     s.agent_session = Some(AgentSession { agent, session_id });
                 }
                 self.session_dirty = true;
+                Ok(json!({"type":"ok"}))
+            }
+            // A precise agent lifecycle event from an integration hook (docs/24
+            // NOTCH-6): permission prompt, question, turn end. Forwarded verbatim
+            // onto the event bus as `agent.hook` for the notch companion.
+            "pane.report_event" => {
+                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let agent = p.get("agent").and_then(|v| v.as_str()).unwrap_or("");
+                let kind = p.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                let message = p.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let tool = p.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                self.emit_event(
+                    "agent.hook",
+                    json!({ "pane": id.0.to_string(), "agent": agent, "kind": kind, "message": message, "tool": tool }),
+                );
                 Ok(json!({"type":"ok"}))
             }
             // ── workspaces ── (`node.*` kept as a back-compat alias)

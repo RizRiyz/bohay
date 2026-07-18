@@ -16,17 +16,34 @@ use serde_json::{json, Value};
 fn agent_hook_script(agent: &str) -> String {
     format!(
         r#"#!/usr/bin/env bash
-# bohay {agent} integration — reports the session id for native resume.
+# bohay {agent} integration — reports the session id for native resume, and
+# (docs/24 NOTCH-6) forwards lifecycle events (permission prompt / turn end) for
+# the notch companion. Branches on the hook's event name.
 [ -n "$BOHAY_ENV" ] || exit 0
 [ -n "$BOHAY_SOCKET_PATH" ] || exit 0
 command -v bohay >/dev/null 2>&1 || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 input="$(cat)"
-sid="$(printf '%s' "$input" | python3 -c 'import sys,json
+evt="$(printf '%s' "$input" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print(d.get("hook_event_name") or "")
+except Exception: print("")' 2>/dev/null)"
+case "$evt" in
+  Notification|Stop|SubagentStop)
+    msg="$(printf '%s' "$input" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print((d.get("message") or "")[:200])
+except Exception: print("")' 2>/dev/null)"
+    bohay pane report-event --agent {agent} --kind "$evt" --message "$msg" >/dev/null 2>&1
+    ;;
+  *)
+    sid="$(printf '%s' "$input" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin); print(d.get("session_id") or d.get("sessionId") or d.get("id") or "")
 except Exception: print("")' 2>/dev/null)"
-[ -n "$sid" ] && bohay pane report --agent {agent} --session "$sid" >/dev/null 2>&1
+    [ -n "$sid" ] && bohay pane report --agent {agent} --session "$sid" >/dev/null 2>&1
+    ;;
+esac
 exit 0
 "#
     )
@@ -188,7 +205,20 @@ fn install_shell_hook(agent: &str) -> Result<PathBuf> {
 }
 
 pub fn install_claude() -> Result<PathBuf> {
-    install_shell_hook("claude")
+    let dir = install_shell_hook("claude")?;
+    // Also register the same (branching) script under lifecycle events so the
+    // notch companion gets precise permission/turn-end signals (docs/24 NOTCH-6).
+    let cfg_path = dir.join("settings.json");
+    let script = dir.join("bohay-agent-hook.sh");
+    let mut cfg: Value = fs::read_to_string(&cfg_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    for evt in ["Notification", "Stop"] {
+        register_hook(&mut cfg, evt, None, &script.to_string_lossy());
+    }
+    fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
+    Ok(dir)
 }
 
 pub fn install_copilot() -> Result<PathBuf> {
@@ -236,12 +266,20 @@ pub fn uninstall(agent: &str) -> Result<()> {
     let cfg_path = spec.dir.join(spec.file);
     if let Ok(s) = fs::read_to_string(&cfg_path) {
         if let Ok(mut v) = serde_json::from_str::<Value>(&s) {
-            if let Some(arr) = v
-                .get_mut("hooks")
-                .and_then(|h| h.get_mut(spec.event))
-                .and_then(|a| a.as_array_mut())
-            {
-                arr.retain(|group| !group_mentions_bohay(group));
+            // Strip bohay's entry from the primary event and, for Claude, the
+            // extra lifecycle events install_claude added (docs/24 NOTCH-6).
+            let mut events = vec![spec.event];
+            if agent == "claude" {
+                events.extend(["Notification", "Stop"]);
+            }
+            for evt in events {
+                if let Some(arr) = v
+                    .get_mut("hooks")
+                    .and_then(|h| h.get_mut(evt))
+                    .and_then(|a| a.as_array_mut())
+                {
+                    arr.retain(|group| !group_mentions_bohay(group));
+                }
             }
             if let Ok(out) = serde_json::to_string_pretty(&v) {
                 let _ = fs::write(&cfg_path, out);

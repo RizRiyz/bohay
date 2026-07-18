@@ -660,6 +660,25 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             );
             ("pane.report_session".into(), with_pane(obj))
         }
+        ("pane", "report-event") => {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "agent".to_string(),
+                json!(flag(args, "--agent").unwrap_or_default()),
+            );
+            obj.insert(
+                "kind".to_string(),
+                json!(flag(args, "--kind").unwrap_or_default()),
+            );
+            obj.insert(
+                "message".to_string(),
+                json!(flag(args, "--message").unwrap_or_default()),
+            );
+            if let Some(t) = flag(args, "--tool") {
+                obj.insert("tool".to_string(), json!(t));
+            }
+            ("pane.report_event".into(), with_pane(obj))
+        }
         ("pane", _) => ("pane.list".into(), json!({})),
 
         ("module", "link") => {
