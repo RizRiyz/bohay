@@ -35,7 +35,14 @@ where
     W: Write + Send + 'static,
 {
     let mut terminal = ratatui::init();
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+    // Set a single clean window title; otherwise the host terminal fills every
+    // slot (window/tab/pane) with the process name → "bohay — bohay — bohay".
+    let _ = execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        crossterm::terminal::SetTitle("bohay")
+    );
     crate::install_tui_panic_hook();
     let result = run_inner(reader, writer, &mut terminal);
     let _ = execute!(

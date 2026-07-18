@@ -189,7 +189,14 @@ fn base64_encode(data: &[u8]) -> String {
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
     let mut terminal = ratatui::init();
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+    // Single clean window title (else the terminal repeats the process name:
+    // "bohay — bohay — bohay").
+    let _ = execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        crossterm::terminal::SetTitle("bohay")
+    );
     install_tui_panic_hook();
     let result = run(&mut terminal);
     let _ = execute!(
