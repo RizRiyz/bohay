@@ -18,6 +18,7 @@
 
 - **Persistent sessions** — panes, tabs, and workspaces survive detach; reattach anytime.
 - **Live agent sidebar** — every agent's state at a glance: blocked · working · done · idle.
+- **macOS notch companion** — a native menu-bar app mirrors your agents in the notch: model, context %, cost, and state — approve a blocked prompt or jump to its pane, hands-free.
 - **Zero-config resume** — reopens each agent's native session where you left off (Claude Code, Copilot).
 - **Built-in git tab** — branches, commit flow, PRs, issues, and a repo overview via `git` + `gh`.
 - **Worktrees as workspaces** — work on several branches at once; the sidebar nests them per repo.
@@ -49,6 +50,30 @@ Use bohay in **Windows Terminal**. (Live cwd tracking and the bash hook are unav
 agent resume still works.) Prefer not to pipe a script? Download the
 `…-x86_64-pc-windows-msvc.zip` from the [Releases](https://github.com/RizRiyz/bohay/releases) page
 and put `bohay.exe` on your `PATH`.
+
+### macOS notch companion
+
+<div align="center">
+
+<img src="assets/screenshot-bohay-notch.png" alt="bohay-notch — the agent panel dropping from the macOS notch: Copilot (blocked), Opencode (done), and Sonnet 4.6 (idle, $1.02), with a running/done/idle and total-cost footer" width="600" />
+
+</div>
+
+**bohay-notch** is a native SwiftUI app that lives in the notch and menu bar. Hover and the notch
+drops a live panel of your agents — brand logo, model name, project, running cost, and state
+(*blocked · working · done · idle*) — with a footer tallying how many are running/done/idle and
+the total spend, exactly as above. A blocked agent surfaces a card you can approve straight from
+the notch, and clicking any agent focuses its pane in bohay. Install the cask (it also pulls the
+`bohay` CLI it talks to):
+
+```bash
+brew install --cask --no-quarantine RizRiyz/bohay/bohay-notch
+```
+
+Or download `bohay-notch-<version>.dmg` from the [Releases](https://github.com/RizRiyz/bohay/releases)
+page. Requires macOS Sequoia (15) or newer. The app is ad-hoc signed but not notarized, so pass
+`--no-quarantine` above — or, if macOS blocks it, run
+`xattr -dr com.apple.quarantine /Applications/bohay-notch.app` once.
 
 ## Quick start
 
@@ -190,6 +215,11 @@ back through the same socket API — any language, no SDK. `bohay module search`
 interactive task board (`Ctrl+Space o` — `a` add, `s` start, `d` done, `m` merge), path leases so
 workers can't collide, isolated git-worktree workers, quality gates on completion, and a safe merge
 gate that never touches your checkout.
+
+**Notch companion** (macOS) — [bohay-notch](#macos-notch-companion) puts a live agent readout in the
+notch and menu bar. It talks to the same local socket as the CLI, so each agent shows its model,
+context %, cost, and state in real time; a blocked agent surfaces a permission card you can approve
+from the notch, and clicking an agent focuses its pane in bohay.
 
 ## Configuration
 
