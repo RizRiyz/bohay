@@ -277,74 +277,6 @@ impl VtEngine for AlacrittyEngine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc::channel;
-
-    fn feed_lines(e: &mut AlacrittyEngine, n: usize) {
-        for i in 0..n {
-            e.advance(format!("line{i}\r\n").as_bytes());
-        }
-    }
-
-    #[test]
-    fn scrollback_offset_moves_clamps_and_resets() {
-        let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx); // 5 visible rows
-        feed_lines(&mut e, 50); // 50 lines → ~45 in scrollback
-
-        assert_eq!(e.scroll_offset(), 0, "starts live at the bottom");
-
-        e.scroll(10);
-        assert_eq!(e.scroll_offset(), 10, "scrolls up 10 lines into history");
-        assert!(!e.cursor().visible, "cursor hidden while scrolled back");
-
-        e.scroll_to_top();
-        let top = e.scroll_offset();
-        assert!(top > 10, "top of history is well above the live bottom");
-        e.scroll(1000);
-        assert_eq!(
-            e.scroll_offset(),
-            top,
-            "cannot scroll past the top of history"
-        );
-
-        e.scroll(-1000);
-        assert_eq!(e.scroll_offset(), 0, "cannot scroll below the live bottom");
-        e.scroll(5);
-        e.scroll_to_bottom();
-        assert_eq!(e.scroll_offset(), 0, "snaps back to live");
-        assert!(e.cursor().visible, "cursor returns once live");
-    }
-
-    #[test]
-    fn alt_screen_has_no_scrollback() {
-        let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx);
-        feed_lines(&mut e, 20);
-        e.advance(b"\x1b[?1049h"); // enter the alternate screen
-        assert!(e.alt_screen());
-        e.scroll(5);
-        assert_eq!(e.scroll_offset(), 0, "the alt screen ignores scrollback");
-    }
-
-    #[test]
-    fn mouse_tracking_modes_are_detected() {
-        let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx);
-        assert!(!e.mouse_report(), "no tracking by default");
-        assert!(!e.sgr_mouse());
-        // A TUI agent enabling normal + SGR mouse reporting (DECSET 1000, 1006).
-        e.advance(b"\x1b[?1000h\x1b[?1006h");
-        assert!(e.mouse_report(), "wheel should be forwarded to the app");
-        assert!(e.sgr_mouse(), "reports use the SGR encoding");
-        // Disabling it hands the wheel back to bohay's scrollback.
-        e.advance(b"\x1b[?1000l");
-        assert!(!e.mouse_report());
-    }
-}
-
 fn sgr(fg: Color, bg: Color, m: Modifier) -> String {
     let mut s = String::from("\x1b[0");
     if m.contains(Modifier::BOLD) {
@@ -418,4 +350,72 @@ fn map_flags(fl: Flags) -> Modifier {
         m |= Modifier::CROSSED_OUT;
     }
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn feed_lines(e: &mut AlacrittyEngine, n: usize) {
+        for i in 0..n {
+            e.advance(format!("line{i}\r\n").as_bytes());
+        }
+    }
+
+    #[test]
+    fn scrollback_offset_moves_clamps_and_resets() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx); // 5 visible rows
+        feed_lines(&mut e, 50); // 50 lines → ~45 in scrollback
+
+        assert_eq!(e.scroll_offset(), 0, "starts live at the bottom");
+
+        e.scroll(10);
+        assert_eq!(e.scroll_offset(), 10, "scrolls up 10 lines into history");
+        assert!(!e.cursor().visible, "cursor hidden while scrolled back");
+
+        e.scroll_to_top();
+        let top = e.scroll_offset();
+        assert!(top > 10, "top of history is well above the live bottom");
+        e.scroll(1000);
+        assert_eq!(
+            e.scroll_offset(),
+            top,
+            "cannot scroll past the top of history"
+        );
+
+        e.scroll(-1000);
+        assert_eq!(e.scroll_offset(), 0, "cannot scroll below the live bottom");
+        e.scroll(5);
+        e.scroll_to_bottom();
+        assert_eq!(e.scroll_offset(), 0, "snaps back to live");
+        assert!(e.cursor().visible, "cursor returns once live");
+    }
+
+    #[test]
+    fn alt_screen_has_no_scrollback() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx);
+        feed_lines(&mut e, 20);
+        e.advance(b"\x1b[?1049h"); // enter the alternate screen
+        assert!(e.alt_screen());
+        e.scroll(5);
+        assert_eq!(e.scroll_offset(), 0, "the alt screen ignores scrollback");
+    }
+
+    #[test]
+    fn mouse_tracking_modes_are_detected() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx);
+        assert!(!e.mouse_report(), "no tracking by default");
+        assert!(!e.sgr_mouse());
+        // A TUI agent enabling normal + SGR mouse reporting (DECSET 1000, 1006).
+        e.advance(b"\x1b[?1000h\x1b[?1006h");
+        assert!(e.mouse_report(), "wheel should be forwarded to the app");
+        assert!(e.sgr_mouse(), "reports use the SGR encoding");
+        // Disabling it hands the wheel back to bohay's scrollback.
+        e.advance(b"\x1b[?1000l");
+        assert!(!e.mouse_report());
+    }
 }

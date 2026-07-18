@@ -2439,7 +2439,7 @@ mod tests {
         }
         let off = |app: &App| app.panes.get(&id).unwrap().scroll_state().0;
         let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-        let mut send = |app: &mut App, k: KeyEvent| {
+        let send = |app: &mut App, k: KeyEvent| {
             app.handle_event(AppEvent::Key(k));
         };
 
