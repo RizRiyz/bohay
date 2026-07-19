@@ -26,7 +26,8 @@ arch=$(uname -m)
 case "$os" in
   Darwin)
     case "$arch" in
-      x86_64) target="x86_64-apple-darwin" ;;
+      # Prebuilt macOS binaries are Apple-silicon only.
+      x86_64) err "no prebuilt Intel-mac binary — install from source instead: cargo install bohay" ;;
       arm64|aarch64) target="aarch64-apple-darwin" ;;
       *) err "unsupported macOS arch: $arch" ;;
     esac ;;

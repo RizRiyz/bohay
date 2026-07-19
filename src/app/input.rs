@@ -49,6 +49,9 @@ impl App {
                 self.module_command_finished(log_id, code, out, err);
                 true
             }
+            // Repaint only when the visible sidebar list actually changed —
+            // most 4s scans find nothing new.
+            AppEvent::SessionsScanned(found) => self.apply_scanned_sessions(found),
             AppEvent::GitData { view, payload } => {
                 self.git_data(view, payload);
                 true

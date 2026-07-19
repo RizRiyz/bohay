@@ -23,10 +23,20 @@ impl App {
             self.last_cwd_at = now;
             self.refresh_cwds();
         }
-        // Rescan the agents' session stores a little less often (filesystem work).
-        if now.duration_since(self.last_sessions_at) >= Duration::from_secs(4) {
+        // Rescan the agents' session stores a little less often. The scan is
+        // filesystem work that grows with on-disk history, so it runs on a
+        // worker thread and posts `SessionsScanned` back — never inline here
+        // (this tick is on the render-critical event loop). `inflight` stops
+        // scans from piling up if one is ever slower than the interval.
+        if now.duration_since(self.last_sessions_at) >= Duration::from_secs(4)
+            && !self.sessions_scan_inflight
+        {
             self.last_sessions_at = now;
-            self.refresh_resumable();
+            self.sessions_scan_inflight = true;
+            let tx = self.app_tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(AppEvent::SessionsScanned(crate::agent::recent_sessions(12)));
+            });
         }
         // The per-pane classification below locks each pane's VT engine + scans its
         // grid; agent state (blocked/working/done) is human-paced, so ~100ms is

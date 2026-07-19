@@ -35,13 +35,13 @@ where
     W: Write + Send + 'static,
 {
     let mut terminal = ratatui::init();
-    // Set a single clean window title; otherwise the host terminal fills every
-    // slot (window/tab/pane) with the process name → "bohay — bohay — bohay".
+    // One clean window title — empty on Terminal.app, which already shows the
+    // process name in its title bar (see `main::window_title`).
     let _ = execute!(
         std::io::stdout(),
         EnableBracketedPaste,
         EnableMouseCapture,
-        crossterm::terminal::SetTitle("bohay")
+        crossterm::terminal::SetTitle(crate::window_title())
     );
     crate::install_tui_panic_hook();
     let result = run_inner(reader, writer, &mut terminal);
@@ -72,7 +72,14 @@ where
 
     let mut reader = BufReader::new(reader);
     match protocol::read_message::<_, ServerMessage>(&mut reader)? {
-        ServerMessage::Welcome { error: Some(e), .. } => return Err(anyhow!("server: {e}")),
+        // The one user-facing handshake failure is an old server after an
+        // upgrade — tell them the fix, not just the symptom.
+        ServerMessage::Welcome { error: Some(e), .. } => {
+            return Err(anyhow!(
+                "server: {e}\nAn older bohay server is likely still running — \
+                 run `bohay server restart` to load this version (your session is saved)."
+            ))
+        }
         ServerMessage::Welcome { .. } => {}
         _ => return Err(anyhow!("unexpected handshake")),
     }

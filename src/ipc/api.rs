@@ -21,8 +21,12 @@ pub struct ApiRequest {
     pub reply: Sender<String>,
 }
 
-/// Subscriber channels for `events.subscribe`. Publishing prunes dead ones.
-pub type EventBus = Arc<Mutex<Vec<Sender<String>>>>;
+/// Subscriber channels for `events.subscribe`, keyed by a subscription id so a
+/// disconnect can remove its entry immediately (see `handle_conn`) — dead
+/// senders are also pruned defensively on publish.
+pub type EventBus = Arc<Mutex<Vec<(u64, Sender<String>)>>>;
+
+static NEXT_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn new_bus() -> EventBus {
     Arc::new(Mutex::new(Vec::new()))
@@ -30,7 +34,7 @@ pub fn new_bus() -> EventBus {
 
 pub fn publish(bus: &EventBus, line: String) {
     if let Ok(mut subs) = bus.lock() {
-        subs.retain(|s| s.send(line.clone()).is_ok());
+        subs.retain(|(_, s)| s.send(line.clone()).is_ok());
     }
 }
 
@@ -47,9 +51,8 @@ pub fn socket_path_env() -> Option<String> {
 
 /// Bind the socket and accept connections on a background thread.
 pub fn start_server(path: PathBuf, api_tx: Sender<ApiRequest>, bus: EventBus) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // Creates the state dir owner-only (0700) — the socket is full control.
+    let _ = crate::persist::ensure_config_dir();
     // Best-effort stale-socket reclaim (single-instance dev; proper detection
     // arrives with the M2 server).
     let listener = match transport::bind(&path) {
@@ -102,14 +105,30 @@ fn handle_conn(stream: Conn, api_tx: Sender<ApiRequest>, bus: EventBus) {
             json!({"id":id,"result":{"type":"subscription_started"}})
         );
         let (tx, rx) = mpsc::channel::<String>();
+        let sub_id = NEXT_SUB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut subs) = bus.lock() {
-            subs.push(tx);
+            subs.push((sub_id, tx));
         }
-        for evt in rx {
-            if writeln!(writer, "{evt}").is_err() {
-                break;
+        // Forward bus events to the socket on a helper thread…
+        let mut fwd_writer = writer.clone();
+        let fwd = thread::spawn(move || {
+            for evt in rx {
+                if writeln!(fwd_writer, "{evt}").is_err() {
+                    break;
+                }
             }
+        });
+        // …while this thread watches the read side: EOF/error = the client is
+        // gone, so unsubscribe NOW instead of lingering in the bus until the
+        // next publish happens to notice the dead channel.
+        let mut probe = String::new();
+        while matches!(reader.read_line(&mut probe), Ok(n) if n > 0) {
+            probe.clear();
         }
+        if let Ok(mut subs) = bus.lock() {
+            subs.retain(|(i, _)| *i != sub_id);
+        }
+        let _ = fwd.join(); // its sender just left the bus → the rx loop ends
         return;
     }
 

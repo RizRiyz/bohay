@@ -316,11 +316,7 @@ fn doctor() -> i32 {
                 if required {
                     missing_git = true;
                 }
-                let kind = if required {
-                    "needed for"
-                } else {
-                    "optional —"
-                };
+                let kind = if required { "needed for" } else { "optional -" };
                 println!("  ✗ {name:<6}not found · {kind} {unlocks}");
                 println!("           ↳ {hint}");
             }

