@@ -116,6 +116,24 @@ pub fn config_dir() -> PathBuf {
     home.join(name)
 }
 
+/// Create the state dir if needed and, on Unix, keep it owner-only (`0700`).
+/// The control sockets inside grant full command execution as the user, and
+/// some BSDs ignore permissions on a socket *file* — the directory mode is the
+/// reliable barrier, so don't leave it to the umask. Guarded against a
+/// pathological `$BOHAY_HOME=$HOME` (never chmod the home dir itself).
+pub fn ensure_config_dir() -> PathBuf {
+    let dir = config_dir();
+    let _ = fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if Some(dir.as_path()) != crate::platform::home_dir().as_deref() {
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
+    }
+    dir
+}
+
 fn session_path() -> PathBuf {
     config_dir().join("session.json")
 }
@@ -229,8 +247,8 @@ pub fn save(app: &App) {
     if snap.workspaces.is_empty() {
         return;
     }
-    let dir = config_dir();
-    if fs::create_dir_all(&dir).is_err() {
+    let dir = ensure_config_dir();
+    if !dir.is_dir() {
         return;
     }
     let Ok(json) = serde_json::to_string_pretty(&snap) else {
@@ -253,4 +271,26 @@ pub fn load() -> Option<SessionSnapshot> {
         return None; // newer than we understand — ignore rather than misparse
     }
     Some(snap)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // The control sockets grant command execution as the user, so the state
+    // dir must be owner-only (0700) and each bound socket 0600 — regardless of
+    // the process umask (see `ensure_config_dir` / `transport::bind`).
+    #[test]
+    fn state_dir_and_sockets_are_owner_only() {
+        let _env = test_env("perms");
+        let dir = ensure_config_dir();
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "state dir is chmod 0700, got {mode:o}");
+
+        let sock = dir.join("t.sock");
+        let _listener = crate::ipc::transport::bind(&sock).unwrap();
+        let mode = fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket is chmod 0600, got {mode:o}");
+    }
 }

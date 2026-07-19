@@ -91,6 +91,21 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     let area = f.area();
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
 
+    // An absurdly small window can't hold the chrome — say so instead of
+    // drawing degraded fragments. (Every draw fn is underflow-safe regardless;
+    // this is purely the friendlier message.)
+    if area.width < 24 || area.height < 6 {
+        if area.height > 0 {
+            let msg = "◱ enlarge terminal";
+            let y = area.y + area.height / 2;
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(msg, Style::new().fg(t.overlay1)))),
+                Rect::new(area.x, y, area.width, 1),
+            );
+        }
+        return;
+    }
+
     let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
     let (sidebar, content) = if app.sidebar_visible {

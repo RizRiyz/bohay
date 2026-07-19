@@ -186,16 +186,31 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// The window title we ask the host terminal to show — exactly one "bohay".
+///
+/// macOS Terminal.app composes its title bar itself as
+/// `cwd — <OSC title> — <process ▸ child> — size`, so an OSC title of "bohay"
+/// reads "… — bohay — bohay ▸ zsh — …" (and *never* setting one is worse: the
+/// title component falls back to the command line, repeating the process name
+/// twice). Setting an **empty** OSC title (measured against a live
+/// Terminal.app) collapses the component entirely → one clean process mention.
+/// Every other terminal treats the OSC title as THE title, so they keep
+/// "bohay".
+pub(crate) fn window_title() -> &'static str {
+    match std::env::var("TERM_PROGRAM") {
+        Ok(p) if p == "Apple_Terminal" => "",
+        _ => "bohay",
+    }
+}
+
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
     let mut terminal = ratatui::init();
-    // Single clean window title (else the terminal repeats the process name:
-    // "bohay — bohay — bohay").
     let _ = execute!(
         std::io::stdout(),
         EnableBracketedPaste,
         EnableMouseCapture,
-        crossterm::terminal::SetTitle("bohay")
+        crossterm::terminal::SetTitle(window_title())
     );
     install_tui_panic_hook();
     let result = run(&mut terminal);
@@ -219,6 +234,17 @@ fn autodetect_and_attach() -> Result<()> {
     // it inherited). When attaching to an *existing* server, ask it to open (or
     // focus) the folder we launched in, so `bohay <in a new folder>` adds it.
     if !fresh {
+        // An upgraded binary silently attaching to an older running server means
+        // none of the new version shows up — tell the user how to load it (the
+        // brief pause keeps the note readable before the UI takes the screen).
+        let binary = env!("CARGO_PKG_VERSION");
+        if let Some(running) = server_version().filter(|running| running != binary) {
+            eprintln!(
+                "bohay v{binary} installed, but the running server is v{running} — \
+                 run `bohay server restart` to load it (your session is saved and restored)."
+            );
+            thread::sleep(Duration::from_millis(2000));
+        }
         open_cwd_workspace();
     }
     ipc::client::run(&sock)
@@ -742,6 +768,36 @@ mod tests {
         assert!(text.contains("AGENTS"), "agents header missing");
         assert!(text.contains("tab"), "tab status missing");
         assert!(text.contains("NORMAL"), "status mode missing");
+    }
+
+    /// An absurdly small terminal renders the "enlarge" notice instead of
+    /// degraded chrome — and no size, however tiny, panics a draw path.
+    #[test]
+    fn tiny_terminal_shows_guard_not_garbage() {
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+
+        for (w, h) in [(1, 1), (5, 2), (23, 5), (20, 4)] {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| ui::render(f, &mut app)).unwrap(); // must not panic
+        }
+
+        // At a small-but-writable size the guard message is visible.
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::render(f, &mut app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("enlarge"),
+            "tiny-terminal guard message missing: {text:?}"
+        );
     }
 
     /// The orchestration board tab (docs/22, ORCH-7) renders its header, a task

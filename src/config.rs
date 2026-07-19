@@ -137,8 +137,8 @@ pub fn load() -> Config {
 
 /// Save the config atomically (best effort).
 pub fn save(cfg: &Config) {
-    let dir = crate::persist::config_dir();
-    if fs::create_dir_all(&dir).is_err() {
+    let dir = crate::persist::ensure_config_dir();
+    if !dir.is_dir() {
         return;
     }
     let Ok(json) = serde_json::to_string_pretty(cfg) else {

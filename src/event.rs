@@ -35,6 +35,10 @@ pub enum AppEvent {
         out: String,
         err: String,
     },
+    /// The periodic resumable-session disk scan finished (run on a worker
+    /// thread — the scan walks agent session stores and must never block the
+    /// event loop).
+    SessionsScanned(Vec<crate::agent::SessionInfo>),
     /// A git-tab fetch finished; apply it to the matching `GitView`.
     GitData {
         view: u64,

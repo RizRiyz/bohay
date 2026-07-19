@@ -299,6 +299,9 @@ pub struct App {
     last_cwd_at: Instant,
     /// Resumable agent sessions discovered on disk (for the AGENTS sidebar).
     pub resumable: Vec<crate::agent::SessionInfo>,
+    /// A resumable-session disk scan is running on a worker thread; don't start
+    /// another until its `SessionsScanned` result arrives.
+    sessions_scan_inflight: bool,
     /// Session ids the user removed from the sidebar list (hidden, not deleted).
     pub dismissed_sessions: HashSet<String>,
     /// Throttle for rescanning the agents' on-disk session stores.
@@ -433,6 +436,7 @@ impl App {
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
+            sessions_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             last_detect_at: Instant::now()
@@ -536,19 +540,32 @@ impl App {
                         .and_then(|(mid, ep)| restore_module_pane(&modules, mid, ep, id, &app_tx));
                     let (pane, module_rec) = match restored {
                         Some((p, rec)) => (p, Some(rec)),
-                        None => (
-                            Pane::spawn(
-                                id,
-                                80,
-                                24,
-                                ps.cwd.clone(),
-                                app_tx.clone(),
-                                ps.screen.as_deref(),
-                                &shell,
-                            )
-                            .ok()?,
-                            None,
-                        ),
+                        None => {
+                            // A pane whose saved cwd vanished (deleted project
+                            // dir, unmounted volume) must not cost the whole
+                            // session: fall back to the workspace dir, then
+                            // home, before giving up on just this one pane.
+                            let home = crate::platform::home_dir().unwrap_or_default();
+                            let mut spawned = None;
+                            for cwd in [&ps.cwd, &ws.cwd, &home] {
+                                if let Ok(p) = Pane::spawn(
+                                    id,
+                                    80,
+                                    24,
+                                    cwd.clone(),
+                                    app_tx.clone(),
+                                    ps.screen.as_deref(),
+                                    &shell,
+                                ) {
+                                    spawned = Some(p);
+                                    break;
+                                }
+                            }
+                            match spawned {
+                                Some(p) => (p, None),
+                                None => continue, // skip this pane, keep the rest
+                            }
+                        }
                     };
                     if let Some(rec) = module_rec {
                         module_panes.insert(id, rec);
@@ -572,8 +589,20 @@ impl App {
                     status.insert(id, st);
                     remap.insert(*raw, id);
                 }
-                let layout = TileLayout::from_tree(&tab.tree, &remap, tab.focus)?;
-                tabs.push(Tab::panes(layout));
+                // A tree that references panes that failed to restore (or is
+                // corrupt) drops only THIS tab — its surviving panes are
+                // cleaned up and every other tab/workspace is kept, instead of
+                // discarding the user's entire session.
+                match TileLayout::from_tree(&tab.tree, &remap, tab.focus) {
+                    Some(layout) => tabs.push(Tab::panes(layout)),
+                    None => {
+                        for id in remap.values() {
+                            panes.remove(id);
+                            status.remove(id);
+                            module_panes.remove(id);
+                        }
+                    }
+                }
             }
             if tabs.is_empty() {
                 continue;
@@ -637,6 +666,7 @@ impl App {
             downsample: false,
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
+            sessions_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             last_detect_at: Instant::now()
@@ -941,7 +971,23 @@ impl App {
     /// Rescan the agents' on-disk session stores for sessions you can reopen,
     /// dropping any whose project already has that agent running live, and any
     /// the user has dismissed from the list.
+    /// Synchronous rescan — used by on-demand API calls (`agent.sessions`) and
+    /// tests. The periodic path in `detect_tick` runs the same scan on a worker
+    /// thread instead and applies it via [`Self::apply_scanned_sessions`].
     fn refresh_resumable(&mut self) {
+        let found = crate::agent::recent_sessions(12);
+        self.apply_scanned_sessions(found);
+    }
+
+    /// Fold a finished session scan into the sidebar list. Returns whether the
+    /// visible list changed (→ repaint). Also prunes `dismissed_sessions` to
+    /// ids the scan still sees, so the set can't grow for the life of the
+    /// server (a dismissal only means anything while its session is on disk).
+    pub(crate) fn apply_scanned_sessions(&mut self, found: Vec<crate::agent::SessionInfo>) -> bool {
+        self.sessions_scan_inflight = false;
+        let on_disk: HashSet<&str> = found.iter().map(|s| s.session_id.as_str()).collect();
+        self.dismissed_sessions
+            .retain(|id| on_disk.contains(id.as_str()));
         let open: HashSet<(String, PathBuf)> = self
             .status
             .iter()
@@ -949,13 +995,20 @@ impl App {
             .filter_map(|(id, s)| self.panes.get(id).map(|p| (s.agent.clone(), p.cwd.clone())))
             .collect();
         let dismissed = &self.dismissed_sessions;
-        self.resumable = crate::agent::recent_sessions(12)
+        let fresh: Vec<crate::agent::SessionInfo> = found
             .into_iter()
             .filter(|s| {
                 !dismissed.contains(&s.session_id)
                     && !open.contains(&(s.agent.clone(), s.cwd.clone()))
             })
             .collect();
+        let changed = fresh.len() != self.resumable.len()
+            || fresh
+                .iter()
+                .zip(&self.resumable)
+                .any(|(a, b)| a.session_id != b.session_id);
+        self.resumable = fresh;
+        changed
     }
 
     /// Remove a resumable session from the sidebar list. Hides it for the rest of
@@ -1311,6 +1364,34 @@ mod tests {
         let restored = App::from_snapshot(snap, tx2).expect("restore");
         assert_eq!(restored.workspaces.len(), 1);
         assert_eq!(restored.layout().len(), 2);
+    }
+
+    // A saved pane whose cwd no longer exists (deleted project dir) must not
+    // cost the user the whole session: the pane falls back to the workspace
+    // dir / home and everything else restores intact.
+    #[test]
+    fn restore_survives_a_deleted_pane_cwd() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('v', KeyModifiers::NONE));
+        assert_eq!(app.layout().len(), 2);
+
+        let mut snap = persist::snapshot(&app);
+        // Simulate one pane's project dir vanishing between save and restore.
+        snap.workspaces[0].tabs[0].panes[0].1.cwd =
+            std::path::PathBuf::from("/nonexistent/deleted-project-xyz");
+
+        let (tx2, _rx2) = mpsc::channel();
+        let restored = App::from_snapshot(snap, tx2).expect("session survives a missing pane cwd");
+        assert_eq!(restored.workspaces.len(), 1, "workspace kept");
+        assert_eq!(
+            restored.layout().len(),
+            2,
+            "both panes restored (one fell back)"
+        );
+        // Every restored pane spawned somewhere real.
+        assert_eq!(restored.panes.len(), 2);
     }
 
     #[test]

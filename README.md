@@ -31,14 +31,14 @@
 ## Install
 
 ```bash
-# macOS / Linux — prebuilt binary, no Rust needed
+# macOS (Apple silicon) / Linux — prebuilt binary, no Rust needed
 curl -fsSL https://raw.githubusercontent.com/RizRiyz/bohay/main/install.sh | sh
 
 # Homebrew
 brew install --HEAD RizRiyz/bohay/bohay
 
-# Cargo (Rust ≥ 1.82) — any platform
-cargo install --git https://github.com/RizRiyz/bohay
+# Cargo (Rust ≥ 1.82) — any platform, incl. Intel macs
+cargo install bohay
 ```
 
 ```powershell
@@ -85,6 +85,14 @@ bohay        # launch — or reattach to — your session
 **`Ctrl+Space` then `q`** — panes keep running; run `bohay` again to reattach. `bohay server stop`
 ends everything.
 
+Run **`bohay doctor`** any time to check your setup — it probes `git`, `gh`, `ssh`, and friends,
+and tells you what each one unlocks (the git tab, PR/issue views, remote attach, …).
+
+> **macOS:** the system grabs `Ctrl+Space` for input-source switching by default, which blocks
+> bohay's prefix. Free it under **System Settings → Keyboard → Keyboard Shortcuts… → Input
+> Sources** (untick *Select the previous input source*). Everything is also mouse-driven, and
+> pane scrolling needs no prefix at all (see below), so nothing else is blocked meanwhile.
+
 ### Keybindings
 
 Press **`Ctrl+Space`**, then a key. Everything is mouse-driven too, and **`Ctrl+Space ?`** opens
@@ -98,9 +106,15 @@ the full cheat-sheet.
 | `z` | zoom pane | `w` `W` | cycle workspaces |
 | `b` | toggle sidebar | `g` / `G` | git tab / new worktree |
 | `o` | orchestration board | `,` | open Settings |
-| `q` `d` | detach | | |
+| `q` `d` | detach | `⇧↑` | scroll pane history |
 
 Every shortcut is remappable in **Settings → Keys**.
+
+**Scrollback** — scroll a pane with the mouse wheel / two-finger scroll, or press **`Shift+↑`**
+(no prefix needed - Mac-friendly) to enter *scroll mode*: `1`–`9` jump through history (1 =
+oldest, 9 = newest), `j`/`k` move by line, `f`/`b` by page, `g`/`G` top / bottom, and `q` - or
+just typing - snaps back to live. A `↑N` badge shows how far up you are. Full-screen apps (vim,
+TUI agents that take the whole pane) keep their own scrolling - the wheel is forwarded to them.
 
 **Copy text** by dragging across a pane — release copies the selection to your system clipboard
 and flashes a *Copied* toast. It writes the native clipboard (`pbcopy` / `wl-copy` / `xclip` /
@@ -185,7 +199,7 @@ appearance / events / server
   ui sidebar --width <n> | --hide | --show
   events                             stream live status changes
   --remote <host> [ssh args]         attach to a session on <host> over plain ssh
-  ping | server status | start | stop | restart
+  ping | doctor | server status | start | stop | restart
   integration install|uninstall <claude|copilot|codex|opencode>   session-resume hook
 ```
 

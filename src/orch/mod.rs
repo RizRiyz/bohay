@@ -86,6 +86,16 @@ pub struct Task {
 /// (jonggrang's 85% saturation gate; ORCH-5).
 pub const COMPACTION_THRESHOLD: f64 = 0.85;
 
+/// Growth caps: the ledger lives in memory for the life of the server and in
+/// `orch.json` on disk, and the socket API can drive it programmatically — so
+/// nothing may grow without bound. Limits far above real use, well below harm.
+pub const MAX_TASKS: usize = 1000;
+/// Per-task `outputs` / `notes` keep only the most recent entries…
+pub const MAX_TASK_LOG: usize = 100;
+/// …and each entry is truncated to this many bytes (a runaway agent piping a
+/// build log into `task update --output` can't balloon the ledger).
+pub const MAX_LOG_ENTRY: usize = 4 * 1024;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lease {
     pub id: String,
@@ -137,6 +147,12 @@ impl OrchState {
     ) -> OrchResult<Task> {
         if title.trim().is_empty() {
             return Err(Reject::new("bad_request", "task title is required"));
+        }
+        if self.tasks.len() >= MAX_TASKS {
+            return Err(Reject::new(
+                "task_limit",
+                format!("ledger is at its {MAX_TASKS}-task cap — prune finished tasks"),
+            ));
         }
         for d in &deps {
             if !self.tasks.iter().any(|t| &t.id == d) {
@@ -266,7 +282,7 @@ impl OrchState {
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
-        t.outputs.push(output);
+        push_log(&mut t.outputs, output);
         t.updated = unix_now();
         Ok(())
     }
@@ -277,7 +293,7 @@ impl OrchState {
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
-        t.notes.push(note);
+        push_log(&mut t.notes, note);
         t.updated = unix_now();
         Ok(())
     }
@@ -414,6 +430,25 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Append to a task's outputs/notes ring: the entry is truncated to
+/// [`MAX_LOG_ENTRY`] bytes (on a char boundary) and only the newest
+/// [`MAX_TASK_LOG`] entries are kept — see the cap rationale above.
+fn push_log(log: &mut Vec<String>, mut entry: String) {
+    if entry.len() > MAX_LOG_ENTRY {
+        let mut cut = MAX_LOG_ENTRY;
+        while !entry.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        entry.truncate(cut);
+        entry.push('…');
+    }
+    log.push(entry);
+    if log.len() > MAX_TASK_LOG {
+        let excess = log.len() - MAX_TASK_LOG;
+        log.drain(..excess);
+    }
+}
+
 /// Two lease path-sets overlap if any pair of their globs overlaps.
 fn leases_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().any(|pa| b.iter().any(|pb| paths_overlap(pa, pb)))
@@ -442,6 +477,45 @@ fn glob_prefix(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The ledger is memory + orch.json for the life of the server and is
+    // drivable over the socket — every growth axis must be bounded.
+    #[test]
+    fn ledger_growth_is_capped() {
+        let mut s = OrchState::default();
+        // Task count: adds beyond MAX_TASKS are rejected, not stored.
+        for i in 0..MAX_TASKS {
+            s.add_task(format!("t{i}"), vec![], vec![], None).unwrap();
+        }
+        let over = s.add_task("one too many".into(), vec![], vec![], None);
+        assert_eq!(over.unwrap_err().code, "task_limit");
+        assert_eq!(s.tasks.len(), MAX_TASKS);
+
+        // Outputs/notes: only the newest MAX_TASK_LOG entries survive…
+        for i in 0..(MAX_TASK_LOG + 25) {
+            s.add_output("t1", format!("out {i}")).unwrap();
+            s.add_note("t1", format!("note {i}")).unwrap();
+        }
+        let t = s.task("t1").unwrap();
+        assert_eq!(t.outputs.len(), MAX_TASK_LOG);
+        assert_eq!(t.notes.len(), MAX_TASK_LOG);
+        assert_eq!(
+            t.outputs.last().unwrap(),
+            &format!("out {}", MAX_TASK_LOG + 24)
+        );
+        assert_eq!(
+            t.outputs.first().unwrap(),
+            "out 25",
+            "oldest entries dropped"
+        );
+
+        // …and one giant entry is truncated (multi-byte safe).
+        let big = "ß".repeat(MAX_LOG_ENTRY); // 2 bytes/char → over the cap
+        s.add_output("t2", big).unwrap();
+        let stored = s.task("t2").unwrap().outputs.last().unwrap().clone();
+        assert!(stored.len() <= MAX_LOG_ENTRY + '…'.len_utf8());
+        assert!(stored.ends_with('…'));
+    }
 
     #[test]
     fn add_claim_done_lifecycle() {

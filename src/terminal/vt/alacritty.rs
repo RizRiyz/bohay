@@ -81,7 +81,16 @@ impl AlacrittyEngine {
             tx: resp_tx,
             title: title.clone(),
         };
-        let term = Term::new(Config::default(), &dims, proxy);
+        // Bound per-pane memory: scrollback is the dominant per-pane cost
+        // (history lines × columns × cell). alacritty's default is 10 000
+        // lines; 5 000 is still deep for scroll mode (tmux defaults to 2 000)
+        // at half the worst-case footprint — and it only allocates as history
+        // actually accumulates.
+        let config = Config {
+            scrolling_history: 5_000,
+            ..Config::default()
+        };
+        let term = Term::new(config, &dims, proxy);
         AlacrittyEngine {
             term,
             parser: Processor::new(),

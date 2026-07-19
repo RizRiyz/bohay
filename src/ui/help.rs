@@ -51,11 +51,7 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) 
             continue;
         }
         let key = app.key_for(cmd);
-        let key = if key.is_empty() {
-            "—".to_string()
-        } else {
-            key
-        };
+        let key = if key.is_empty() { "-".to_string() } else { key };
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!("{key:>4} "), Style::new().fg(t.accent).bold()),

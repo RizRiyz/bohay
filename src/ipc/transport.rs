@@ -79,7 +79,15 @@ pub fn bind(path: &Path) -> io::Result<Listener> {
         use interprocess::local_socket::GenericFilePath;
         let _ = std::fs::remove_file(path);
         let name = path.to_fs_name::<GenericFilePath>()?;
-        ListenerOptions::new().name(name).create_sync()
+        let listener = ListenerOptions::new().name(name).create_sync()?;
+        // Owner-only: a connection to this socket is full command execution as
+        // the user, so never rely on the umask (the state dir is also forced
+        // to 0700 — see `persist::ensure_config_dir`).
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(listener)
     }
 }
 

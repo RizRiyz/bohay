@@ -29,6 +29,17 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
 
+  # macOS is the primary platform (notch companion, Apple-silicon binaries) -
+  # run the full test suite there too, not just at release-tag time.
+  macos:
+    name: macos test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
   windows:
     name: windows build
     runs-on: windows-latest
@@ -37,3 +48,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
+
+  # Known-vulnerability scan of the dependency tree (RustSec advisory DB).
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit

@@ -285,9 +285,8 @@ fn send_frame(
 }
 
 fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // Creates the state dir owner-only (0700) — this socket drives the UI.
+    let _ = crate::persist::ensure_config_dir();
     let listener = match transport::bind(&path) {
         Ok(l) => l,
         Err(_) => return,
