@@ -1,0 +1,6 @@
+"$schema" = "./node_modules/wrangler/config-schema.json"
+name = "bohay"
+pages_build_output_dir = "./dist"
+
+# Optional: add KV namespaces, D1 databases, environment vars, or bindings below.
+# See: https://developers.cloudflare.com/pages/functions/wrangler-configuration/
