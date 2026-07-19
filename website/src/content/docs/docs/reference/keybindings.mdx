@@ -1,0 +1,24 @@
+---
+title: Keybindings
+description: Default bindings, vim aliases, and how remapping works.
+---
+
+Press **`Ctrl+Space`**, then a key. `Ctrl+Space ?` shows the live cheat-sheet;
+remap anything in **Settings → Keys** (click a command, press its new key).
+
+| Key | Command | Key | Command |
+|-----|---------|-----|---------|
+| `←↓↑→` / `hjkl` | focus pane | `c` | new tab |
+| `v` / `s` | split right / down | `n` / `p` / `⇥` | cycle tabs |
+| `x` | close pane | `N` | new workspace (folder picker) |
+| `z` | zoom pane | `w` / `W` | next / previous workspace |
+| `b` | toggle sidebar | `g` | git tab |
+| `a` | agents All/Active | `G` | new worktree |
+| `o` | orchestration board | `,` | Settings |
+| `q` / `d` | detach | `1`–`9` | jump to tab |
+
+**No-prefix keys:** `Shift+↑` enters
+[scroll mode](/docs/guides/scrollback/); the mouse does everything else.
+
+Custom bindings persist in `config.json` under `keybindings` (command id →
+key). An empty value unbinds a command.

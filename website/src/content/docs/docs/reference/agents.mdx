@@ -1,0 +1,28 @@
+---
+title: Supported Agents
+description: What bohay supports per agent — live status, session resume, and hooks.
+---
+
+| Agent | Live status | Session resume | Hook (precise events) |
+|---|:---:|:---:|:---:|
+| Claude Code | ✓ | ✓ | ✓ |
+| GitHub Copilot CLI | ✓ | ✓ | ✓ |
+| Codex | ✓ | ✓ | ✓ |
+| opencode | ✓ | ✓ | ✓ |
+| Cursor | ✓ | resume command | — |
+| Gemini | ✓ | — | — |
+| Aider | ✓ | — | — |
+| Amp | ✓ | — | — |
+| Droid | ✓ | — | — |
+
+- **Live status** (blocked/working/done/idle) is screen-based and needs no
+  setup — it works for anything bohay recognizes on screen.
+- **Session resume** discovers the agent's latest session from its own on-disk
+  store, keyed by the pane's folder, and runs the agent's resume command on
+  restore.
+- **Hook** — `bohay integration install <agent>` — makes the agent report its
+  exact session id and lifecycle events. Removal is surgical:
+  `bohay integration uninstall <agent>` touches only bohay's own entry.
+
+Missing your agent? Detection is a small allowlist —
+[open an issue](https://github.com/RizRiyz/bohay/issues) or a PR.

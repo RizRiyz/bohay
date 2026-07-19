@@ -1,0 +1,80 @@
+---
+title: Your First Session
+description: A five-minute tour — split panes, run an agent, detach, come back to everything still running.
+---
+
+This is the whole bohay experience in five minutes. You'll open a project,
+run an agent next to a shell, watch its status live, detach — and come back to
+find everything (including the agent's conversation) exactly where you left it.
+
+## 1. Launch in a project
+
+```sh
+cd ~/code/my-project
+bohay
+```
+
+The window has three areas: the **sidebar** (your workspaces and a live AGENTS
+list), the **tab bar**, and the **pane area** with a shell already running in
+your project folder.
+
+Running `bohay` in a different folder later adds that folder as another
+workspace in the same session — one bohay, all your projects.
+
+## 2. Split and run an agent
+
+Press `Ctrl+Space` then `v` to split side-by-side (or `s` for stacked — or just
+use the mouse). In one pane, start your agent:
+
+```sh
+claude        # or copilot, codex, opencode, aider…
+```
+
+Watch the sidebar: the pane appears in **AGENTS** with a live state —
+
+| State | Meaning |
+|---|---|
+| 🟠 working | producing output right now |
+| 🔴 blocked | waiting on you (a permission prompt is on screen) |
+| 🟢 done | finished while you weren't looking |
+| idle | quiet |
+
+Click any agent row to jump to its pane. Enable desktop notifications in
+**Settings → Notifications** to get pinged (silently) the moment an agent
+blocks or finishes.
+
+## 3. Move around
+
+Everything is mouse-first: click panes to focus, drag borders to resize, click
+tabs and sidebar rows, scroll with the wheel. The keyboard mirror: hold
+`Ctrl+Space`, then arrows/`hjkl` to focus, `c` for a new tab, `z` to zoom a
+pane, `?` for the full cheat-sheet.
+
+Scroll an agent's history with two-finger scroll, or press `Shift+↑` for
+[scroll mode](/docs/guides/scrollback/) — `1`–`9` jump through history, `q`
+snaps back to live.
+
+## 4. Detach — this is the magic
+
+Press `Ctrl+Space` then `q`. The client exits, **but nothing stops**: your
+panes, shells, and agents keep running in the background server. Close the
+terminal app entirely. Go make coffee.
+
+```sh
+bohay    # …and everything is exactly where you left it
+```
+
+## 5. Survive a real restart
+
+Even if the server itself stops (a reboot, `bohay server stop`), your session
+snapshot is saved continuously. The next `bohay` restores your workspaces,
+tabs, layouts — and **resumes each agent's own conversation** via its native
+session store. A Claude Code pane comes back *as the same Claude Code
+conversation*, no `--resume` flags to remember.
+
+## Where next
+
+- [Core Concepts](/docs/getting-started/concepts/) — the 2-minute mental model
+- [Working with Agents](/docs/guides/agents/) — states, resume, integrations
+- [Multi-Agent Orchestration](/docs/guides/orchestration/) — several agents,
+  one repo, zero conflicts

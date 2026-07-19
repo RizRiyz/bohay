@@ -1,0 +1,296 @@
+/* bohay brand for Starlight — the app's `noir` palette (src/ui/theme.rs):
+   fluo-green accent #c6ff1a on near-black surfaces. Dark is the identity;
+   light mode gets the darkened green the TUI's light theme uses. */
+
+/* ── palette ─────────────────────────────────────────────────────────── */
+
+:root:root {
+  --sl-color-accent-low: #2a3a0c;
+  --sl-color-accent: #a8d916;
+  --sl-color-accent-high: #c6ff1a; /* stabilo / fluo green */
+
+  --sl-color-white: #eceef2;
+  --sl-color-gray-1: #b6b6c0;
+  --sl-color-gray-2: #93939f;
+  --sl-color-gray-3: #686873;
+  --sl-color-gray-4: #4a4a54;
+  --sl-color-gray-5: #23232b;
+  --sl-color-gray-6: #16161c;
+  --sl-color-black: #0b0b0f;
+
+  --sl-color-bg-nav: rgb(11 11 15 / 0.85);
+  --sl-color-bg-sidebar: #0e0e13;
+  --sl-color-hairline: #22222a;
+  --sl-color-hairline-shade: #1b1b22;
+
+  --sl-font: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --bh-glow: rgb(198 255 26 / 0.07);
+}
+
+:root:root[data-theme='light'] {
+  --sl-color-accent-low: #e6f3d8;
+  --sl-color-accent: #40a02b;
+  --sl-color-accent-high: #2d7a1e;
+  --sl-color-white: #17171c;
+  --sl-color-gray-1: #2c2c33;
+  --sl-color-gray-2: #4a4a54;
+  --sl-color-gray-3: #686873;
+  --sl-color-gray-4: #a2a2ac;
+  --sl-color-gray-5: #dfe2e8;
+  --sl-color-gray-6: #f2f4f7;
+  --sl-color-black: #ffffff;
+  --sl-color-bg-nav: rgb(255 255 255 / 0.85);
+  --sl-color-bg-sidebar: #f7f8fa;
+  --sl-color-hairline: #e4e6eb;
+  --sl-color-hairline-shade: #eceef2;
+  --bh-glow: rgb(64 160 43 / 0.05);
+}
+
+/* ── layout: wider content, slimmer right TOC ────────────────────────── */
+
+/* Starlight defaults the article to 45rem and lets the "On this page" column
+   absorb ALL the leftover width (its width is computed from the remainder).
+   Give the words the room instead: a much wider measure, a slightly slimmer
+   nav sidebar, and a minimal fixed-width TOC rail. */
+:root:root {
+  --sl-content-width: 56rem;
+  --sl-sidebar-width: 16.5rem;
+}
+@media (min-width: 72rem) {
+  body .right-sidebar-container,
+  body .right-sidebar {
+    width: 10.5rem;
+  }
+  body .right-sidebar-panel {
+    padding-inline: 0.75rem;
+  }
+  body .right-sidebar-panel a {
+    font-size: 0.76rem;
+    line-height: 1.5;
+  }
+  body .right-sidebar-panel h2 {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--sl-color-gray-3);
+  }
+}
+
+/* ── global type ─────────────────────────────────────────────────────── */
+
+:root:root {
+  --sl-text-base: 1rem;
+  --sl-line-height: 1.72;
+}
+.sl-markdown-content {
+  font-size: 0.975rem;
+}
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3 {
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+.sl-markdown-content h2 {
+  margin-top: 2.6rem;
+  padding-top: 1.6rem;
+  border-top: 1px solid var(--sl-color-hairline-shade);
+}
+.sl-markdown-content h2:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* Page title gets a subtle green underline flourish */
+h1[id='_top'] {
+  position: relative;
+  padding-bottom: 0.9rem;
+}
+h1[id='_top']::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 3.5rem;
+  height: 3px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--sl-color-accent-high), transparent);
+}
+
+/* ── top nav: blur + hairline ────────────────────────────────────────── */
+
+header.header {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+.site-title {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+/* ── sidebar: quiet, rounded, green current-page ─────────────────────── */
+
+.sidebar-pane {
+  border-inline-end: 1px solid var(--sl-color-hairline-shade);
+}
+#starlight__sidebar .top-level > li + li {
+  margin-top: 0.15rem;
+}
+.sidebar-content .group-label > .large {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--sl-color-gray-3);
+}
+.sidebar-content a {
+  border-radius: 0.45rem;
+  font-size: 0.9rem;
+  padding-block: 0.28em;
+  transition: color 0.12s, background 0.12s;
+}
+.sidebar-content a:hover {
+  color: var(--sl-color-white);
+  background: var(--sl-color-gray-6);
+}
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover {
+  color: var(--sl-color-accent-high);
+  background: color-mix(in srgb, var(--sl-color-accent-high) 9%, transparent);
+  font-weight: 600;
+}
+
+/* ── right TOC ───────────────────────────────────────────────────────── */
+
+starlight-toc a[aria-current='true'] {
+  color: var(--sl-color-accent-high);
+}
+
+/* ── content furniture ───────────────────────────────────────────────── */
+
+/* Code frames: pane-colored, rounder, hairline */
+.expressive-code .frame {
+  --ec-brdRad: 0.65rem;
+  box-shadow: 0 4px 24px rgb(0 0 0 / 0.25);
+}
+:root[data-theme='dark'] .expressive-code .frame pre,
+:root:not([data-theme='light']) .expressive-code .frame pre {
+  background: #111116;
+  border-color: #22222a;
+}
+
+/* Inline code: chip-like */
+.sl-markdown-content code:not(:where(.expressive-code *)) {
+  border-radius: 0.35rem;
+  padding: 0.12em 0.4em;
+  background: var(--sl-color-gray-6);
+  border: 1px solid var(--sl-color-hairline-shade);
+  font-size: 0.85em;
+}
+
+/* Tables: card-like, striped, no harsh grid */
+.sl-markdown-content table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.65rem;
+  overflow: hidden;
+  font-size: 0.92rem;
+}
+.sl-markdown-content table :is(th, td) {
+  border: 0;
+  padding: 0.6rem 0.9rem;
+}
+.sl-markdown-content thead th {
+  background: var(--sl-color-gray-6);
+  border-bottom: 1px solid var(--sl-color-hairline);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--sl-color-gray-2);
+}
+.sl-markdown-content tbody tr + tr td {
+  border-top: 1px solid var(--sl-color-hairline-shade);
+}
+.sl-markdown-content tbody tr:hover td {
+  background: color-mix(in srgb, var(--sl-color-gray-6) 55%, transparent);
+}
+
+/* Asides: rounder, tinted */
+.starlight-aside {
+  border-radius: 0.65rem;
+  border-inline-start-width: 3px;
+}
+.starlight-aside--tip {
+  --sl-color-asides-border: var(--sl-color-accent-high);
+  background: color-mix(in srgb, var(--sl-color-accent-high) 6%, transparent);
+}
+
+/* Cards: hover lift + green edge */
+.card {
+  border-radius: 0.8rem;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.card:hover {
+  border-color: var(--sl-color-accent);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px var(--bh-glow), 0 6px 18px rgb(0 0 0 / 0.25);
+}
+.card .title {
+  font-size: 1.02rem;
+}
+
+/* Tabs: pill selector */
+starlight-tabs .tablist-wrapper ul {
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+starlight-tabs [role='tab'] {
+  border-radius: 0.5rem 0.5rem 0 0;
+  font-size: 0.9rem;
+}
+starlight-tabs [role='tab'][aria-selected='true'] {
+  color: var(--sl-color-accent-high);
+  border-color: var(--sl-color-accent-high);
+  font-weight: 600;
+}
+
+/* Pagination links (prev/next): rounded cards */
+.pagination-links a {
+  border-radius: 0.8rem;
+  transition: border-color 0.15s;
+}
+.pagination-links a:hover {
+  border-color: var(--sl-color-accent);
+}
+
+/* Search button: pill */
+button[data-open-modal] {
+  border-radius: 999px;
+  background: var(--sl-color-gray-6);
+  border-color: var(--sl-color-hairline);
+}
+
+/* Content images (screenshots): framed */
+.sl-markdown-content img {
+  border-radius: 0.7rem;
+  border: 1px solid var(--sl-color-hairline);
+}
+
+/* Scrollbars that match (WebKit) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--sl-color-gray-5);
+  border-radius: 999px;
+  border: 2px solid var(--sl-color-black);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--sl-color-gray-4);
+}

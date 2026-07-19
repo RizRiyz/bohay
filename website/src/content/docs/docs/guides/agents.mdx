@@ -1,0 +1,97 @@
+---
+title: Working with Agents
+description: Live status, notifications, zero-config session resume, and the optional integration hook.
+---
+
+bohay treats your AI agents as first-class citizens of the terminal: it knows
+which panes run agents, what state each is in, and how to bring a conversation
+back after a restart — all without wrapping or modifying the agents themselves.
+
+## The AGENTS sidebar
+
+Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
+Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a live state:
+
+| State | Meaning | How it's detected |
+|---|---|---|
+| 🔴 **blocked** | waiting on you — approve/deny is on screen | a permission prompt is visible |
+| 🟠 **working** | producing output | recent terminal activity |
+| 🟢 **done** | finished while unfocused | sustained quiet after working |
+| **idle** | quiet, nothing pending | no recent activity |
+
+Click a row to jump to that agent's pane — from anywhere, across workspaces.
+
+States are **debounced**: an agent that pauses mid-turn (thinking, tool calls,
+API latency) holds at *working* instead of flickering. You get one clean
+*working → done* per turn, not a dozen flaps.
+
+The **All / Active** toggle in the header switches between live agents only
+(default) and the full resumable history.
+
+## Notifications
+
+Enable **Settings → Notifications** to get a desktop notification when an agent
+**blocks** or **finishes** — silently (no terminal bell, ever). Each pane rings
+at most once until you've actually looked at it, so a chatty agent can't spam
+you.
+
+## Session resume — the flagship
+
+bohay reopens each agent's **own conversation** after a restart, with zero
+configuration. It discovers the agent's most recent session from the agent's
+native on-disk store, keyed to the pane's folder, and runs the right resume
+command for you:
+
+| Agent | Resumes via |
+|---|---|
+| Claude Code | its project transcript store |
+| GitHub Copilot CLI | its session-state store |
+| Codex | its rollout files |
+| opencode | its session storage |
+| Cursor | resume command (when the session id is known) |
+
+You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
+(toggle *All*): click one to reopen it into a new pane — even sessions from
+before you installed bohay. The ✕ hides an entry from the list; it never
+touches the agent's stored session.
+
+## Precise events: the integration hook
+
+Screen-based detection needs no setup and works for everything. The optional
+**hook** adds precision — the agent itself reports its exact session id and
+lifecycle events (permission prompt raised, turn ended) into bohay:
+
+```sh
+bohay integration install claude    # or: copilot · codex · opencode
+```
+
+or toggle it in **Settings → Integrations**. What it does per agent:
+
+- **claude / copilot / codex** — registers a small session-start hook script in
+  the agent's own settings file.
+- **opencode** — installs a tiny plugin file.
+
+Uninstalling (`bohay integration uninstall <agent>`, or the same Settings
+toggle) surgically removes **only bohay's hook entry** — your other settings
+and the agent installation itself are never touched.
+
+:::note
+The hook powers the richer per-agent detail in the
+[macOS notch companion](https://github.com/RizRiyz/bohay#the-macos-notch-companion)
+too — permission cards you can approve from the notch, exact turn boundaries.
+:::
+
+## Agents can drive bohay
+
+Inside every pane, bohay injects `$BOHAY_PANE_ID` and `$BOHAY_SOCKET_PATH`, so
+the agent *in* the pane can call the same API you do:
+
+```sh
+bohay pane status          # my own status
+bohay wait output 7 --match "tests passed" --timeout 300
+bohay wait agent-status 7 --status done
+```
+
+See [Scripting bohay](/docs/guides/scripting/) for the patterns, and
+[Multi-Agent Orchestration](/docs/guides/orchestration/) for running a whole
+team.

@@ -1,0 +1,37 @@
+---
+title: Architecture
+description: Why bohay is fast and why sessions survive — the server/client split, one event loop, and frame diffs.
+---
+
+Three design decisions explain most of bohay's behavior.
+
+## A headless server, a thin client
+
+The **server** owns everything: panes (real PTYs), the layout, agent
+detection, the session snapshot. It renders the whole UI into an off-screen
+buffer. The **client** is nearly stateless — it forwards your input and paints
+frames. That split is why sessions survive: the thing you close (the client)
+was never the thing that mattered.
+
+## One event loop, pure state
+
+All state mutation happens on a single thread, driven by one event loop; slow
+work (git fetches, session-store scans, quality gates) runs on worker threads
+and posts results back as events. Single-writer state is why orchestration's
+task claims and path leases are race-free *by construction* — no locks to get
+wrong.
+
+## Frames as diffs
+
+The server doesn't resend the screen; it sends only the cells that changed,
+coalesced into same-style runs. A keystroke costs ~22 bytes on the wire, a
+full 40-character line ~100 bytes. This is what makes
+[remote attach](/docs/guides/remote/) over plain SSH feel local, and keeps the
+local render path around a millisecond per frame.
+
+## And the numbers
+
+Pure Rust, a single ~3 MB binary, single-digit-MB resident memory even with
+panes full of scrollback, zero idle redraws (an idle session draws nothing).
+Performance is treated as a feature with a budget — changes that would make
+the hot path slower don't ship.

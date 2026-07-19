@@ -1,0 +1,116 @@
+---
+title: CLI Commands
+description: Every bohay command — generated from `bohay help` and drift-checked in CI.
+---
+
+:::note[Source of truth]
+The binary is authoritative: **`bohay help`** always matches your installed
+version. This page carries the same text **verbatim** — a test in bohay's CI
+fails if they ever drift apart.
+:::
+
+```txt
+bohay — terminal workspace manager for AI coding agents
+
+usage: bohay <command> [args]
+
+  (no args)            launch / attach the TUI
+  help                 show this help
+  doctor               check optional external tools (git, gh, …)
+  ping                 check the server
+
+workspaces:
+  workspace list             list workspaces
+  workspace new              create a workspace in the current directory
+  workspace open <path>      open <path> as a workspace (or focus it if already open)
+  workspace focus <i>        focus workspace i (0-based)
+  workspace close [<i>]      close a workspace (default: active)
+
+tabs:
+  tab list                   list tabs in the current workspace
+  tab new                    new tab
+  tab focus <n>              focus tab n (1-based)
+  tab close [<n>]            close a tab (default: active)
+
+panes / agents:
+  pane list                  list panes in the current tab
+  pane split [<id>] [--down] split a pane (default: side by side)
+  pane focus <id>            focus a pane (jumps to its workspace/tab)
+  pane run [<id>] <cmd...>   run a command in a pane
+  pane send [<id>] <text>    send raw text to a pane
+  pane read [<id>]           print a pane's recent output
+  pane status [<id>]         print a pane's agent status (any workspace)
+  pane close [<id>]          close a pane
+  agent list                 list every agent across all workspaces/tabs
+  agent sessions             list resumable sessions found on disk
+  agent resume <id>          reopen a resumable session into a pane
+  wait output <id> --match <text> [--timeout <s>]    block until output appears
+  wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
+  attach <id>                open the TUI into a single fullscreen pane
+
+appearance:
+  ui sidebar --width <n>     set the sidebar width (columns)
+  ui sidebar --hide|--show   toggle the sidebar
+
+modules (extensions):
+  module search [<query>]    find modules published to the `bohay-module` GitHub topic
+  module list                list installed modules
+  module info <id>           show a module's actions / panes / events / source
+  module link <path>         register a local module dir (--disabled to skip enabling)
+  module install <owner>/<repo>[/sub] [--ref REF] [--yes]   install from GitHub
+  module unlink <id>         remove a module from the registry
+  module uninstall <id>      unlink + delete a git-installed module's checkout
+  module enable <id> | disable <id>
+  module actions             list every action across modules
+  module run <id> <action>   invoke a module action (captures + logs output)
+  module pane open <id> <entrypoint> [--placement split|overlay|tab]
+  module pane focus <pane> | close <pane>
+  module log [<id>]          tail module command logs (--limit N)
+  module config-dir <id>     print/create a module's config dir
+
+git:
+  git status                 branch, ahead/behind, working tree of the current workspace
+  git branches               local branches with tracking
+  git log [--limit N]        recent commits
+  git open [<workspace>]     open the git tab for a workspace
+
+worktrees:
+  worktree list              list the current repo's worktrees
+  worktree create <branch>   create a worktree + workspace for <branch>
+  worktree open <path>       open an existing worktree as a workspace
+  worktree remove <path>     remove a worktree (its branch is kept)
+
+orchestration (multiple agents, one project — docs/22):
+  task add "<title>" [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
+  task list                  list all tasks + their status/assignee
+  task get <id>              show one task
+  task claim <id>            claim a task for this pane (deps must be done)
+  task next [--start] [--agent <cmd>]   claim the next ready task (--start spawns
+                             an isolated worker); for an agent loop draining the queue
+  task start <id> [--branch <b>] [--agent <cmd>]   spawn an isolated worker:
+                             a git worktree + pane, auto-claimed and path-leased
+  task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
+  task update <id> [--status <s>] [--output <o>] [--note <n>]
+  task done <id>             mark done + release its leases
+  task merge <id>            integrate the task's branch into bohay/integration
+                             (isolated worktree; conflicts block the task)
+  task release <id>          return a claimed task to the queue
+  lease acquire <glob>... --task <id>   reserve file paths (denied if they overlap)
+  lease release <id>         release a lease
+  lease list                 list active path leases
+
+events:
+  events                     stream live status changes
+
+remote:
+  --remote <host> [ssh args] attach to a bohay session on <host> over plain ssh
+
+server:
+  server status              is the server running, and what version
+  server start               start the background server if it isn't up
+  server stop                stop the server (and all panes)
+  server restart             stop + start (load a newly-installed binary)
+  integration install|uninstall <claude|copilot|codex|opencode>
+                             add/remove bohay's session-resume hook (uninstall
+                             removes only bohay's hook, never the agent)
+```

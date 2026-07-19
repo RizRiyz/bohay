@@ -1,0 +1,93 @@
+---
+title: Installation
+description: Install bohay on macOS, Linux, or Windows — and keep it up to date.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+bohay ships as a **single static binary** (~3 MB) with no runtime dependencies.
+Pick whichever channel you prefer:
+
+<Tabs syncKey="install">
+  <TabItem label="macOS / Linux">
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/RizRiyz/bohay/main/install.sh | sh
+    ```
+    Downloads the right prebuilt binary for your OS/arch from GitHub releases and
+    puts it on your `PATH` (`/usr/local/bin` or `~/.local/bin`). Prebuilt macOS
+    binaries are **Apple silicon**; on an Intel mac use the Cargo tab.
+  </TabItem>
+  <TabItem label="Homebrew">
+    ```sh
+    brew install RizRiyz/bohay/bohay
+    ```
+    Builds from the release source. Upgrading later: `brew upgrade bohay`.
+  </TabItem>
+  <TabItem label="Cargo">
+    ```sh
+    cargo install bohay
+    ```
+    Works on any platform with Rust ≥ 1.82 — pure Rust, no C toolchain needed.
+  </TabItem>
+  <TabItem label="Windows">
+    ```powershell
+    irm https://raw.githubusercontent.com/RizRiyz/bohay/main/install.ps1 | iex
+    ```
+    Or download the `…-x86_64-pc-windows-msvc.zip` from the
+    [releases page](https://github.com/RizRiyz/bohay/releases) and put
+    `bohay.exe` on your `PATH`. Run bohay inside **Windows Terminal**. Live
+    cwd tracking and the shell integration hook aren't available on Windows,
+    but agent session resume still works.
+  </TabItem>
+</Tabs>
+
+## Check your setup
+
+```sh
+bohay doctor
+```
+
+`doctor` probes the optional tools bohay integrates with and tells you what each
+unlocks:
+
+| Tool | Unlocks |
+|---|---|
+| `git` | the git tab · worktrees · orchestration workers |
+| `gh` (authenticated) | PRs, issues, and PR detail in the git tab |
+| `ssh` | remote sessions (`bohay --remote host`) |
+
+None are required for the core multiplexer — panes, tabs, agents, and resume all
+work without them.
+
+## The optional agent hook
+
+Live agent status and session resume work with **zero setup**. For *precise*
+session ids and lifecycle events (used by notifications and the macOS notch
+companion), install the integration hook for your agent:
+
+```sh
+bohay integration install claude     # or: copilot · codex · opencode
+```
+
+Also available from **Settings → Integrations** inside bohay.
+`bohay integration uninstall <agent>` removes only bohay's hook — it never
+touches the agent itself.
+
+## Upgrading
+
+Install the new version through the same channel, then reload the running
+server:
+
+```sh
+bohay server restart   # your session is saved and restored
+```
+
+bohay warns you on attach if the running server is older than the binary you
+just installed — an upgrade never silently half-applies.
+
+## Where bohay keeps its state
+
+Everything lives in **`~/.bohay/`** (override with `$BOHAY_HOME`): your
+[configuration](/docs/reference/configuration/), the auto-saved session
+snapshot, and the orchestration ledger. The directory is created owner-only
+(`0700`).

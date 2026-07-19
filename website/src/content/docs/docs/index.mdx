@@ -1,0 +1,78 @@
+---
+title: Quickstart
+description: Install bohay and run your first multi-agent session in two minutes.
+---
+
+import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+**bohay** is a terminal workspace for AI coding agents: split panes, a live
+sidebar of every agent's state, sessions that survive closing the terminal, and
+tools to run many agents on one project without conflicts.
+
+## Install
+
+<Tabs syncKey="install">
+  <TabItem label="macOS / Linux">
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/RizRiyz/bohay/main/install.sh | sh
+    ```
+    Prebuilt binaries for Apple silicon and Linux (x86_64 / arm64).
+  </TabItem>
+  <TabItem label="Homebrew">
+    ```sh
+    brew install RizRiyz/bohay/bohay
+    ```
+  </TabItem>
+  <TabItem label="Cargo">
+    ```sh
+    cargo install bohay
+    ```
+    Any platform with Rust ≥ 1.82 — including Intel macs.
+  </TabItem>
+  <TabItem label="Windows">
+    ```powershell
+    irm https://raw.githubusercontent.com/RizRiyz/bohay/main/install.ps1 | iex
+    ```
+    Use bohay inside **Windows Terminal**.
+  </TabItem>
+</Tabs>
+
+## Run it
+
+```sh
+bohay          # launch — or reattach to — your session
+bohay doctor   # check your setup: git, gh, ssh, and what each unlocks
+```
+
+That's genuinely it. `bohay` starts a background server that owns your panes and
+attaches a lightweight client — close the terminal any time and everything keeps
+running. Start your agents in panes like you normally would; bohay recognizes
+them automatically and shows their live state in the sidebar.
+
+:::caution[macOS: free the prefix key]
+macOS reserves `Ctrl+Space` for input-source switching, which blocks bohay's
+prefix. Untick *Select the previous input source* under **System Settings →
+Keyboard → Keyboard Shortcuts… → Input Sources**. Everything is also fully
+mouse-driven, so nothing else is blocked in the meantime.
+:::
+
+## Next steps
+
+<CardGrid>
+  <Card title="Your first session" icon="rocket">
+    A five-minute tour: split panes, run an agent, detach, come back.
+    [Take the tour →](/docs/getting-started/first-session/)
+  </Card>
+  <Card title="Work with agents" icon="seti:powershell">
+    Live states, notifications, zero-config session resume, integrations.
+    [Agent guide →](/docs/guides/agents/)
+  </Card>
+  <Card title="Run agents in parallel" icon="puzzle">
+    The orchestration board: isolated worktrees, path leases, merge gates.
+    [Orchestration →](/docs/guides/orchestration/)
+  </Card>
+  <Card title="Script everything" icon="setting">
+    Every UI action is a CLI command over a local socket.
+    [Scripting →](/docs/guides/scripting/)
+  </Card>
+</CardGrid>

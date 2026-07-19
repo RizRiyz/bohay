@@ -1,0 +1,24 @@
+---
+title: Worktrees
+description: Work on several branches of one repo at once — each worktree is its own workspace.
+---
+
+Git worktrees let one repository have several branches checked out in separate
+folders. bohay makes them **first-class workspaces**.
+
+## Create one
+
+- **`Ctrl+Space G`** — type a branch name, and bohay runs `git worktree add`
+  under `~/.bohay/worktrees/<repo>/<branch>` and opens it as a workspace.
+- **The folder picker** (`Ctrl+Space N`) — when browsing a git repo, an *Open
+  with new worktree* row (or the `w` key) does the same for that repo.
+- **CLI**: `bohay worktree create <branch>` · `open <path>` · `list` ·
+  `remove <path>` (the branch is kept).
+
+## Why it's great with agents
+
+Each agent works in its own worktree — its own files on disk — so two agents
+can work the same repo without any chance of stepping on each other's edits.
+The sidebar **nests worktrees under their repo**, so the grouping is always
+visible. This is also the foundation the
+[orchestration board](/docs/guides/orchestration/) builds on.

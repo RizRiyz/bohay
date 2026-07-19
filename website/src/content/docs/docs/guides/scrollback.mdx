@@ -1,0 +1,32 @@
+---
+title: Scrollback & Copy
+description: Scroll any pane's history — wheel, trackpad, or keyboard scroll mode — and copy text with a drag.
+---
+
+## Scrolling
+
+**Mouse/trackpad:** just scroll over a pane. Full-screen apps (vim, TUI agents
+that take the whole pane) keep their own scrolling — bohay forwards the wheel
+to them; regular panes scroll bohay's history (5 000 lines per pane).
+
+**Keyboard — scroll mode:** press **`Shift+↑`** (no prefix needed — it works
+even where macOS eats `Ctrl+Space`). The status bar switches to SCROLL and
+plain keys navigate without reaching the program in the pane:
+
+| Key | Action |
+|---|---|
+| `1`–`9` | jump through history — 1 = oldest, 9 = newest |
+| `j` / `k` (or `↓`/`↑`) | line down / up |
+| `f` / `b` (or Space/PageDn/PageUp) | page down / up |
+| `g` / `G` | top of history / live bottom |
+| `q`, `Esc`, `0` — or just typing | back to live |
+
+While scrolled, a **`↑N` badge** at the pane's top-right shows how many lines
+up you are, and anything you type snaps back to live first — you always see
+what you're typing.
+
+## Copying
+
+Drag across a pane to select; release **auto-copies** and flashes a *Copied*
+toast. bohay writes both your native OS clipboard (`pbcopy` / `wl-copy` /
+`xclip` / `clip`) and OSC 52 — so it works locally *and* over SSH.

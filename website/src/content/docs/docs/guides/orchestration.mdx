@@ -1,0 +1,127 @@
+---
+title: Multi-Agent Orchestration
+description: Run multiple AI agents on one project in parallel — isolated worktrees, path leases, quality gates, and safe merging.
+---
+
+Run **multiple AI agents on one project in parallel**, without them stepping on
+each other. bohay coordinates the team through a shared **task board**: every
+worker runs in its own isolated **git worktree**, **path leases** stop
+overlapping edits from even being assigned, **quality gates** verify work
+before it counts, and a **merge gate** integrates finished branches without
+ever touching your checkout.
+
+:::tip[TL;DR]
+Open the board (`Ctrl+Space o`), press `a` to add a task, `s` to start an
+isolated worker for it, `d` to finish (runs its quality gate), `m` to merge.
+:::
+
+## The concepts
+
+| Concept | What it is |
+|---|---|
+| **Task** | A unit of work: title, the file globs it will touch, dependencies, and an optional quality-gate command. Gets an id like `t1`. |
+| **Lease** | A reservation on file paths. Two workers can't hold overlapping globs, so conflicting work can't be assigned. |
+| **Worker** | A pane running an agent in a dedicated git worktree on its own branch (`bohay/<id>`) — physical isolation; two workers literally edit different files on disk. |
+| **Quality gate** | A command (e.g. `cargo test`) that runs when a task is marked done. It must pass before the task can merge. |
+| **Merge gate** | Integrates a finished branch into `bohay/integration` inside a dedicated worktree — never your working checkout. A conflict blocks the task instead of corrupting anything. |
+
+Task lifecycle: `queued` → `claimed`/`running` → `done` (gate passed) or
+`review` (gate failed — fix and retry) → merged, or `blocked` on a merge
+conflict. The ledger lives in `~/.bohay/orch.json`, separate from your session.
+
+## The board
+
+Open with **`Ctrl+Space o`** — the `◇ orch` tab. It shows every task (status ·
+id · title · dependencies · worker pane and branch once started) and the active
+leases, live. Navigate with `j`/`k`, the wheel, or click a row.
+
+| Key | Action |
+|-----|--------|
+| `a` | **new task** — a Title / Paths / Deps / Gate form (`⇥` between fields, `⏎` creates) |
+| `s` | **start** an isolated worktree worker for the selected task |
+| `d` | **done** — runs its quality gate (pass → done, fail → held at review) |
+| `m` | **merge** into `bohay/integration` |
+| `⏎` | **jump** to its worker pane |
+| `x` | **release** it back to the queue |
+| `q` | close the board |
+
+## A worked example
+
+Say you want an auth module and an API layer that depends on it:
+
+1. `a` → Title `OAuth token module`, Paths `src/auth/**`, Gate
+   `cargo test auth`, `⏎`.
+2. `a` → Title `API layer`, Paths `src/api/**`, Deps `t1`, `⏎`.
+3. Select `t1`, press `s` — bohay creates a worktree on branch `bohay/t1`,
+   opens a pane in it, and takes you there. Run your agent in that pane (or
+   pass `--agent` via the CLI to launch one automatically).
+4. When the work looks finished: back to the board, `d`. The gate
+   (`cargo test auth`) runs in the background — pass and `t1` is **done**;
+   fail and it's held at **review** with the output saved on the task.
+5. `t2` is now claimable (its dependency is done) — select it, `s`, repeat.
+6. Select a done task, `m` — the branch merges into `bohay/integration` in an
+   isolated worktree. A conflict marks the task **blocked** rather than
+   half-merging anything.
+
+Your own checkout on `main` was never touched at any point.
+
+## Driving it from the CLI (and from agents)
+
+Everything the board does is a command — which is how an **orchestrator agent**
+can run the whole loop itself:
+
+```sh
+# create + inspect
+bohay task add "OAuth module" --paths "src/auth/**" --gate "cargo test auth"
+bohay task list · get t1 · update t1 --status running --note "learning: …"
+
+# start workers (parallel, isolated)
+bohay task start t1 --agent "claude"
+bohay task next --start --agent "claude"   # claim + start the next ready task
+
+# finish + integrate
+bohay task heartbeat t1 --context 0.6      # context gate: >0.85 blocks `done`
+bohay task done t1                          # runs the quality gate
+bohay task merge t1
+
+# leases (usually automatic via task start)
+bohay lease acquire "src/auth/**" --task t1
+
+# react to everything, live (newline-delimited JSON)
+bohay events
+```
+
+Inside a bohay pane, commands default to the calling pane via
+`$BOHAY_PANE_ID` — so a worker agent can `bohay task heartbeat` itself.
+
+Events on the bus: `task.added` · `task.claimed` · `task.started` ·
+`task.ready` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
+`task.needs_compaction` · `task.done` · `task.merged` · `task.merge_conflict` ·
+`task.released` · `lease.acquired` · `lease.released`.
+
+## The safety model
+
+- **Nothing spawns unattended.** Workers start only when you press `s` or run
+  `task start`.
+- **Your checkout is never touched.** Workers edit in their own worktrees;
+  merges happen in a dedicated integration worktree.
+- **Conflicts can't corrupt.** The merge gate aborts cleanly on conflict and
+  surfaces it (task → `blocked`).
+- **Two layers of isolation.** Leases prevent overlapping work from being
+  *assigned*; worktrees mean even a misbehaving agent's clash only surfaces —
+  safely — at merge time.
+- **A context gate.** Workers report context usage via `heartbeat`; above 85%,
+  `done` is blocked until the agent compacts — no half-remembered finishes.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `s` → *not a git repo* | The board needs a workspace that's a git repository (workers are worktrees). |
+| `s` → *deps not done* | A dependency task isn't `done` yet. |
+| `d` → *needs compaction* | The worker's context is over 85% — compact (e.g. `/compact`), then retry. |
+| Stuck at `review` | The gate failed — `bohay task get <id>` shows the output; fix and `d` again. |
+| `blocked` after `m` | Merge conflict — resolve in the task's worktree, then `m` again. |
+
+Clean up a finished worker with `bohay worktree remove <path>` (the branch is
+kept).

@@ -1,0 +1,63 @@
+---
+title: Core Concepts
+description: The bohay mental model in two minutes — server and client, workspaces, tabs, panes, and the prefix key.
+---
+
+Five ideas explain everything bohay does.
+
+## 1. A server owns your session; a client shows it
+
+When you run `bohay`, two things happen: a background **server** starts (once)
+and owns every pane, shell, and agent — and a thin **client** attaches to
+display it. The client is disposable; the server is durable.
+
+- Close the terminal → the client dies, **the session lives**.
+- `bohay` again → a new client attaches to the same session.
+- `bohay server stop` → actually end everything (the session snapshot is kept).
+- `bohay server status` → what's running, and whether a newer binary is
+  waiting for a `bohay server restart`.
+
+## 2. Workspace → Tab → Pane
+
+```
+Session
+└── Workspace   one per project folder (fixed cwd, shows its git branch)
+    └── Tab     a layout of panes (or a special tab: git, orchestration)
+        └── Pane   a real terminal running a shell or an agent
+```
+
+- **Workspaces** are the sidebar's top list. `Ctrl+Space N` opens the folder
+  picker; running `bohay` inside a folder adds it automatically. A workspace's
+  cwd is fixed at creation — `cd`-ing inside a pane never moves it.
+- **Tabs** hold split layouts. Two special tabs exist: the
+  [git tab](/docs/guides/git/) and the
+  [orchestration board](/docs/guides/orchestration/).
+- **Panes** are real terminals. Split with `v`/`s`, close with `x`, zoom with
+  `z`, resize by dragging borders.
+
+## 3. The prefix key
+
+bohay stays out of your keystrokes: everything you type goes straight to the
+pane. Commands live behind one chord — press **`Ctrl+Space`**, release, then a
+key. `Ctrl+Space ?` lists everything; every binding is remappable in
+**Settings → Keys**.
+
+The two deliberate exceptions, so they work even where `Ctrl+Space` is taken:
+mouse everything, and `Shift+↑` for [scroll mode](/docs/guides/scrollback/).
+
+## 4. Agents are watched, not wrapped
+
+bohay doesn't inject itself into your agents — they run untouched in ordinary
+panes. Detection reads the screen: which agent is this, is a permission prompt
+showing (**blocked**), is output flowing (**working**), did it just go quiet
+(**done**). That's why *any* agent works with zero setup, and a
+[hook](/docs/guides/agents/#precise-events-the-integration-hook) can add
+precision where you want it.
+
+## 5. Everything is a command
+
+The UI and the CLI are the same surface: whatever you can click, `bohay <verb>`
+can do over a local socket — and agents inside panes can too (each pane gets
+`$BOHAY_PANE_ID` and the socket path injected). This is what makes
+[scripting](/docs/guides/scripting/) and
+[orchestration](/docs/guides/orchestration/) natural instead of bolted on.

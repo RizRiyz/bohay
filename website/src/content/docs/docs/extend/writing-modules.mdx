@@ -1,0 +1,217 @@
+---
+title: Writing a Module
+description: The complete guide — manifest reference, environment, context, callbacks, and distribution.
+---
+
+A **module** is the way you extend bohay. It's a plain directory with one
+manifest file (`bohay-module.toml`) that declares **commands** — argv arrays
+bohay runs as subprocesses. There's no SDK, no scripting runtime, and no
+language requirement: if it can be executed and read environment variables, it
+can be a bohay module. A command does its work by reading the injected
+`BOHAY_*` context and, when it needs to change the workspace, by calling the
+same `bohay` CLI you use by hand — **the bohay CLI is the module API**.
+
+## A module in five minutes
+
+```
+my-module/
+├── bohay-module.toml
+└── refresh.sh
+```
+
+```toml
+# bohay-module.toml
+id = "you.hello"                 # required, globally unique-ish
+name = "Hello"                   # required
+version = "0.1.0"                # required
+min_bohay_version = "0.1.0"      # required
+
+[[actions]]
+id = "refresh"                   # local id (no dots)
+title = "Say hello"
+command = ["sh", "refresh.sh"]   # argv — run without a shell
+```
+
+```sh
+#!/bin/sh
+# refresh.sh
+echo "hello from $BOHAY_MODULE_ID"
+echo "context: $BOHAY_MODULE_CONTEXT_JSON"
+```
+
+Register and run it:
+
+```sh
+bohay module link ./my-module        # → { "id": "you.hello" }
+bohay module run you.hello refresh   # → { "log_id": 1 }
+bohay module log                     # status + captured output
+```
+
+`module run` is fire-and-forget: it returns a `log_id` immediately and the
+command runs in the background; read stdout/stderr and the exit status back
+with `module log`.
+
+## The manifest
+
+### Top level
+
+| Key | Required | Notes |
+|---|:---:|---|
+| `id` | ✓ | `[a-z0-9:._-]`, ≤120 chars. Dots allowed (e.g. `you.git-status`). |
+| `name` | ✓ | Human-readable, non-empty. |
+| `version` | ✓ | Your module's version. |
+| `min_bohay_version` | ✓ | Install is refused if newer than the host. |
+| `description` | — | One-line summary. |
+| `platforms` | — | e.g. `["macos", "linux"]`; omit for all. `[]` is an error. |
+
+### `[[actions]]` — on-demand commands
+
+```toml
+[[actions]]
+id = "commit"                    # local id: [a-z0-9:_-], ≤120, NO dots
+title = "Commit staged changes"
+command = ["bun", "run", "commit.ts"]
+```
+
+Invoke with `bohay module run <module-id> <action-id>`. The qualified id is
+`{module-id}.{action-id}`.
+
+### `[[events]]` — react to lifecycle events
+
+```toml
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "notify.sh"]
+```
+
+Your command runs with `BOHAY_MODULE_EVENT` (the name) and
+`BOHAY_MODULE_EVENT_JSON` (the payload). Hookable events: `node.created` ·
+`node.closed` · `tab.created` · `tab.closed` · `pane.created` · `pane.closed`
+· `pane.agent_status_changed` (payload `{pane, status, agent}` — the
+highest-value hook: notify when `status` becomes `blocked` or `done`).
+
+### `[[panes]]` — long-lived UI in a real pane
+
+```toml
+[[panes]]
+id = "board"
+title = "Git board"
+placement = "split"              # overlay | split | tab
+command = ["bun", "run", "board.ts"]
+```
+
+Open with `bohay module pane open <module-id> board`. It becomes a real bohay
+pane (a TUI, a log tail, anything), runs in the module root with the full
+`BOHAY_*` environment, and is auto-untracked on close. A module pane that's
+open when you detach is re-opened on the next launch.
+
+### `[[build]]` — install-time setup
+
+```toml
+[[build]]
+command = ["bun", "install"]
+```
+
+Runs at git-install time with a **scrubbed environment** (no `BOHAY_*`, no
+socket access). For local `link` you run your own setup.
+
+### Validation
+
+A manifest is rejected if: any `command` is empty (or contains an empty
+string) · `min_bohay_version` is newer than the host · an id uses characters
+outside its set, or a local id contains a dot · two actions/panes share an id
+· `platforms = []`.
+
+:::note
+Commands run **without a shell** — `["git", "status"]`, not `"git status"`.
+For pipes or `$VAR`, invoke a shell explicitly:
+`["sh", "-c", "git status | head"]`.
+:::
+
+## How a command runs
+
+1. bohay builds the environment and a context snapshot of the focused
+   workspace/tab/pane.
+2. Your `command` spawns as a subprocess, **cwd = the module root**.
+3. stdout and stderr are captured (64 KiB each), the exit is recorded:
+   `running` → `succeeded` / `failed`.
+
+Caps: at most **32** module commands in flight; the **200** most recent log
+entries are kept. Commands are isolated processes — a crash or hang never
+takes down bohay.
+
+## Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `BOHAY_ENV` | Always `1` — you're running under bohay. |
+| `BOHAY_MODULE_ID` | Your module's id. |
+| `BOHAY_MODULE_ROOT` | The module directory (also the cwd). Read-only by convention. |
+| `BOHAY_MODULE_CONFIG_DIR` | Durable, user-owned config/secrets dir (created for you). |
+| `BOHAY_MODULE_STATE_DIR` | Durable state/cache dir (created for you). |
+| `BOHAY_MODULE_CONTEXT_JSON` | JSON snapshot of the focused workspace/tab/pane. |
+| `BOHAY_SOCKET_PATH` | The control socket (the CLI finds it automatically). |
+| `BOHAY_BIN_PATH` | Absolute path to the `bohay` binary — use this to call back. |
+| `BOHAY_MODULE_ACTION_ID` | The action id, for action commands. |
+
+Persist data in the **state/config dirs**, never in the module root — for
+git-installed modules it's a managed checkout.
+
+## The context blob
+
+```json
+{
+  "node": { "id": "0", "name": "sudos", "cwd": "/Users/you/code/sudos" },
+  "tab":  { "index": "1" },
+  "pane": { "id": "4", "cwd": "/Users/you/code/sudos", "agent": "claude", "status": "working" },
+  "invocation_source": "cli",
+  "correlation_id": "c7"
+}
+```
+
+`status` is `idle` / `working` / `blocked` / `done` / `unknown`. Quick `jq`
+example:
+
+```sh
+node_cwd=$(printf '%s' "$BOHAY_MODULE_CONTEXT_JSON" | jq -r .node.cwd)
+cd "$node_cwd" && git status --short
+```
+
+## Calling back into bohay
+
+```sh
+"$BOHAY_BIN_PATH" pane run "git pull"     # run a command in the focused pane
+"$BOHAY_BIN_PATH" pane split --down       # change the layout
+"$BOHAY_BIN_PATH" workspace list          # inspect (JSON to stdout)
+```
+
+Anything in `bohay help` is available. Your command reads context from the
+environment and effects change through the CLI.
+
+## Distribution & discovery
+
+Share a module as a public Git repo (one repo can hold several modules in
+subdirectories) and tag it with the **`bohay-module` GitHub topic**:
+
+```sh
+bohay module search                        # most-starred modules in the topic
+bohay module install owner/repo            # whole repo is the module
+bohay module install owner/repo/path/to    # module in a subdirectory
+bohay module install owner/repo --ref v1   # pin a branch / tag / commit
+```
+
+Install does a shallow clone, **shows every command the module declares and
+asks to proceed** (`--yes` for CI), runs `[[build]]` in a scrubbed
+environment, verifies the manifest didn't change during the build, and pins
+the checkout to the installed commit. There's intentionally **no central
+registry** — publishing is pushing a public repo.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `link` → *invalid manifest* | Check TOML syntax; every `command` must be a non-empty array of non-empty strings. |
+| Listed but `runnable: false` | Disabled, platform-gated, or a manifest load warning (see `module list`). |
+| Action *is ambiguous* | Two modules expose the id — qualify it: `module run <module-id> <action>`. |
+| No output in the log | The entry stays `running` until the command exits; output is capped at 64 KiB. |
+| Callbacks do nothing | `$BOHAY_BIN_PATH` needs the bohay server for your session to be running. |

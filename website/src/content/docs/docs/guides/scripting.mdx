@@ -1,0 +1,41 @@
+---
+title: Scripting bohay
+description: Every UI action is a CLI command over a local socket — automate your workspace, or let agents do it.
+---
+
+bohay's UI and CLI are the same surface: a local JSON socket
+(`~/.bohay/bohay.sock`). Whatever you can click, you can script.
+
+## The essentials
+
+```sh
+bohay pane split --down                # split the focused pane
+bohay pane run 7 cargo test           # run a command in pane 7
+bohay pane read 7                      # print a pane's recent output
+bohay wait output 7 --match "passed"  # block until text appears (exit 0; 2 on timeout)
+bohay wait agent-status 7 --status done --timeout 600
+bohay attach 7                         # open the TUI fullscreen into one pane
+bohay events                           # stream every status change (ND-JSON)
+```
+
+## Agents scripting bohay
+
+Every pane gets `$BOHAY_PANE_ID` and `$BOHAY_SOCKET_PATH` injected, so
+commands *inside* a pane default to that pane — an agent can split itself a
+scratch pane, run tests there, and wait on the result:
+
+```sh
+bohay pane split --down          # agent makes itself a helper pane
+bohay pane run "$id" ./repro.sh
+bohay wait output "$id" --match "done" --timeout 300
+```
+
+`wait` exit codes are script-friendly: `0` = condition met, `2` = timeout.
+
+## Watching everything
+
+`bohay events` emits newline-delimited JSON for agent status changes, task and
+lease activity, and more — ideal for a monitor loop or an orchestrator agent.
+See [orchestration](/docs/guides/orchestration/#driving-it-from-the-cli-and-from-agents)
+for the task/lease command set, and run `bohay help` for the complete
+reference.

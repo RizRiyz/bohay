@@ -1,0 +1,923 @@
+---
+// The bohay product homepage — a custom landing page, independent of the
+// Starlight docs layout (docs live under /docs/…). Dark-first, the app's own
+// fluo-green (#c6ff1a) on near-black, terminal-native aesthetic.
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
+import { Image } from 'astro:assets';
+import logo from '../assets/logo-nobg.png';
+import notch from '../assets/screenshot-bohay-notch.png';
+
+const GITHUB = 'https://github.com/RizRiyz/bohay';
+const title = 'bohay — the terminal workspace for AI coding agents';
+const description =
+  'Run Claude Code, Copilot, Codex, and opencode side by side — with a live view of what every agent is doing. Sessions survive, agents resume, and a task board runs them in parallel without conflicts.';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href="/favicon.png" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+  </head>
+  <body>
+    <nav>
+      <div class="nav-inner">
+      <a class="brand" href="/">
+        <Image src={logo} alt="" width={28} height={28} />
+        <span>bohay</span>
+      </a>
+      <div class="nav-links">
+        <a href="/docs/">Docs</a>
+        <a href="/docs/guides/orchestration/">Orchestration</a>
+        <a href={GITHUB} class="gh">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+            ><path
+              fill="currentColor"
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+            ></path></svg
+          >
+          <span id="stars">GitHub</span>
+        </a>
+      </div>
+      </div>
+    </nav>
+
+    <header class="hero">
+      <div class="glow" aria-hidden="true"></div>
+      <h1>The terminal workspace<br /><span class="accent">for AI coding agents</span></h1>
+      <p class="sub">
+        Run Claude Code, Copilot, Codex, and opencode side by side — in one
+        window, with a live view of what every agent is doing.
+      </p>
+
+      <div class="install" id="install">
+        <code>curl -fsSL https://raw.githubusercontent.com/RizRiyz/bohay/main/install.sh | sh</code>
+        <button id="copy" aria-label="Copy install command" title="Copy">⧉</button>
+      </div>
+      <p class="alt-install">
+        or <code>brew install RizRiyz/bohay/bohay</code> · <code>cargo install bohay</code> ·
+        <a href="/docs/getting-started/installation/">Windows &amp; more</a>
+      </p>
+
+      <div class="cta">
+        <a class="btn primary" href="/docs/">Get started →</a>
+        <a class="btn" href={GITHUB}>Star on GitHub</a>
+      </div>
+
+      <!-- Live, clickable simulation of the real UI — not a screenshot. -->
+      <div class="demo" id="demo">
+        <div class="demo-chrome">
+          <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
+          <span class="demo-title">bohay — sudos</span>
+          <span class="demo-hint">● live demo — click around</span>
+        </div>
+        <div class="demo-body">
+          <aside class="demo-side">
+            <div class="side-brand">
+              <Image src={logo} alt="" width={16} height={16} />
+              <span class="side-name">bohay</span>
+              <span class="side-ver">v0.7</span>
+              <button class="menu-pill" id="menu-pill" title="Settings — theme · keys · language">Menu</button>
+            </div>
+            <div class="side-label">Workspaces</div>
+            <button class="ws on" data-ws="sudos">
+              <span class="ws-arrow">▾</span> sudos <span class="branch">⎇ main</span><span class="ab">↑2</span>
+            </button>
+            <button class="ws" data-ws="webapp">
+              <span class="ws-arrow">▸</span> webapp <span class="branch">⎇ feat/ui</span>
+            </button>
+            <div class="side-label agents-label">
+              <span>Agents</span>
+              <span class="afilter">
+                <button class="fchip" data-f="all">All</button><button class="fchip on" data-f="active">Active</button>
+              </span>
+            </div>
+            <button class="agent focused" data-agent="claude">
+              <span class="dot working" id="dot-claude"></span>claude<span class="proj">sudos</span>
+            </button>
+            <button class="agent" data-agent="copilot">
+              <span class="dot blocked" id="dot-copilot"></span>copilot<span class="proj">webapp</span>
+            </button>
+            <button class="agent" data-agent="codex">
+              <span class="dot done" id="dot-codex"></span>codex<span class="proj">sudos</span>
+            </button>
+            <button class="session-row" id="session-row" hidden>
+              <span class="c-dim">↺</span> claude <span class="proj">2h ago · api</span>
+            </button>
+          </aside>
+          <div class="demo-main">
+            <div class="demo-tabs">
+              <button class="tab on" data-tab="main">1 main</button>
+              <button class="tab" data-tab="git">2 ⎇ git</button>
+              <button class="tab" data-tab="orch">3 ◇ orch</button>
+              <span class="tab plus">+</span>
+            </div>
+
+            <div class="demo-view" id="view-main">
+              <div class="demo-panes" id="ws-sudos">
+                <div class="pane focused" id="pane-left" data-agent="claude">
+                  <div class="pane-title" id="left-title"><span class="pt-dot working"></span>claude — ~/sudos</div>
+                  <div class="pane-body" id="left-body"></div>
+                </div>
+                <div class="pane" id="pane-codex" data-agent="codex">
+                  <div class="pane-title" id="codex-title"><span class="pt-dot done"></span>codex — ~/sudos</div>
+                  <div class="pane-body" id="codex-body"></div>
+                </div>
+              </div>
+              <div class="demo-panes" id="ws-webapp" hidden>
+                <div class="pane" id="pane-copilot" data-agent="copilot">
+                  <div class="pane-title" id="copilot-title"><span class="pt-dot blocked"></span>copilot — ~/webapp</div>
+                  <div class="pane-body" id="copilot-body"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="demo-view gview" id="view-git" hidden>
+              <div class="gtabs">
+                <button class="gtab on" data-g="commits">Commits</button>
+                <button class="gtab" data-g="flow">Flow</button>
+                <button class="gtab" data-g="branches">Branches</button>
+                <button class="gtab" data-g="prs">PRs</button>
+                <button class="gtab" data-g="issues">Issues</button>
+                <button class="gtab" data-g="status">Status</button>
+              </div>
+              <div class="gbody" id="gbody"></div>
+            </div>
+
+            <div class="demo-view gview" id="view-orch" hidden>
+              <div class="oheader"><span class="c-acc">◇ orch</span>&nbsp; 4 tasks <span class="sep">·</span> queued 1 <span class="sep">·</span> running 2 <span class="sep">·</span> done 1</div>
+              <div class="gbody" id="obody"></div>
+              <div class="oleases"><span class="c-acc">LEASES</span>&nbsp; L1 <span class="c-dim">pane 4</span> t2 <span class="c-acc">src/api/**</span> &nbsp; L2 <span class="c-dim">pane 5</span> t3 <span class="c-acc">docs/**</span></div>
+            </div>
+
+            <div class="demo-status">
+              <span class="pill">⌃Space</span><span class="dim"> prefix</span>
+              <span class="sep">·</span> <span id="status-note">copilot is blocked — click its pane to approve</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <section class="problem">
+      <div class="beats">
+        <span>one agent waits for permission</span>
+        <span class="dot">·</span>
+        <span>another is still thinking</span>
+        <span class="dot">·</span>
+        <span>a third finished 10 minutes ago</span>
+      </div>
+      <p>…and you're alt-tabbing between terminal windows trying to keep up.</p>
+      <p class="turn">
+        bohay puts them in <strong>one window</strong> with a
+        <strong class="accent">live status sidebar</strong> — blocked, working,
+        done — and pings you the moment one needs you.
+      </p>
+    </section>
+
+    <section class="features">
+      <h2>Everything an agent workflow needs</h2>
+      <div class="grid">
+        <a class="card" href="/docs/guides/agents/">
+          <h3>◉ Live agent sidebar</h3>
+          <p>Every agent's state at a glance — blocked · working · done · idle — with silent desktop notifications.</p>
+        </a>
+        <a class="card" href="/docs/getting-started/first-session/">
+          <h3>∞ Sessions that survive</h3>
+          <p>Close the terminal; nothing stops. Reattach and every pane and layout is exactly where you left it.</p>
+        </a>
+        <a class="card" href="/docs/guides/agents/#session-resume--the-flagship">
+          <h3>↺ Zero-config resume</h3>
+          <p>After a restart, each agent's own conversation comes back automatically. No flags to remember.</p>
+        </a>
+        <a class="card" href="/docs/guides/orchestration/">
+          <h3>◇ Orchestration</h3>
+          <p>A task board runs many agents on one repo — isolated worktrees, path leases, quality + merge gates.</p>
+        </a>
+        <a class="card" href="/docs/guides/git/">
+          <h3>⎇ Git built in</h3>
+          <p>Commits, branches, PRs, issues, and PR detail with checks — merge or approve without leaving.</p>
+        </a>
+        <a class="card" href="/docs/guides/remote/">
+          <h3>⇄ Remote over SSH</h3>
+          <p>A session on another machine, driven from your laptop. ~22 bytes per keystroke; no port forwarding.</p>
+        </a>
+      </div>
+    </section>
+
+    <section class="orch">
+      <div class="orch-text">
+        <h2>Several agents. One repo.<br /><span class="accent">Zero conflicts.</span></h2>
+        <p>
+          Add tasks with dependencies to the <code>◇ orch</code> board. Each
+          started task gets an <strong>isolated git worktree</strong> and its own
+          pane; <strong>path leases</strong> stop overlapping edits from even
+          being assigned; a <strong>quality gate</strong> (your test command)
+          must pass before a task counts as done; and finished branches merge
+          through a dedicated worktree — <strong>your checkout is never
+          touched</strong>.
+        </p>
+        <a class="btn primary" href="/docs/guides/orchestration/">Read the orchestration guide →</a>
+      </div>
+      <pre class="term" aria-hidden="true"><span class="g">◇ orch</span>  4 tasks · queued 1 · running 2 · done 1
+
+  <span class="mint">●</span> t1  done     OAuth token module      <span class="dim">gate ✓ cargo test auth</span>
+  <span class="amber">◐</span> t2  running  API layer               <span class="dim">⟶t1 · pane 4 · bohay/t2</span>
+  <span class="amber">◐</span> t3  running  Docs + examples         <span class="dim">pane 5 · bohay/t3</span>
+  <span class="dim">○</span> t4  queued   Integration tests       <span class="dim">⟶t2 t3</span>
+
+  <span class="g">LEASES</span>  L1 pane 4 t2 src/api/**   L2 pane 5 t3 docs/**</pre>
+    </section>
+
+    <section class="agents-strip">
+      <h2>Works with the agents you already use</h2>
+      <div class="chips">
+        <span class="chip on">Claude Code</span>
+        <span class="chip on">GitHub Copilot</span>
+        <span class="chip on">Codex</span>
+        <span class="chip on">opencode</span>
+        <span class="chip">Cursor</span>
+        <span class="chip">Gemini</span>
+        <span class="chip">Aider</span>
+        <span class="chip">Amp</span>
+        <span class="chip">Droid</span>
+      </div>
+      <p class="note">
+        Live status for all of them, zero setup. Highlighted agents also get
+        session resume + precise event hooks.
+        <a href="/docs/reference/agents/">Full matrix →</a>
+      </p>
+    </section>
+
+    <section class="notch">
+      <div class="notch-text">
+        <h2>Your agents, in the notch <span class="mac">macOS</span></h2>
+        <p>
+          <strong>bohay-notch</strong> mirrors every agent into a native panel
+          that drops from the MacBook notch — model, project, running cost, and
+          state. Approve a blocked agent right from the notch; click one to jump
+          to its pane.
+        </p>
+        <code class="cask">brew install --cask --no-quarantine RizRiyz/bohay/bohay-notch</code>
+      </div>
+      <div class="notch-shot">
+        <Image src={notch} alt="The bohay-notch panel dropping from the macOS notch with live agent states" widths={[600, 1200]} sizes="(max-width: 900px) 100vw, 560px" />
+      </div>
+    </section>
+
+    <section class="script">
+      <h2>What you can click, an agent can script</h2>
+      <pre class="term"><span class="dim">$</span> bohay pane run 7 cargo test         <span class="dim"># run in pane 7</span>
+<span class="dim">$</span> bohay wait output 7 --match ok      <span class="dim"># block until it appears</span>
+<span class="dim">$</span> bohay agent list                    <span class="dim"># every agent, everywhere</span>
+<span class="dim">$</span> bohay events                        <span class="dim"># live status stream (JSON)</span></pre>
+      <p>
+        Every UI action is a command over a local socket — and every pane knows
+        its own id, so agents can split, run, and wait on each other.
+        <a href="/docs/guides/scripting/">Scripting guide →</a>
+      </p>
+    </section>
+
+    <footer>
+      <div class="foot-inner">
+        <div class="foot-brand">
+          <Image src={logo} alt="" width={22} height={22} />
+          <span>bohay</span>
+          <span class="dim">— MIT licensed, single Rust binary, no telemetry.</span>
+        </div>
+        <div class="foot-links">
+          <a href="/docs/">Docs</a>
+          <a href={GITHUB}>GitHub</a>
+          <a href="https://crates.io/crates/bohay">crates.io</a>
+          <a href={`${GITHUB}/releases`}>Releases</a>
+          <a href={`${GITHUB}/blob/main/LICENSE`}>License</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // ── The hero demo: a tiny state machine over three simulated agents. ──
+      type AgentId = 'claude' | 'copilot' | 'codex';
+      type Status = 'working' | 'blocked' | 'done' | 'idle';
+
+      const CLAUDE_LINES = [
+        '<span class="c-dim">⏺</span> Reading <span class="c-acc">src/app/dispatch.rs</span>…',
+        '<span class="c-dim">⏺</span> The debounce needs a dwell before Idle commits.',
+        '<span class="c-grn">✓</span> Edit <span class="c-acc">src/app/mod.rs</span> <span class="c-dim">(+14 -3)</span>',
+        '<span class="c-dim">⏺</span> Running <span class="c-acc">cargo test</span>…',
+        '<span class="c-grn">✓</span> 143 tests passed <span class="c-dim">in 6.1s</span>',
+        '<span class="c-dim">⏺</span> Now updating the docs to match…',
+        '<span class="c-grn">✓</span> Edit <span class="c-acc">docs/07-agent-detection.md</span>',
+        '<span class="c-dim">⏺</span> Checking the render hot path stayed fast…',
+        '<span class="c-grn">✓</span> 1.29&hairsp;ms/frame — no regression',
+      ];
+      const CODEX_DONE = [
+        '<span class="c-grn">✓</span> Refactored <span class="c-acc">parser.ts</span> — 12 files changed',
+        '<span class="c-grn">✓</span> npm test: <span class="c-grn">48 passed</span>',
+        '<span class="c-dim">Session saved — resumable any time.</span>',
+        '<span class="c-mint">agent finished · press ⏎ in the sidebar to review</span>',
+      ];
+      const PROMPT = `
+        <div class="perm">
+          <div class="perm-q">Run <span class="c-acc">npm run deploy</span>?</div>
+          <button class="perm-btn yes" data-approve="yes">❯ 1. Yes</button>
+          <button class="perm-btn" data-approve="no">&nbsp;&nbsp;2. No</button>
+        </div>`;
+      const COPILOT_LINES = [
+        '<span class="c-grn">✓</span> Approved — deploying…',
+        '<span class="c-dim">⏺</span> build: <span class="c-grn">ok</span> · upload: <span class="c-grn">ok</span>',
+        '<span class="c-grn">✓</span> Deployed to staging <span class="c-dim">in 14s</span>',
+      ];
+
+      const $ = (id: string) => document.getElementById(id);
+      const statuses: Record<AgentId, Status> = { claude: 'working', copilot: 'blocked', codex: 'done' };
+      // Like the real data model: each agent's pane lives in a workspace.
+      const WS_OF: Record<AgentId, 'sudos' | 'webapp'> = { claude: 'sudos', copilot: 'webapp', codex: 'sudos' };
+      const PANE_OF: Record<AgentId, string> = { claude: 'pane-left', copilot: 'pane-copilot', codex: 'pane-codex' };
+      let activeWs: 'sudos' | 'webapp' = 'sudos';
+      let focusedAgent: AgentId = 'claude';
+      let copilotStep = -1; // -1 = showing the prompt
+
+      function mainHint(): string {
+        if (activeWs === 'webapp')
+          return statuses.copilot === 'blocked'
+            ? 'copilot is blocked — click ❯ Yes to approve'
+            : statuses.copilot === 'working'
+              ? 'copilot deploying — watch it flip to done'
+              : 'click a workspace or agent in the sidebar';
+        return statuses.copilot === 'blocked'
+          ? 'copilot is blocked in webapp — click it in the sidebar'
+          : '2 panes · click workspaces and agents in the sidebar';
+      }
+
+      function setDot(agent: AgentId, status: Status) {
+        statuses[agent] = status;
+        const dot = $(`dot-${agent}`);
+        if (dot) dot.className = `dot ${status}`;
+        $(`${agent === 'claude' ? 'left' : agent}-title`)
+          ?.querySelector('.pt-dot')
+          ?.setAttribute('class', `pt-dot ${status}`);
+        const note = $('status-note');
+        if (note && activeTab === 'main') note.textContent = mainHint();
+      }
+
+      function push(bodyId: string, html: string, max = 9) {
+        const body = $(bodyId);
+        if (!body) return;
+        const line = document.createElement('div');
+        line.className = 'tline';
+        line.innerHTML = html;
+        body.appendChild(line);
+        while (body.children.length > max) body.removeChild(body.children[0]);
+      }
+
+      function switchWs(ws: 'sudos' | 'webapp') {
+        activeWs = ws;
+        ($('ws-sudos') as HTMLElement).hidden = ws !== 'sudos';
+        ($('ws-webapp') as HTMLElement).hidden = ws !== 'webapp';
+        document.querySelectorAll('.ws').forEach((w) => {
+          const on = w.getAttribute('data-ws') === ws;
+          w.classList.toggle('on', on);
+          const arrow = w.querySelector('.ws-arrow');
+          if (arrow) arrow.textContent = on ? '▾' : '▸';
+        });
+        if (activeTab === 'main') {
+          const note = $('status-note');
+          if (note) note.textContent = mainHint();
+        }
+      }
+
+      function focusAgent(agent: AgentId) {
+        focusedAgent = agent;
+        switchWs(WS_OF[agent]);
+        document.querySelectorAll('.pane').forEach((p) => p.classList.remove('focused'));
+        $(PANE_OF[agent])?.classList.add('focused');
+        document.querySelectorAll('.agent').forEach((a) =>
+          a.classList.toggle('focused', a.getAttribute('data-agent') === agent)
+        );
+      }
+
+      function renderCopilot() {
+        const body = $('copilot-body');
+        if (!body) return;
+        body.innerHTML = '';
+        if (statuses.copilot === 'blocked') body.innerHTML = PROMPT;
+        else COPILOT_LINES.slice(0, Math.max(copilotStep, 0) + 1).forEach((l) => push('copilot-body', l));
+      }
+
+      // Claude streams forever (with natural pauses — like a real turn).
+      let li = 0;
+      function claudeTick() {
+        push('left-body', CLAUDE_LINES[li % CLAUDE_LINES.length]);
+        li++;
+        setDot('claude', 'working');
+        setTimeout(claudeTick, 700 + Math.random() * 1400);
+      }
+
+      // Copilot: approve → stream → done → (loop back to blocked).
+      function approve(yes: boolean) {
+        const body = $('copilot-body');
+        if (!body || statuses.copilot !== 'blocked') return;
+        if (!yes) {
+          body.innerHTML = '<div class="tline c-dim">Denied. Agent is idle.</div>';
+          setDot('copilot', 'idle');
+          setTimeout(resetCopilot, 3500);
+          return;
+        }
+        body.innerHTML = '';
+        setDot('copilot', 'working');
+        copilotStep = 0;
+        const step = () => {
+          push('copilot-body', COPILOT_LINES[copilotStep]);
+          copilotStep++;
+          if (copilotStep < COPILOT_LINES.length) setTimeout(step, 1100);
+          else {
+            setDot('copilot', 'done');
+            setTimeout(resetCopilot, 6000);
+          }
+        };
+        step();
+      }
+      function resetCopilot() {
+        copilotStep = -1;
+        setDot('copilot', 'blocked');
+        renderCopilot();
+      }
+
+      // Wiring: workspaces, agents, panes, the agents filter, the Menu pill.
+      document.querySelectorAll('.ws').forEach((w) =>
+        w.addEventListener('click', () => {
+          switchTab('main');
+          switchWs(w.getAttribute('data-ws') as 'sudos' | 'webapp');
+        })
+      );
+      document.querySelectorAll('.agent').forEach((a) =>
+        a.addEventListener('click', () => {
+          switchTab('main');
+          focusAgent(a.getAttribute('data-agent') as AgentId);
+        })
+      );
+      $('pane-left')?.addEventListener('click', () => focusAgent('claude'));
+      $('pane-codex')?.addEventListener('click', () => focusAgent('codex'));
+      $('pane-copilot')?.addEventListener('click', (e) => {
+        focusAgent('copilot');
+        const t = (e.target as HTMLElement).closest('[data-approve]');
+        if (t) approve(t.getAttribute('data-approve') === 'yes');
+      });
+      document.querySelectorAll('.fchip').forEach((c) =>
+        c.addEventListener('click', () => {
+          const all = c.getAttribute('data-f') === 'all';
+          document.querySelectorAll('.fchip').forEach((x) =>
+            x.classList.toggle('on', x === c)
+          );
+          ($('session-row') as HTMLElement).hidden = !all;
+        })
+      );
+      $('session-row')?.addEventListener('click', () => {
+        const note = $('status-note');
+        if (note) note.textContent = 'resume reopens that conversation in a pane — try it in the real bohay';
+      });
+      $('menu-pill')?.addEventListener('click', () => {
+        const note = $('status-note');
+        if (note) note.textContent = 'Settings lives here — theme · layout · keys · language (8 languages)';
+      });
+
+      // ── Tabs: main / git / orch — like the real thing. ──
+      const GIT_VIEWS: Record<string, string> = {
+        commits: [
+          '<div class="grow"><span class="c-acc">●</span> <span class="c-dim">2948ec7</span> release: v0.7.0 <span class="grow-meta">RizRiyz · 2h</span></div>',
+          '<div class="grow"><span class="c-acc">●</span> <span class="c-dim">76acba8</span> fix: close audit findings — security, resilience <span class="grow-meta">RizRiyz · 3h</span></div>',
+          '<div class="grow"><span class="c-acc">●</span> <span class="c-dim">44d5b3e</span> release: v0.6.1 <span class="grow-meta">RizRiyz · 1d</span></div>',
+          '<div class="grow"><span class="c-acc">●</span> <span class="c-dim">0108c20</span> feat: scrollable panes — wheel + scroll mode <span class="grow-meta">RizRiyz · 1d</span></div>',
+          '<div class="grow"><span class="c-acc">●</span> <span class="c-dim">eaf0a7a</span> docs: update readme and add new screenshot <span class="grow-meta">RizRiyz · 2d</span></div>',
+        ].join(''),
+        flow: [
+          '<div class="tline"><span class="c-acc">main</span> ──●──●──●──●──▶</div>',
+          '<div class="tline c-dim">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\\</div>',
+          '<div class="tline">&nbsp;&nbsp;<span class="c-mint">bohay/t2</span> ●──● &nbsp;<span class="c-dim">↑2 ·</span> PR <span class="c-acc">#14</span></div>',
+          '<div class="tline c-dim">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\\</div>',
+          '<div class="tline">&nbsp;&nbsp;<span class="c-mint">bohay/t3</span> ● &nbsp;<span class="c-dim">↑1</span></div>',
+        ].join(''),
+        branches: [
+          '<div class="grow"><span class="c-acc">● main</span> <span class="c-dim">↑0 ↓0</span> &nbsp;release: v0.7.0 <span class="grow-meta">2h</span></div>',
+          '<div class="grow">&nbsp;&nbsp;audit-release <span class="c-dim">↑2 ↓0</span> &nbsp;fix: socket perms <span class="grow-meta">5h</span></div>',
+          '<div class="grow">&nbsp;&nbsp;bohay/t2 <span class="c-dim">↑1 ↓0</span> &nbsp;wip: api layer <span class="grow-meta">1h</span></div>',
+          '<div class="grow">&nbsp;&nbsp;bohay/t3 <span class="c-dim">↑1 ↓0</span> &nbsp;docs + examples <span class="grow-meta">30m</span></div>',
+        ].join(''),
+        prs: [
+          '<div class="grow"><span class="c-dim">#14</span> feat: api layer <span class="c-amber">● checks running</span> <span class="grow-meta">open</span></div>',
+          '<div class="grow"><span class="c-dim">#13</span> fix: close audit findings <span class="c-grn">✓ checks</span> <span class="grow-meta">merged</span></div>',
+          '<div class="grow"><span class="c-dim">#12</span> feat: bohay-notch config <span class="c-grn">✓ checks</span> <span class="grow-meta">merged</span></div>',
+        ].join(''),
+        issues: [
+          '<div class="grow"><span class="c-dim">#9</span> scroll mode on Windows Terminal <span class="grow-meta">enhancement</span></div>',
+          '<div class="grow"><span class="c-dim">#7</span> gemini session resume <span class="grow-meta">help wanted</span></div>',
+        ].join(''),
+        status: [
+          '<div class="tline"><span class="c-dim">origin</span> &nbsp;github.com/RizRiyz/bohay <span class="c-dim">· 47 commits · 4 weeks</span></div>',
+          '<div class="tline">RizRiyz &nbsp;<span class="c-acc">████████████░</span> 46</div>',
+          '<div class="tline"><span class="c-dim">bot</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;░ 1</div>',
+          '<div class="tline c-grn">working tree: clean</div>',
+        ].join(''),
+      };
+      const ORCH_ROWS = [
+        '<span class="c-mint">●</span> t1 <span class="c-mint">done</span>&nbsp;&nbsp;&nbsp; OAuth token module <span class="grow-meta">gate ✓ cargo test auth</span>',
+        '<span class="c-amber">◐</span> t2 <span class="c-amber">running</span> API layer <span class="grow-meta">⟶t1 · pane 4 · bohay/t2</span>',
+        '<span class="c-amber">◐</span> t3 <span class="c-amber">running</span> Docs + examples <span class="grow-meta">pane 5 · bohay/t3</span>',
+        '<span class="c-dim">○</span> t4 <span class="c-dim">queued</span>&nbsp; Integration tests <span class="grow-meta">⟶t2 t3</span>',
+      ];
+      const STATUS_HINTS: Record<string, () => string> = {
+        main: () => mainHint(),
+        git: () => 'the git tab: click the sections — commits · flow · branches · PRs',
+        orch: () => 'the orchestration board — click a task to select it',
+      };
+      let activeTab = 'main';
+
+      function setStatusHint() {
+        const note = $('status-note');
+        if (note) note.textContent = STATUS_HINTS[activeTab]();
+      }
+      function showGit(section: string) {
+        const body = $('gbody');
+        if (body) body.innerHTML = GIT_VIEWS[section];
+        document.querySelectorAll('.gtab').forEach((t) =>
+          t.classList.toggle('on', t.getAttribute('data-g') === section)
+        );
+      }
+      function renderOrch(selected: number) {
+        const body = $('obody');
+        if (!body) return;
+        body.innerHTML = ORCH_ROWS.map(
+          (r, i) => `<button class="grow orow ${i === selected ? 'sel' : ''}" data-row="${i}">${r}</button>`
+        ).join('');
+        body.querySelectorAll('.orow').forEach((r) =>
+          r.addEventListener('click', () => renderOrch(Number(r.getAttribute('data-row'))))
+        );
+      }
+      function switchTab(tab: string) {
+        activeTab = tab;
+        ['main', 'git', 'orch'].forEach((t) => {
+          const v = $(`view-${t}`);
+          if (v) (v as HTMLElement).hidden = t !== tab;
+        });
+        document.querySelectorAll('.demo-tabs .tab[data-tab]').forEach((t) =>
+          t.classList.toggle('on', t.getAttribute('data-tab') === tab)
+        );
+        setStatusHint();
+      }
+      document.querySelectorAll('.demo-tabs .tab[data-tab]').forEach((t) =>
+        t.addEventListener('click', () => switchTab(t.getAttribute('data-tab') ?? 'main'))
+      );
+      document.querySelectorAll('.gtab').forEach((t) =>
+        t.addEventListener('click', () => showGit(t.getAttribute('data-g') ?? 'commits'))
+      );
+
+      if ($('demo')) {
+        CODEX_DONE.forEach((l) => push('codex-body', l));
+        renderCopilot();
+        focusAgent('claude');
+        claudeTick();
+        showGit('commits');
+        renderOrch(1);
+        setStatusHint();
+        // Deep-linkable demo state: /?demo=git or /?demo=orch opens that tab.
+        const deep = new URLSearchParams(location.search).get('demo');
+        if (deep === 'git' || deep === 'orch') switchTab(deep);
+      }
+
+      // Copy the install one-liner.
+      const btn = document.getElementById('copy');
+      btn?.addEventListener('click', async () => {
+        const cmd = document.querySelector('#install code')?.textContent ?? '';
+        try {
+          await navigator.clipboard.writeText(cmd.trim());
+          btn.textContent = '✓';
+          setTimeout(() => (btn.textContent = '⧉'), 1200);
+        } catch {}
+      });
+      // Live star count (graceful: stays "GitHub" on failure).
+      fetch('https://api.github.com/repos/RizRiyz/bohay')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const el = document.getElementById('stars');
+          if (el && d?.stargazers_count != null) el.textContent = `★ ${d.stargazers_count}`;
+        })
+        .catch(() => {});
+    </script>
+
+    <!-- Global (not Astro-scoped): the demo builds rows/prompts at runtime via
+         innerHTML, and scoped selectors can't match elements created after
+         render. All selectors are page-specific classes, so no bleed. -->
+    <style is:global>
+      :root {
+        --bg: #070709;
+        --bg2: #111116;
+        --surface: #1a1a20;
+        --line: #25252d;
+        --text: #e7e7ed;
+        --sub: #93939f;
+        --accent: #c6ff1a;
+        --amber: #e09a4d;
+        --mint: #6fc6a3;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html { scroll-behavior: smooth; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.65 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      a { color: inherit; text-decoration: none; }
+      code, pre, .term { font-family: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace; }
+      h1, h2, h3 { line-height: 1.15; letter-spacing: -0.025em; }
+      section, header.hero { max-width: 1060px; margin: 0 auto; padding: 4.5rem 1.5rem; }
+      .accent { color: var(--accent); }
+      .dim { color: var(--sub); }
+      ::selection { background: #33450e; color: #e7e7ed; }
+
+      nav {
+        position: sticky; top: 0; z-index: 10;
+        background: rgb(7 7 9 / 0.75);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border-bottom: 1px solid rgb(37 37 45 / 0.6);
+      }
+      .nav-inner {
+        display: flex; justify-content: space-between; align-items: center;
+        max-width: 1060px; margin: 0 auto; padding: 0.85rem 1.5rem;
+      }
+      .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.15rem; }
+      .nav-links { display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.95rem; }
+      .nav-links a:hover { color: var(--text); }
+      .gh { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid var(--line); padding: 0.35rem 0.75rem; border-radius: 999px; }
+      .gh:hover { border-color: var(--accent); color: var(--accent); }
+
+      .hero { text-align: center; padding-top: 4.5rem; position: relative; }
+      .hero .glow {
+        position: absolute; inset: -20% 0 auto 0; height: 480px;
+        background: radial-gradient(ellipse 60% 55% at 50% 0%, rgb(198 255 26 / 0.09), transparent 70%);
+        pointer-events: none;
+      }
+      .hero h1 { font-size: clamp(2.2rem, 6vw, 3.7rem); font-weight: 800; position: relative; }
+      .hero .sub { color: var(--sub); max-width: 40rem; margin: 1.2rem auto 0; font-size: 1.13rem; }
+      .install {
+        display: inline-flex; align-items: center; gap: 0.75rem; margin-top: 2rem;
+        background: var(--bg2); border: 1px solid var(--line); border-radius: 0.6rem;
+        padding: 0.7rem 1rem; max-width: 100%;
+      }
+      .install code { color: var(--accent); font-size: 0.85rem; overflow-x: auto; white-space: nowrap; }
+      .install button {
+        background: none; border: 1px solid var(--line); color: var(--sub);
+        border-radius: 0.4rem; padding: 0.15rem 0.5rem; cursor: pointer; font-size: 0.9rem;
+      }
+      .install button:hover { color: var(--accent); border-color: var(--accent); }
+      .alt-install { color: var(--sub); font-size: 0.85rem; margin-top: 0.7rem; }
+      .alt-install code { color: var(--text); background: var(--bg2); padding: 0.1rem 0.4rem; border-radius: 0.3rem; }
+      .alt-install a { color: var(--accent); }
+      .cta { margin-top: 1.6rem; display: flex; gap: 0.8rem; justify-content: center; }
+      .btn {
+        display: inline-block; padding: 0.65rem 1.3rem; border-radius: 0.55rem;
+        border: 1px solid var(--line); font-weight: 600; font-size: 0.95rem;
+      }
+      .btn:hover { border-color: var(--accent); }
+      .btn.primary { background: var(--accent); color: #0b0b0f; border-color: var(--accent); }
+      .btn.primary:hover { filter: brightness(1.08); }
+      /* ── the live demo ── */
+      .demo {
+        margin-top: 3rem; text-align: left;
+        background: var(--bg2); border: 1px solid var(--line); border-radius: 0.9rem;
+        box-shadow: 0 24px 80px rgb(198 255 26 / 0.06), 0 12px 48px rgb(0 0 0 / 0.6);
+        overflow: hidden; font-size: 0.8rem;
+      }
+      .demo-chrome {
+        display: flex; align-items: center; gap: 0.45rem;
+        padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line); background: #0d0d11;
+      }
+      .tl { width: 11px; height: 11px; border-radius: 50%; }
+      .tl.r { background: #e06c66; } .tl.y { background: #e0b34d; } .tl.g { background: #6fc6a3; }
+      .demo-title { margin-left: 0.6rem; color: var(--sub); font-size: 0.78rem; font-family: 'JetBrains Mono Variable', monospace; }
+      .demo-hint { margin-left: auto; color: var(--accent); font-size: 0.72rem; animation: pulse 2.4s infinite; }
+      @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+      .demo-body { display: flex; min-height: 380px; }
+      .demo-side {
+        width: 190px; flex-shrink: 0; border-right: 1px solid var(--line);
+        background: #101014; padding: 0.8rem 0.55rem; display: flex; flex-direction: column; gap: 2px;
+      }
+      .side-brand {
+        display: flex; align-items: center; gap: 0.4rem;
+        padding: 0.15rem 0.5rem 0.6rem; border-bottom: 1px solid #1b1b22; margin-bottom: 0.3rem;
+      }
+      .side-brand img { border-radius: 3px; }
+      .side-name { color: var(--accent); font-weight: 800; font-size: 0.82rem; letter-spacing: -0.01em; }
+      .side-ver { color: #4a4a54; font-size: 0.62rem; font-family: 'JetBrains Mono Variable', monospace; }
+      .menu-pill {
+        margin-left: auto; background: none; border: 1px solid var(--line); color: var(--sub);
+        border-radius: 999px; padding: 0.08rem 0.55rem; cursor: pointer;
+        font: 0.62rem 'Inter Variable', sans-serif;
+      }
+      .menu-pill:hover { color: var(--accent); border-color: #3a4514; }
+      .side-label {
+        color: #686873; font-size: 0.62rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.1em; padding: 0.55rem 0.5rem 0.25rem;
+      }
+      .agents-label { display: flex; align-items: center; justify-content: space-between; }
+      .afilter { display: flex; gap: 2px; text-transform: none; letter-spacing: 0; }
+      .fchip {
+        background: none; border: 0; color: #4a4a54; cursor: pointer;
+        font: 0.6rem 'Inter Variable', sans-serif; padding: 0.05rem 0.3rem; border-radius: 0.25rem;
+      }
+      .fchip:hover { color: var(--sub); }
+      .fchip.on { color: var(--accent); background: #1d240b; }
+      .ws {
+        display: flex; align-items: baseline; gap: 0.3rem; width: 100%;
+        background: none; border: 0; cursor: pointer; text-align: left;
+        color: var(--sub); padding: 0.28rem 0.5rem; border-radius: 0.35rem;
+        font: 0.74rem 'JetBrains Mono Variable', monospace;
+      }
+      .ws:hover { background: #1a1a20; color: var(--text); }
+      .ws.on { color: var(--text); background: #1a1a20; }
+      .ws-arrow { color: #686873; font-size: 0.62rem; }
+      .ws .branch { color: #686873; font-size: 0.68rem; }
+      .ws .ab { margin-left: auto; color: var(--accent); font-size: 0.62rem; }
+      .session-row {
+        display: flex; align-items: center; gap: 0.5rem; width: 100%;
+        background: none; border: 0; cursor: pointer; text-align: left;
+        color: #686873; padding: 0.3rem 0.5rem; border-radius: 0.4rem;
+        font: 0.74rem 'JetBrains Mono Variable', monospace;
+      }
+      .session-row:hover { background: #1a1a20; color: var(--sub); }
+      .session-row .proj { margin-left: auto; font-size: 0.62rem; }
+      .agent {
+        display: flex; align-items: center; gap: 0.5rem; width: 100%;
+        background: none; border: 0; color: var(--text); cursor: pointer; text-align: left;
+        padding: 0.34rem 0.5rem; border-radius: 0.4rem;
+        font: 0.78rem 'JetBrains Mono Variable', monospace;
+      }
+      .agent:hover { background: #1a1a20; }
+      .agent.focused { background: #1d240b; color: var(--accent); }
+      .agent .proj { margin-left: auto; color: #686873; font-size: 0.66rem; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+      .dot.working, .pt-dot.working { background: var(--amber); animation: pulse 1.6s infinite; }
+      .dot.blocked, .pt-dot.blocked { background: #e06c66; animation: pulse 1s infinite; }
+      .dot.done, .pt-dot.done { background: var(--mint); }
+      .dot.idle, .pt-dot.idle { background: #4a4a54; }
+
+      .demo-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .demo-tabs { display: flex; gap: 2px; padding: 0.45rem 0.6rem 0; border-bottom: 1px solid var(--line); }
+      .demo-tabs .tab {
+        color: var(--sub); font-size: 0.72rem; padding: 0.25rem 0.7rem;
+        border-radius: 0.4rem 0.4rem 0 0; font-family: 'JetBrains Mono Variable', monospace;
+        background: none; border: 0; cursor: pointer;
+      }
+      .demo-tabs .tab:hover { color: var(--text); }
+      .demo-tabs .tab.on { color: var(--text); background: #1a1a20; }
+      .demo-tabs .tab.plus { cursor: default; }
+      .demo-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+      /* `hidden` must always win — several demo elements set their own display. */
+      .demo [hidden] { display: none !important; }
+
+      /* git + orch dashboard views */
+      .gview { padding: 0.6rem 0.9rem; font-family: 'JetBrains Mono Variable', monospace; }
+      .gtabs { display: flex; gap: 0.35rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+      .gtab {
+        background: none; border: 1px solid var(--line); color: var(--sub); cursor: pointer;
+        border-radius: 999px; padding: 0.14rem 0.65rem;
+        font: 0.68rem 'JetBrains Mono Variable', monospace;
+      }
+      .gtab:hover { color: var(--text); }
+      .gtab.on { color: var(--accent); border-color: #3a4514; background: #131807; }
+      .gbody { flex: 1; font-size: 0.74rem; line-height: 1.8; overflow: hidden; }
+      .grow {
+        display: flex; align-items: baseline; gap: 0.45rem; width: 100%;
+        color: var(--text); white-space: nowrap; overflow: hidden;
+        background: none; border: 0; text-align: left; padding: 0.08rem 0.35rem;
+        border-radius: 0.35rem; font: 0.74rem/1.8 'JetBrains Mono Variable', monospace;
+      }
+      .grow-meta { margin-left: auto; color: #686873; font-size: 0.68rem; flex-shrink: 0; }
+      .orow { cursor: pointer; }
+      .orow:hover { background: #1a1a20; }
+      .orow.sel { background: #1d240b; }
+      .oheader { color: var(--text); font-size: 0.76rem; padding: 0.2rem 0.35rem 0.5rem; }
+      .oleases { color: var(--sub); font-size: 0.7rem; padding: 0.5rem 0.35rem 0.2rem; border-top: 1px solid #1b1b22; }
+      .c-amber { color: var(--amber); }
+      .demo-panes { flex: 1; display: flex; gap: 0; min-height: 0; }
+      .pane {
+        flex: 1; display: flex; flex-direction: column; min-width: 0; cursor: pointer;
+        border: 1px solid transparent; border-radius: 0.5rem; margin: 0.5rem;
+      }
+      .pane.focused { border-color: rgb(198 255 26 / 0.45); }
+      .pane-title {
+        display: flex; align-items: center; gap: 0.45rem;
+        color: var(--sub); font-size: 0.7rem; padding: 0.4rem 0.7rem;
+        font-family: 'JetBrains Mono Variable', monospace;
+        border-bottom: 1px solid #1b1b22;
+      }
+      .pt-dot { width: 7px; height: 7px; border-radius: 50%; }
+      .pane-body {
+        flex: 1; padding: 0.6rem 0.8rem; overflow: hidden;
+        font-family: 'JetBrains Mono Variable', monospace; font-size: 0.74rem; line-height: 1.75;
+      }
+      .tline { color: var(--text); animation: rise 0.25s ease-out; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+      .c-dim { color: #686873; } .c-acc { color: var(--accent); }
+      .c-grn { color: var(--mint); } .c-mint { color: var(--mint); }
+      .perm { border: 1px solid #3a2020; background: #180f0f; border-radius: 0.5rem; padding: 0.7rem 0.85rem; margin-top: 0.4rem; }
+      .perm-q { color: var(--text); margin-bottom: 0.55rem; }
+      .perm-btn {
+        display: block; width: 100%; text-align: left; background: none; border: 0;
+        color: var(--sub); cursor: pointer; padding: 0.2rem 0.4rem; border-radius: 0.3rem;
+        font: 0.74rem 'JetBrains Mono Variable', monospace;
+      }
+      .perm-btn.yes { color: var(--accent); }
+      .perm-btn:hover { background: #24140f; }
+      .demo-status {
+        display: flex; align-items: center; gap: 0.5rem;
+        border-top: 1px solid var(--line); padding: 0.42rem 0.8rem;
+        color: var(--sub); font-size: 0.7rem; font-family: 'JetBrains Mono Variable', monospace;
+      }
+      .demo-status .pill { background: var(--accent); color: #0b0b0f; border-radius: 0.3rem; padding: 0 0.4rem; font-weight: 700; }
+      .demo-status .sep { color: #4a4a54; }
+      @media (max-width: 700px) {
+        .demo-side { display: none; }
+        .demo-panes { flex-direction: column; }
+      }
+
+      .problem { text-align: center; }
+      .beats { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.6rem; color: var(--sub); font-size: 1.05rem; font-style: italic; }
+      .beats .dot { color: var(--accent); }
+      .problem > p { color: var(--sub); margin-top: 0.8rem; }
+      .problem .turn { color: var(--text); font-size: 1.15rem; max-width: 36rem; margin: 1.6rem auto 0; }
+
+      .features h2, .agents-strip h2, .script h2 { text-align: center; font-size: 1.9rem; margin-bottom: 2.2rem; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+      .card {
+        background: var(--bg2); border: 1px solid var(--line); border-radius: 0.8rem;
+        padding: 1.3rem 1.4rem; transition: border-color 0.15s;
+      }
+      .card:hover { border-color: var(--accent); }
+      .card h3 { font-size: 1.02rem; margin-bottom: 0.45rem; }
+      .card p { color: var(--sub); font-size: 0.92rem; }
+
+      .orch { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; align-items: center; }
+      .orch h2 { font-size: 1.9rem; margin-bottom: 1rem; }
+      .orch p { color: var(--sub); margin-bottom: 1.5rem; }
+      .orch p strong { color: var(--text); }
+      .term {
+        background: var(--bg2); border: 1px solid var(--line); border-radius: 0.8rem;
+        padding: 1.2rem 1.4rem; font-size: 0.82rem; line-height: 1.7; overflow-x: auto;
+        white-space: pre;
+      }
+      .term .g { color: var(--accent); font-weight: 700; }
+      .term .amber { color: var(--amber); }
+      .term .mint { color: var(--mint); }
+
+      .chips { display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center; }
+      .chip {
+        border: 1px solid var(--line); color: var(--sub); border-radius: 999px;
+        padding: 0.4rem 1rem; font-size: 0.92rem;
+      }
+      .chip.on { color: var(--text); border-color: #3a4514; background: #131807; }
+      .agents-strip .note { text-align: center; color: var(--sub); margin-top: 1.4rem; font-size: 0.92rem; }
+      .agents-strip .note a { color: var(--accent); }
+
+      .notch { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; align-items: center; }
+      .notch h2 { font-size: 1.9rem; margin-bottom: 1rem; }
+      .notch .mac {
+        font-size: 0.7rem; vertical-align: middle; color: var(--sub);
+        border: 1px solid var(--line); border-radius: 999px; padding: 0.15rem 0.6rem; margin-left: 0.4rem;
+      }
+      .notch p { color: var(--sub); margin-bottom: 1.2rem; }
+      .notch p strong { color: var(--text); }
+      .cask { display: inline-block; background: var(--bg2); border: 1px solid var(--line); border-radius: 0.5rem; padding: 0.5rem 0.8rem; font-size: 0.8rem; color: var(--accent); }
+      .notch-shot img { width: 100%; height: auto; border-radius: 0.8rem; border: 1px solid var(--line); }
+
+      .script { text-align: center; }
+      .script .term { text-align: left; max-width: 620px; margin: 0 auto; }
+      .script p { color: var(--sub); margin-top: 1.4rem; }
+      .script p a { color: var(--accent); }
+
+      footer { border-top: 1px solid var(--line); margin-top: 2rem; }
+      .foot-inner {
+        max-width: 1060px; margin: 0 auto; padding: 2rem 1.5rem;
+        display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;
+      }
+      .foot-brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; }
+      .foot-brand .dim { font-weight: 400; font-size: 0.85rem; }
+      .foot-links { display: flex; gap: 1.3rem; color: var(--sub); font-size: 0.92rem; }
+      .foot-links a:hover { color: var(--accent); }
+
+      @media (max-width: 900px) {
+        .orch, .notch { grid-template-columns: 1fr; }
+        section, header.hero { padding: 3rem 1.25rem; }
+      }
+    </style>
+  </body>
+</html>

@@ -1,0 +1,79 @@
+---
+title: Socket API
+description: The JSON control API — wire format, methods, and the event stream.
+---
+
+Everything the CLI does goes over a local socket speaking newline-delimited
+JSON — `~/.bohay/bohay.sock` (the path is injected into every pane as
+`$BOHAY_SOCKET_PATH`). The CLI is a thin wrapper: **every `bohay <verb>` maps
+to one method**, so the easiest way to learn the API is to use the CLI and
+read its JSON output.
+
+## Wire format
+
+One request per connection, newline-terminated; one JSON reply:
+
+```json
+→ {"id":"1","method":"pane.split","params":{"down":true}}
+← {"id":"1","result":{"type":"ok","pane":"7"}}
+```
+
+Errors come back structured:
+
+```json
+← {"id":"1","error":{"code":"not_found","message":"no such pane: 42"}}
+```
+
+```sh
+# Try it raw (macOS/Linux):
+printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.bohay/bohay.sock
+```
+
+## Method families
+
+| Family | Methods |
+|---|---|
+| workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.close` |
+| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.close` |
+| panes | `pane.list` · `pane.split` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
+| agents | `agent.list` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
+| git | `git.status` · `git.branches` · `git.log` · `git.open` |
+| worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
+| orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
+| modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.invoke` · `module.pane.open` · `module.log` |
+| ui / server | `ui.sidebar` · `ping` · `server.stop` · `events.subscribe` |
+
+Parameter shapes mirror the CLI flags (`bohay task add --paths x` →
+`{"paths": ["x"]}`). When a method takes a pane and none is given, it defaults
+to `$BOHAY_PANE_ID` — the calling pane.
+
+## The event stream
+
+`events.subscribe` turns the connection into a stream: after one
+acknowledgment line, every event arrives as a JSON line. `bohay events` is
+exactly this.
+
+```json
+{"event":"pane.agent_status_changed","pane":"4","status":"blocked","agent":"claude","cwd":"/Users/you/code/app","project":"app"}
+{"event":"task.gate_passed","task":"t1"}
+{"event":"lease.acquired","lease":"L2","task":"t3"}
+```
+
+Event names: `pane.created` · `pane.closed` · `pane.agent_status_changed` ·
+`agent.hook` · `node.created` · `node.closed` · `tab.created` · `tab.closed`
+· `task.added` · `task.claimed` · `task.started` · `task.ready` ·
+`task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
+`task.needs_compaction` · `task.done` · `task.merged` ·
+`task.merge_conflict` · `task.released` · `lease.acquired` ·
+`lease.released`.
+
+## Practical notes
+
+- **Prefer the CLI** in scripts (`bohay --verbose`-free, stable JSON to
+  stdout); talk raw JSON only when embedding (e.g. a native companion app —
+  the macOS notch app is just another socket client).
+- The socket is **owner-only** (`0600`, in a `0700` dir) — access equals
+  command execution as your user. See the
+  [security model](/docs/explanation/security/).
+- `ping` returns the server's version — useful for health checks and
+  upgrade detection.
