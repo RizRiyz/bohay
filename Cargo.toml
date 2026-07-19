@@ -9,6 +9,7 @@ license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/RizRiyz/bohay"
 repository = "https://github.com/RizRiyz/bohay"
+documentation = "https://bohay.pages.dev/docs/"
 keywords = ["terminal", "multiplexer", "tui", "agents", "workspace"]
 categories = ["command-line-utilities", "development-tools"]
 # Keep the published crate lean: ship source + README + license, not the design
@@ -26,6 +27,7 @@ exclude = [
     "/install.ps1",
     "/RELEASING.md",
     "/scripts",
+    "/website",
 ]
 
 [[bin]]

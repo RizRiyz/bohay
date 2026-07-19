@@ -1,7 +1,7 @@
 /target
 preview.html
 preview.ans
-docs/
+/docs/
 CLAUDE.md
 RELEASING.md
 homebrew-bohay/
@@ -9,3 +9,8 @@ homebrew-bohay/
 # Local-only maintainer identity map (contains email; not for GitHub).
 .mailmap
 bohay-notch/
+
+# Website (Astro) build artifacts — Cloudflare Pages builds from source.
+website/node_modules/
+website/dist/
+website/.astro/

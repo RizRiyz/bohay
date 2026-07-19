@@ -1076,4 +1076,29 @@ mod tests {
         assert_eq!(m, "worktree.remove");
         assert_eq!(p.get("path").and_then(|v| v.as_str()), Some("/tmp/wt"));
     }
+
+    // The docs site's CLI reference (website/…/reference/cli.mdx) carries the
+    // `bohay help` text VERBATIM — this guard fails CI if a command changes
+    // without the docs page being regenerated, so the two can never drift.
+    // Regenerate with:  bohay help  →  the page's ```txt block.
+    #[test]
+    fn docs_cli_reference_matches_help() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("website/src/content/docs/docs/reference/cli.mdx");
+        let Ok(page) = std::fs::read_to_string(&path) else {
+            return; // published crate / partial checkout — nothing to check
+        };
+        let block = page
+            .split("```txt\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .expect("cli.mdx must contain a ```txt block");
+        // USAGE ends with a newline the split consumes; compare trimmed.
+        assert_eq!(
+            block.trim_end(),
+            USAGE.trim_end(),
+            "website/…/reference/cli.mdx has drifted from `bohay help` — \
+             regenerate the page's txt block from the USAGE text"
+        );
+    }
 }
