@@ -7,7 +7,8 @@ use crate::ui::theme::State;
 
 /// Agents we recognise by name in the title / screen.
 const KNOWN_AGENTS: &[&str] = &[
-    "claude", "codex", "gemini", "cursor", "aider", "opencode", "copilot", "amp", "droid",
+    "claude", "codex", "gemini", "cursor", "aider", "opencode", "copilot", "amp", "droid", "kimi",
+    "grok", "qwen", "kiro",
 ];
 
 /// Substrings that indicate the agent is waiting on the user.

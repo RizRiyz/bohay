@@ -14,3 +14,6 @@ bohay-notch/
 website/node_modules/
 website/dist/
 website/.astro/
+website/public/install.sh
+website/public/install.ps1
+.DS_Store

@@ -2,7 +2,7 @@
 
 **This guide has moved to the documentation site:**
 
-→ **[Writing a Module](https://bohay.pages.dev/docs/extend/writing-modules/)** —
+→ **[Writing a Module](https://bohay.dev/docs/extend/writing-modules/)** —
 the complete guide: manifest reference, environment variables, the context
 blob, calling back into bohay, distribution, and troubleshooting.
 
@@ -25,5 +25,5 @@ bohay module link .              # register it
 bohay module run you.hello greet
 ```
 
-See also [Using Modules](https://bohay.pages.dev/docs/extend/using-modules/)
+See also [Using Modules](https://bohay.dev/docs/extend/using-modules/)
 for discovering and installing community modules.
