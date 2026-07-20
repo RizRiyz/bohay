@@ -1,0 +1,437 @@
+---
+// The /compare page: bohay vs Herdr (agent multiplexer) and tmux / Zellij
+// (traditional multiplexers). Standalone dark page matching the landing look.
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
+import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource/ibm-plex-mono/600.css';
+import '@fontsource/ibm-plex-mono/700.css';
+import Logo from '../assets/logo.svg';
+
+const GITHUB = 'https://github.com/RizRiyz/bohay';
+const title = 'Compare bohay vs Herdr, tmux, and Zellij';
+const description =
+  'How bohay compares to Herdr, tmux, and Zellij for running AI coding agents: live agent status, reboot-proof session resume, a built-in git tab, multi-agent orchestration, and a macOS notch app.';
+const ogImage = 'https://bohay.dev/og.png';
+
+// Comparison cells. Each cell is { s: 'yes' | 'part' | 'no', t?: note }.
+const yes = { s: 'yes' };
+const no = { s: 'no' };
+const part = (t) => ({ s: 'part', t });
+const ICON = { yes: '✓', part: '◐', no: '–' };
+
+// Columns, left to right: bohay, Herdr, tmux, Zellij.
+const GROUPS = [
+  {
+    name: 'Built for AI coding agents',
+    rows: [
+      { f: 'Live agent status: blocked, working, done, idle', cells: [yes, yes, no, no] },
+      { f: "Reloads the agent's own conversation after a reboot", cells: [yes, part('detach only'), part('detach only'), part('detach only')] },
+      { f: 'Silent desktop ping when an agent needs you', cells: [yes, yes, no, no] },
+      { f: 'Socket API the agents can drive themselves', cells: [yes, yes, part('scriptable'), part('plugins')] },
+    ],
+  },
+  {
+    name: 'Many agents on one repo',
+    rows: [
+      { f: 'Run several agents at once', cells: [yes, yes, yes, yes] },
+      { f: 'Coordination board: task order, file locks, merge after tests pass', cells: [yes, no, no, no] },
+      { f: 'Git worktrees as first-class panes', cells: [yes, part('add-on flow'), no, no] },
+    ],
+  },
+  {
+    name: 'Git and code',
+    rows: [
+      { f: 'Built-in git tab: branches, pull requests, issues, commits', cells: [yes, part('diff review'), no, no] },
+    ],
+  },
+  {
+    name: 'Interface and reach',
+    rows: [
+      { f: 'Mouse-native split and resize', cells: [yes, yes, part('needs config'), yes] },
+      { f: 'Native macOS notch companion app', cells: [yes, no, no, no] },
+      { f: 'Runs in your terminal as a single binary', cells: [yes, yes, yes, yes] },
+      { f: 'Panes survive detach and reattach', cells: [yes, yes, yes, yes] },
+      { f: 'Remote attach over plain SSH', cells: [yes, yes, yes, yes] },
+      { f: 'Extensions or plugins', cells: [yes, yes, part('via TPM'), yes] },
+      { f: 'Pick your UI language (8 built in)', cells: [yes, no, no, no] },
+    ],
+  },
+];
+
+const OVER_TMUX = [
+  { k: 'Agent-aware', h: 'They cannot see your agents', p: 'tmux and Zellij show panes. bohay shows which agent is blocked, working, done, or idle, and pings you the moment one needs you.' },
+  { k: 'Resume', h: 'They forget after a reboot', p: 'A tmux session keeps your shell alive only until the machine restarts. bohay reloads each agent’s actual conversation after a full reboot, with zero setup.' },
+  { k: 'Git + teamwork', h: 'No git, no coordination', p: 'bohay adds a git tab, worktrees as panes, and a board that runs several agents on one repo at once without letting them overwrite each other.' },
+  { k: 'No config', h: 'Agent-first, mouse-first', p: 'No config file to memorize. Click to split, drag to resize, and the whole interface is built around agents instead of raw shells.' },
+];
+
+const OVER_HERDR = [
+  { k: 'Notch app', h: 'A native Mac notch app', p: 'Herdr stays in the terminal. bohay mirrors every agent into your Mac’s notch, so you can approve a prompt or jump to an agent without switching windows.' },
+  { k: 'Real teamwork', h: 'A team, not just many panes', p: 'File locks so two agents never edit the same file, isolated worktrees, and a merge gate that waits for your tests. Point five agents at one repo and stay safe.' },
+  { k: 'Resume', h: 'Reboot-proof resume', p: 'Not just panes that survive a detach. Each agent reloads its own conversation after a full restart, so you can close the laptop and pick up mid-thought tomorrow.' },
+  { k: 'Git built in', h: 'Git built in, not bolted on', p: 'A full git tab with pull requests and issues, plus worktrees as first-class panes, so you rarely leave the terminal.' },
+];
+
+// Nearby tools, grouped by category. Category-level positioning only, since
+// each is a different shape of product (a GUI app, a process runner, a terminal).
+const LANDSCAPE = [
+  {
+    cat: 'Parallel-agent apps',
+    tools: 'Conductor · Superset · Emdash',
+    what: 'Dedicated tools that fan out several agents across git worktrees so they don’t overwrite each other.',
+    fit: 'The same worktree isolation plus a merge-after-tests gate, built right into the terminal you already work in, and it drives any agent, not just one.',
+  },
+  {
+    cat: 'Process managers',
+    tools: 'Solo',
+    what: 'Start and supervise several long-running processes side by side.',
+    fit: 'Agent-aware, not just a process runner: live status, zero-config session resume, and a real terminal for each one.',
+  },
+  {
+    cat: 'AI terminals & runners',
+    tools: 'cmux · Warp',
+    what: 'A terminal with AI built in, or a lightweight runner for a handful of agent sessions.',
+    fit: 'A full multiplexer that coordinates many external agents at once, with live status, reboot-proof resume, a git tab, and a Mac notch app on top.',
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="canonical" href="https://bohay.dev/compare/" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://bohay.dev/compare/" />
+    <meta property="og:site_name" content="bohay" />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+  </head>
+  <body>
+    <nav>
+      <div class="nav-inner">
+        <a class="brand" href="/">
+          <Logo width={28} height={28} class="mark" aria-hidden="true" />
+          <span>bohay</span>
+        </a>
+        <div class="nav-links">
+          <a href="/docs/">Docs</a>
+          <a href="/compare/" aria-current="page">Compare</a>
+          <a href={GITHUB} class="gh">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+              ><path
+                fill="currentColor"
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              ></path></svg
+            >
+            <span id="stars">GitHub</span>
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="page-hero">
+      <div class="glow" aria-hidden="true"></div>
+      <span class="eyebrow">Compare</span>
+      <h1>bohay vs Herdr, tmux, and Zellij</h1>
+      <p>
+        Every multiplexer keeps your panes alive. bohay is built to run a whole team of AI coding
+        agents: watch them, resume them, and ship their work without leaving the terminal.
+      </p>
+    </header>
+
+    <section class="table-section">
+      <div class="cmp-wrap">
+        <table class="cmp">
+          <thead>
+            <tr>
+              <th class="feat"></th>
+              <th class="colname c-bohay"><span class="ch"><Logo width={17} height={17} class="mark" aria-hidden="true" /> bohay</span></th>
+              <th class="colname">Herdr</th>
+              <th class="colname">tmux</th>
+              <th class="colname">Zellij</th>
+            </tr>
+          </thead>
+          <tbody>
+            {GROUPS.map((g) => (
+              <Fragment>
+                <tr class="grp"><td colspan="5">{g.name}</td></tr>
+                {g.rows.map((row) => (
+                  <tr>
+                    <th scope="row" class="feat">{row.f}</th>
+                    {row.cells.map((c, i) => (
+                      <td class={`cell ${c.s}${i === 0 ? ' c-bohay' : ''}`}>
+                        <span class="ic">{ICON[c.s]}</span>
+                        {c.t && <span class="note">{c.t}</span>}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="legend">
+        <span><b class="yes">✓</b> Yes</span>
+        <span><b class="part">◐</b> Partial</span>
+        <span><b class="no">–</b> No</span>
+        <span class="legend-note">Herdr column reflects its public positioning; features move fast, so treat it as a snapshot.</span>
+      </div>
+    </section>
+
+    <section class="why">
+      <h2>Why bohay over tmux &amp; Zellij</h2>
+      <p class="lead">Traditional multiplexers are great at panes. They were never built for agents.</p>
+      <div class="wcards">
+        {OVER_TMUX.map((c) => (
+          <div class="wcard">
+            <span class="k">{c.k}</span>
+            <h3>{c.h}</h3>
+            <p>{c.p}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section class="why alt">
+      <h2>Why bohay over Herdr</h2>
+      <p class="lead">Same foundation as other agent multiplexers. bohay stacks the coordination, git, and resume layer on top.</p>
+      <div class="wcards">
+        {OVER_HERDR.map((c) => (
+          <div class="wcard">
+            <span class="k">{c.k}</span>
+            <h3>{c.h}</h3>
+            <p>{c.p}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section class="landscape">
+      <h2>The wider landscape</h2>
+      <p class="lead">
+        A few nearby tools solve part of the same problem from a different angle. Here is where
+        bohay fits against each.
+      </p>
+      <div class="lscards">
+        {LANDSCAPE.map((c) => (
+          <div class="lcard">
+            <div class="lhead">
+              <span class="lcat">{c.cat}</span>
+              <span class="ltools">{c.tools}</span>
+            </div>
+            <p>{c.what}</p>
+            <p class="lfit"><b>bohay:</b> {c.fit}</p>
+          </div>
+        ))}
+      </div>
+      <p class="lnote">
+        Each of these is a different shape of tool (a desktop app, a process runner, a terminal).
+        bohay's bet is one terminal-native workspace that does the whole loop: run, watch, resume,
+        coordinate, and ship.
+      </p>
+    </section>
+
+    <section class="cta-final">
+      <h2>See it for yourself</h2>
+      <p class="cta-install">Install in one line: <code>brew install RizRiyz/bohay/bohay</code></p>
+      <div class="cta-row">
+        <a class="btn primary" href="/docs/">Get started</a>
+        <a class="btn" href={GITHUB}>Star on GitHub</a>
+      </div>
+    </section>
+
+    <footer>
+      <div class="foot-inner">
+        <div class="foot-brand">
+          <Logo width={22} height={22} class="mark" aria-hidden="true" />
+          <span>bohay</span>
+          <span class="dim">by Riz</span>
+        </div>
+        <div class="foot-links">
+          <a href="/docs/">Docs</a>
+          <a href="/compare/">Compare</a>
+          <a href={GITHUB}>GitHub</a>
+          <a href="https://crates.io/crates/bohay">crates.io</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // Live star count (graceful: stays "GitHub" on failure).
+      fetch('https://api.github.com/repos/RizRiyz/bohay')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const el = document.getElementById('stars');
+          if (el && d?.stargazers_count != null) el.textContent = `★ ${d.stargazers_count}`;
+        })
+        .catch(() => {});
+    </script>
+
+    <style is:global>
+      :root {
+        --bg: #070709;
+        --bg2: #111116;
+        --line: #25252d;
+        --text: #e7e7ed;
+        --sub: #93939f;
+        --accent: #c6ff1a;
+        --amber: #e09a4d;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html { scroll-behavior: smooth; }
+      body {
+        background: var(--bg); color: var(--text);
+        font: 16px/1.65 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      a { color: inherit; text-decoration: none; }
+      code { font-family: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace; }
+      h1, h2, h3, .brand, .foot-brand {
+        font-family: 'IBM Plex Mono', ui-monospace, 'JetBrains Mono Variable', monospace;
+        line-height: 1.14; letter-spacing: -0.045em;
+      }
+      section, header.page-hero { max-width: 1060px; margin: 0 auto; padding: 4rem 1.5rem; }
+      .dim { color: var(--sub); }
+      ::selection { background: #33450e; color: #e7e7ed; }
+
+      /* nav */
+      nav {
+        position: sticky; top: 0; z-index: 10; background: rgb(7 7 9 / 0.75);
+        backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+        border-bottom: 1px solid rgb(37 37 45 / 0.6);
+      }
+      .nav-inner {
+        display: flex; justify-content: space-between; align-items: center;
+        max-width: 1060px; margin: 0 auto; padding: 0.85rem 1.5rem;
+      }
+      .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.15rem; }
+      .mark { display: block; flex-shrink: 0; }
+      .nav-links {
+        display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.88rem;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -0.01em;
+      }
+      .nav-links a:hover { color: var(--text); }
+      .nav-links a[aria-current='page'] { color: var(--accent); }
+      .gh { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid var(--line); padding: 0.35rem 0.75rem; border-radius: 999px; }
+      .gh:hover { border-color: var(--accent); color: var(--accent); }
+
+      /* hero */
+      .page-hero { text-align: center; position: relative; padding-top: 4.5rem; }
+      .page-hero .glow {
+        position: absolute; inset: -20% 0 auto 0; height: 460px; pointer-events: none;
+        background: radial-gradient(ellipse 60% 55% at 50% 0%, rgb(198 255 26 / 0.09), transparent 70%);
+      }
+      .eyebrow { font-family: 'IBM Plex Mono', monospace; color: var(--accent); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase; position: relative; }
+      .page-hero h1 { font-size: clamp(2rem, 5.4vw, 3.1rem); font-weight: 700; margin-top: 0.6rem; position: relative; }
+      .page-hero p { color: var(--sub); max-width: 44rem; margin: 1.2rem auto 0; font-size: 1.08rem; position: relative; }
+
+      /* comparison table */
+      .table-section { padding-top: 1rem; }
+      .cmp-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 1rem; background: #0c0c11; }
+      .cmp { width: 100%; border-collapse: collapse; min-width: 760px; }
+      .cmp th, .cmp td { padding: 0.8rem 1rem; text-align: center; border-bottom: 1px solid var(--line); vertical-align: middle; }
+      .cmp thead th { position: sticky; top: 0; z-index: 2; background: #131318; font-size: 0.95rem; padding-top: 1rem; padding-bottom: 1rem; }
+      .cmp thead .colname { font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
+      .cmp .ch { display: inline-flex; align-items: center; gap: 0.4rem; }
+      .cmp .feat { text-align: left; font-family: 'Inter Variable', sans-serif; font-weight: 500; color: var(--text); font-size: 0.9rem; width: 38%; letter-spacing: 0; }
+      tbody th.feat { font-weight: 500; }
+      .grp td {
+        text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem;
+        text-transform: uppercase; letter-spacing: 0.12em; color: var(--sub);
+        background: #08080b; padding: 0.55rem 1rem;
+      }
+      .cmp tbody tr:not(.grp):hover td, .cmp tbody tr:not(.grp):hover th { background: rgb(255 255 255 / 0.02); }
+      .cell .ic { font-size: 1.05rem; font-weight: 700; line-height: 1; }
+      .cell.yes .ic { color: var(--accent); }
+      .cell.part .ic { color: var(--amber); }
+      .cell.no .ic { color: #43434c; }
+      .cell .note { display: block; font-size: 0.66rem; color: var(--sub); margin-top: 3px; font-family: 'Inter Variable', sans-serif; }
+      /* bohay column highlight */
+      .c-bohay { background: rgb(198 255 26 / 0.05); }
+      thead th.c-bohay { background: rgb(198 255 26 / 0.1); border-top: 2px solid var(--accent); color: var(--accent); }
+      .cmp tbody tr:not(.grp):hover td.c-bohay { background: rgb(198 255 26 / 0.09); }
+
+      .legend { display: flex; gap: 1.3rem; justify-content: center; align-items: center; margin-top: 1.1rem; font-size: 0.82rem; color: var(--sub); flex-wrap: wrap; }
+      .legend .yes { color: var(--accent); } .legend .part { color: var(--amber); } .legend .no { color: #6a6a72; }
+      .legend-note { font-size: 0.76rem; opacity: 0.75; }
+
+      /* why cards */
+      .why { text-align: center; }
+      .why h2 { font-size: clamp(1.5rem, 3.4vw, 1.9rem); }
+      .why .lead { color: var(--sub); max-width: 42rem; margin: 0.7rem auto 2rem; font-size: 1rem; }
+      .wcards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; text-align: left; }
+      .wcard {
+        background: linear-gradient(180deg, #131318, #0d0d12); border: 1px solid var(--line);
+        border-radius: 1rem; padding: 1.5rem 1.6rem; transition: border-color 0.18s, transform 0.18s;
+      }
+      .wcard:hover { border-color: rgb(198 255 26 / 0.42); transform: translateY(-3px); }
+      .wcard .k { font-family: 'IBM Plex Mono', monospace; font-size: 0.74rem; color: var(--accent); letter-spacing: 0.02em; }
+      .wcard h3 { font-size: 1.08rem; margin: 0.5rem 0 0.55rem; }
+      .wcard p { color: var(--sub); font-size: 0.93rem; line-height: 1.62; }
+
+      /* landscape */
+      .landscape { text-align: center; }
+      .landscape h2 { font-size: clamp(1.5rem, 3.4vw, 1.9rem); }
+      .landscape .lead { color: var(--sub); max-width: 44rem; margin: 0.7rem auto 2rem; font-size: 1rem; }
+      .lscards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; text-align: left; }
+      .lcard {
+        background: linear-gradient(180deg, #131318, #0d0d12); border: 1px solid var(--line);
+        border-radius: 1rem; padding: 1.4rem 1.5rem; transition: border-color 0.18s;
+      }
+      .lcard:hover { border-color: rgb(198 255 26 / 0.32); }
+      .lhead { display: flex; flex-direction: column; gap: 0.28rem; margin-bottom: 0.75rem; }
+      .lcat { font-family: 'IBM Plex Mono', monospace; font-size: 0.98rem; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
+      .ltools { font-family: 'JetBrains Mono Variable', monospace; font-size: 0.72rem; color: var(--accent); }
+      .lcard p { color: var(--sub); font-size: 0.88rem; line-height: 1.58; margin-bottom: 0.6rem; }
+      .lcard .lfit { color: var(--text); margin-bottom: 0; }
+      .lcard .lfit b { color: var(--accent); font-weight: 600; }
+      .lnote { text-align: center; color: var(--sub); max-width: 46rem; margin: 1.9rem auto 0; font-size: 0.92rem; line-height: 1.6; }
+      @media (max-width: 860px) { .lscards { grid-template-columns: 1fr; } }
+
+      /* cta */
+      .cta-final { text-align: center; }
+      .cta-final h2 { font-size: clamp(1.6rem, 3.6vw, 2rem); }
+      .cta-install { color: var(--sub); font-size: 0.92rem; margin-top: 0.9rem; }
+      .cta-install code { color: var(--accent); background: var(--bg2); border: 1px solid var(--line); padding: 0.2rem 0.55rem; border-radius: 0.4rem; }
+      .btn {
+        display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.7rem 1.45rem;
+        border-radius: 0.6rem; border: 1px solid var(--line); font-weight: 600; font-size: 0.95rem;
+        font-family: 'IBM Plex Mono', monospace; transition: border-color 0.15s, transform 0.15s, filter 0.15s;
+      }
+      .btn:hover { transform: translateY(-2px); border-color: var(--accent); }
+      .btn.primary { background: var(--accent); color: #0b0b0f; border-color: var(--accent); }
+      .btn.primary:hover { filter: brightness(1.08); }
+      .cta-row { display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; margin-top: 1.4rem; }
+
+      /* footer */
+      footer { border-top: 1px solid var(--line); margin-top: 2rem; }
+      .foot-inner {
+        max-width: 1060px; margin: 0 auto; padding: 2rem 1.5rem;
+        display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;
+      }
+      .foot-brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; }
+      .foot-brand .dim { font-weight: 400; font-size: 0.85rem; }
+      .foot-links { display: flex; gap: 1.3rem; color: var(--sub); font-size: 0.92rem; }
+      .foot-links a:hover { color: var(--accent); }
+
+      @media (max-width: 760px) {
+        .wcards { grid-template-columns: 1fr; }
+        section, header.page-hero { padding: 3rem 1.25rem; }
+      }
+    </style>
+  </body>
+</html>
