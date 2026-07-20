@@ -11,9 +11,17 @@ export default defineConfig({
     starlight({
       title: 'bohay',
       description:
-        'The terminal workspace for AI coding agents — run Claude Code, Copilot, Codex, and opencode side by side with a live view of every agent.',
+        'Mission control for your AI coding agents. Run Claude Code, Copilot, Codex, and opencode side by side, with a live view of every agent, session resume, and multi-agent orchestration.',
       logo: { src: './src/assets/logo.svg', alt: 'bohay' },
       favicon: '/favicon.svg',
+      head: [
+        { tag: 'meta', attrs: { property: 'og:image', content: 'https://bohay.dev/og.png' } },
+        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+        { tag: 'meta', attrs: { property: 'og:image:alt', content: 'bohay: mission control for your AI coding agents' } },
+        { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
+        { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://bohay.dev/og.png' } },
+      ],
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/RizRiyz/bohay' },
       ],
