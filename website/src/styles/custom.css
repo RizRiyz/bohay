@@ -25,6 +25,8 @@
 
   --sl-font: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
   --sl-font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+  /* Display / heading face — the brand's terminal-native look. */
+  --bh-display: 'IBM Plex Mono', ui-monospace, 'JetBrains Mono Variable', monospace;
 
   --bh-glow: rgb(198 255 26 / 0.07);
 }
@@ -89,9 +91,33 @@
 }
 .sl-markdown-content h1,
 .sl-markdown-content h2,
-.sl-markdown-content h3 {
-  letter-spacing: -0.02em;
-  font-weight: 700;
+.sl-markdown-content h3,
+h1[id='_top'],
+.content-panel h1 {
+  font-family: var(--bh-display);
+  letter-spacing: -0.03em;
+  font-weight: 600;
+}
+/* The site title (brand) in the header, in the display face. `a.site-title`
+   + the span outweigh Starlight's own `.site-title` rule so the font applies. */
+a.site-title,
+a.site-title span {
+  font-family: var(--bh-display);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+/* Logo + wordmark sit tidily together. */
+a.site-title {
+  gap: 0.55rem;
+}
+a.site-title :is(img, svg) {
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-shrink: 0;
+}
+/* The mark is near-white — invert it in light mode so it stays visible. */
+:root[data-theme='light'] .site-title :is(img, svg) {
+  filter: invert(1) brightness(0.85);
 }
 .sl-markdown-content h2 {
   margin-top: 2.6rem;
@@ -140,16 +166,20 @@ header.header {
   margin-top: 0.15rem;
 }
 .sidebar-content .group-label > .large {
-  font-size: 0.72rem;
+  font-family: var(--bh-display);
+  font-size: 0.7rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.08em;
   color: var(--sl-color-gray-3);
 }
+/* The navigation menu (sidebar links) in the display face too. */
 .sidebar-content a {
+  font-family: var(--bh-display);
   border-radius: 0.45rem;
-  font-size: 0.9rem;
-  padding-block: 0.28em;
+  font-size: 0.82rem;
+  letter-spacing: -0.02em;
+  padding-block: 0.3em;
   transition: color 0.12s, background 0.12s;
 }
 .sidebar-content a:hover {

@@ -6,20 +6,23 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://bohay.pages.dev',
+  site: 'https://bohay.dev',
   integrations: [
     starlight({
       title: 'bohay',
       description:
         'The terminal workspace for AI coding agents — run Claude Code, Copilot, Codex, and opencode side by side with a live view of every agent.',
-      logo: { src: './src/assets/logo-nobg.png', alt: 'bohay' },
-      favicon: '/favicon.png',
+      logo: { src: './src/assets/logo.svg', alt: 'bohay' },
+      favicon: '/favicon.svg',
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/RizRiyz/bohay' },
       ],
       customCss: [
         '@fontsource-variable/inter',
         '@fontsource-variable/jetbrains-mono',
+        '@fontsource/ibm-plex-mono/500.css',
+        '@fontsource/ibm-plex-mono/600.css',
+        '@fontsource/ibm-plex-mono/700.css',
         './src/styles/custom.css',
       ],
       sidebar: [
