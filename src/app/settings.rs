@@ -140,7 +140,7 @@ impl App {
         match tab {
             SettingsTab::Theme => theme::THEMES.len(),
             SettingsTab::Layout => self.layout_rows().len(),
-            SettingsTab::Notifications => 4,
+            SettingsTab::Notifications => 5,
             SettingsTab::Keys => crate::app::Cmd::ALL.len(),
             SettingsTab::Modules => self.modules.modules.len(),
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
@@ -297,7 +297,7 @@ impl App {
             // radio tabs: ‹ › move the selection like up/down
             SettingsTab::Theme | SettingsTab::Language => self.settings_move(delta),
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
-            SettingsTab::Notifications if cursor < 3 => self.toggle_notify(cursor),
+            SettingsTab::Notifications if cursor < 4 => self.toggle_notify(cursor),
             SettingsTab::Notifications => {} // the Test row only reacts to Enter/click
             SettingsTab::Keys => {}          // rebind is Enter (capture), not ‹ ›
             SettingsTab::Integrations => self.settings_activate(cursor),
@@ -317,7 +317,7 @@ impl App {
                 self.apply_language(crate::i18n::LANGS[cursor.min(crate::i18n::LANGS.len() - 1)])
             }
             SettingsTab::Layout => self.activate_layout(cursor),
-            SettingsTab::Notifications if cursor == 3 => self.test_notification(),
+            SettingsTab::Notifications if cursor == 4 => self.test_notification(),
             SettingsTab::Notifications => self.toggle_notify(cursor),
             // Enter on a Keys row starts capturing the next key as its binding.
             SettingsTab::Keys => {
@@ -460,6 +460,7 @@ impl App {
             0 => self.config.notifications.enabled = !self.config.notifications.enabled,
             1 => self.config.notifications.on_blocked = !self.config.notifications.on_blocked,
             2 => self.config.notifications.on_done = !self.config.notifications.on_done,
+            3 => self.config.notifications.sound = !self.config.notifications.sound,
             _ => {}
         }
         config::save(&self.config);

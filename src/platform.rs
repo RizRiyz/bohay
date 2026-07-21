@@ -47,6 +47,38 @@ fn platform_default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
+/// Argv that runs `cmd` inside `shell` and then continues as that same shell,
+/// interactive — how a restored agent pane resumes its session *on launch*
+/// instead of having the resume command typed into a visible prompt. `None`
+/// when the shell family isn't recognised (callers fall back to typing).
+pub fn shell_run_then_interactive(shell: &str, cmd: &str) -> Option<Vec<String>> {
+    if shell.contains('\'') {
+        return None; // a quote in the shell path would break the exec quoting
+    }
+    let base = std::path::Path::new(shell)
+        .file_name()?
+        .to_str()?
+        .to_ascii_lowercase();
+    match base.strip_suffix(".exe").unwrap_or(&base) {
+        // POSIX-family (fish included: `-c`, `;`, `exec`, and single quotes all
+        // behave the same for this shape).
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" => Some(vec![
+            shell.to_string(),
+            "-c".to_string(),
+            format!("{cmd}; exec '{shell}'"),
+        ]),
+        "pwsh" | "powershell" => Some(vec![
+            shell.to_string(),
+            "-NoExit".to_string(),
+            "-Command".to_string(),
+            cmd.to_string(),
+        ]),
+        // cmd.exe can't take the single-quoted id literally — let the caller
+        // fall back to typing the command.
+        _ => None,
+    }
+}
+
 /// Resolve an executable name to its full path by scanning `PATH`.
 fn find_on_path(exe: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
@@ -159,6 +191,23 @@ extern "system" {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_then_interactive_covers_shell_families() {
+        // POSIX family: -c "cmd; exec 'shell'".
+        let argv = super::shell_run_then_interactive("/bin/zsh", "claude --resume 'abc'").unwrap();
+        assert_eq!(argv[0], "/bin/zsh");
+        assert_eq!(argv[1], "-c");
+        assert_eq!(argv[2], "claude --resume 'abc'; exec '/bin/zsh'");
+        assert!(super::shell_run_then_interactive("/usr/bin/fish", "x").is_some());
+        // PowerShell: -NoExit -Command cmd.
+        let ps = super::shell_run_then_interactive("pwsh.exe", "codex resume 'a'").unwrap();
+        assert_eq!(ps[1], "-NoExit");
+        assert_eq!(ps[3], "codex resume 'a'");
+        // Unrecognised families (and quoted paths) fall back to typing.
+        assert!(super::shell_run_then_interactive("cmd.exe", "x").is_none());
+        assert!(super::shell_run_then_interactive("/opt/o'dd/zsh", "x").is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn shell_override_is_honored() {

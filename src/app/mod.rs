@@ -402,6 +402,11 @@ pub struct PaneStatus {
     pub state: State,
     pub agent: String,
     pub last_activity: Instant,
+    /// When the user last sent input (keystrokes/paste) to this pane. Lets
+    /// detection tell a user typing (whose echo is also output) apart from the
+    /// agent generating (docs/07). Defaults old so unfocused/new panes aren't
+    /// gated.
+    pub last_input: Instant,
     pub seen: bool,
     pub agent_session: Option<AgentSession>,
     prev_working: bool,
@@ -423,6 +428,11 @@ impl PaneStatus {
             state: State::Idle,
             agent,
             last_activity: Instant::now(),
+            // Old by default so a freshly spawned pane's first output isn't gated
+            // as "the user is typing".
+            last_input: Instant::now()
+                .checked_sub(Duration::from_secs(3600))
+                .unwrap_or_else(Instant::now),
             seen: true,
             agent_session: None,
             prev_working: false,
@@ -496,6 +506,9 @@ impl Selection {
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     pub status: HashMap<PaneId, PaneStatus>,
+    /// Agent-detection rule set: built-ins plus user `~/.bohay/manifests/*.toml`
+    /// (docs/07). Loaded once at startup.
+    pub manifests: crate::detect::Manifests,
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub theme: Theme,
@@ -547,6 +560,11 @@ pub struct App {
     pub module_dock_rects: Vec<(String, usize, Rect)>,
     pub zoomed: bool,
     pub should_quit: bool,
+    /// True when this `App` is owned by the background server. A server session
+    /// outlives its windows: closing the last workspace resets to a fresh one
+    /// instead of quitting — only `server stop` ends it. The single-process
+    /// `--local` run leaves this false and quits like a normal terminal app.
+    pub server_mode: bool,
     pub spinner: u64,
     /// Structure changed since the last save; the loop persists when set.
     pub session_dirty: bool,
@@ -569,6 +587,9 @@ pub struct App {
     /// Notification messages queued by detection; the loop flushes them to the
     /// terminal (bell + desktop) and clears.
     pub pending_notify: Vec<String>,
+    /// Set when an agent just finished (transition to Done); the loop plays the
+    /// retro "done" jingle once and clears it.
+    pub pending_sound: bool,
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
@@ -684,6 +705,7 @@ impl App {
         Ok(App {
             panes,
             status,
+            manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
             workspaces: vec![Workspace {
                 name,
                 worktree: worktree_membership(&cwd),
@@ -718,6 +740,7 @@ impl App {
             module_dock_rects: Vec::new(),
             zoomed: false,
             should_quit: false,
+            server_mode: false,
             spinner: 0,
             session_dirty: true,
             events: api::new_bus(),
@@ -729,6 +752,7 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_notify: Vec::new(),
+            pending_sound: false,
             selection: None,
             pending_clipboard: None,
             toast: None,
@@ -836,6 +860,20 @@ impl App {
                 let mut remap = HashMap::new();
                 for (raw, ps) in &tab.panes {
                     let id = PaneId::alloc();
+                    // Resume the native agent session captured at save time (a
+                    // precise hook report, or one discovered from the agent's
+                    // on-disk store keyed by cwd — see `persist::snapshot`).
+                    // Preferably the shell *starts* on the resume command, so
+                    // the pane opens straight into the resuming agent (nothing
+                    // visibly typed); an unrecognised shell family falls back
+                    // to typing the command after spawn.
+                    let resume = ps
+                        .agent_session
+                        .as_ref()
+                        .and_then(|(agent, sid)| crate::agent::resume_command(agent, sid));
+                    let resume_argv = resume.as_deref().and_then(|r| {
+                        crate::platform::shell_run_then_interactive(&shell, r.trim())
+                    });
                     // A module pane re-runs its entrypoint if the module is still
                     // installed + runnable; otherwise it falls back to a shell.
                     let restored = ps
@@ -852,15 +890,28 @@ impl App {
                             let home = crate::platform::home_dir().unwrap_or_default();
                             let mut spawned = None;
                             for cwd in [&ps.cwd, &ws.cwd, &home] {
-                                if let Ok(p) = Pane::spawn(
-                                    id,
-                                    80,
-                                    24,
-                                    cwd.clone(),
-                                    app_tx.clone(),
-                                    ps.screen.as_deref(),
-                                    &shell,
-                                ) {
+                                let attempt = match &resume_argv {
+                                    Some(argv) => Pane::spawn_shell_with(
+                                        id,
+                                        80,
+                                        24,
+                                        cwd.clone(),
+                                        app_tx.clone(),
+                                        ps.screen.as_deref(),
+                                        &shell,
+                                        argv,
+                                    ),
+                                    None => Pane::spawn(
+                                        id,
+                                        80,
+                                        24,
+                                        cwd.clone(),
+                                        app_tx.clone(),
+                                        ps.screen.as_deref(),
+                                        &shell,
+                                    ),
+                                };
+                                if let Ok(p) = attempt {
                                     spawned = Some(p);
                                     break;
                                 }
@@ -871,22 +922,22 @@ impl App {
                             }
                         }
                     };
+                    let direct_resume = resume_argv.is_some() && module_rec.is_none();
                     if let Some(rec) = module_rec {
                         module_panes.insert(id, rec);
                     }
                     let cmd = pane.command.clone();
                     let mut st = PaneStatus::new(cmd);
-                    // Resume the native agent session captured at save time (a
-                    // precise hook report, or one discovered from the agent's
-                    // on-disk store keyed by cwd — see `persist::snapshot`).
                     if let Some((agent, sid)) = &ps.agent_session {
                         st.agent = agent.clone();
                         st.agent_session = Some(AgentSession {
                             agent: agent.clone(),
                             session_id: sid.clone(),
                         });
-                        if let Some(resume) = crate::agent::resume_command(agent, sid) {
-                            pane.send(resume.as_bytes());
+                        if !direct_resume {
+                            if let Some(r) = &resume {
+                                pane.send(r.as_bytes());
+                            }
                         }
                     }
                     panes.insert(id, pane);
@@ -939,6 +990,7 @@ impl App {
         Some(App {
             panes,
             status,
+            manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
             workspaces,
             active_ws,
             theme,
@@ -965,6 +1017,7 @@ impl App {
             module_dock_rects: Vec::new(),
             zoomed: false,
             should_quit: false,
+            server_mode: false,
             spinner: 0,
             session_dirty: false,
             events: api::new_bus(),
@@ -976,6 +1029,7 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_notify: Vec::new(),
+            pending_sound: false,
             selection: None,
             pending_clipboard: None,
             toast: None,
@@ -1179,6 +1233,14 @@ impl App {
 
     // ── accessors ───────────────────────────────────────────────────────────
 
+    /// True if any pane is currently Working — drives the sidebar spinner and
+    /// how often the loop repaints to animate it.
+    pub fn any_working(&self) -> bool {
+        self.status
+            .values()
+            .any(|s| s.state == crate::ui::theme::State::Working)
+    }
+
     pub fn ws(&self) -> &Workspace {
         &self.workspaces[self.active_ws]
     }
@@ -1211,6 +1273,39 @@ impl App {
         let shell = crate::platform::resolve_shell(&self.config.shell);
         match Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None, &shell) {
             Ok(pane) => {
+                let cmd = pane.command.clone();
+                self.panes.insert(id, pane);
+                self.status.insert(id, PaneStatus::new(cmd));
+                self.zoomed = false;
+                self.session_dirty = true;
+                self.emit_event(
+                    "pane.created",
+                    serde_json::json!({"pane": id.0.to_string()}),
+                );
+                Some(id)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// `spawn_into`, but the shell starts on the `resume` command (falling back
+    /// to typing it into the prompt when the shell family isn't recognised) —
+    /// a resumed session opens straight into its agent.
+    fn spawn_resume_pane(&mut self, cwd: PathBuf, resume: &str) -> Option<PaneId> {
+        let id = PaneId::alloc();
+        let shell = crate::platform::resolve_shell(&self.config.shell);
+        let argv = crate::platform::shell_run_then_interactive(&shell, resume.trim());
+        let spawned = match &argv {
+            Some(a) => {
+                Pane::spawn_shell_with(id, 80, 24, cwd, self.app_tx.clone(), None, &shell, a)
+            }
+            None => Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None, &shell),
+        };
+        match spawned {
+            Ok(pane) => {
+                if argv.is_none() {
+                    pane.send(resume.as_bytes());
+                }
                 let cmd = pane.command.clone();
                 self.panes.insert(id, pane);
                 self.status.insert(id, PaneStatus::new(cmd));
@@ -1755,7 +1850,7 @@ impl App {
         let Some(resume) = crate::agent::resume_command(&s.agent, &s.session_id) else {
             return;
         };
-        let Some(id) = self.spawn_into(s.cwd.clone()) else {
+        let Some(id) = self.spawn_resume_pane(s.cwd.clone(), &resume) else {
             return;
         };
         let tab = Tab::panes(TileLayout::new(id));
@@ -1790,9 +1885,6 @@ impl App {
                 agent: s.agent.clone(),
                 session_id: s.session_id.clone(),
             });
-        }
-        if let Some(p) = self.panes.get(&id) {
-            p.send(resume.as_bytes());
         }
         self.mode = Mode::Normal;
         self.resumable.retain(|r| r.session_id != s.session_id);
@@ -1970,9 +2062,28 @@ impl App {
             self.workspaces.remove(self.active_ws);
         }
         if self.workspaces.is_empty() {
-            self.should_quit = true;
+            self.all_workspaces_closed();
         } else if self.active_ws >= self.workspaces.len() {
             self.active_ws = self.workspaces.len() - 1;
+        }
+    }
+
+    /// The last workspace just closed. In server mode the session keeps running
+    /// with a fresh workspace (detached clients can come back to a live server;
+    /// only `server stop` ends it); in `--local` this quits the app. If the
+    /// fresh spawn fails we still quit rather than serve an empty, unrenderable
+    /// state.
+    fn all_workspaces_closed(&mut self) {
+        if self.server_mode {
+            let cwd = std::env::current_dir()
+                .ok()
+                .or_else(crate::platform::home_dir)
+                .unwrap_or_else(|| PathBuf::from("/"));
+            self.create_workspace_at(cwd);
+            self.session_dirty = true;
+        }
+        if self.workspaces.is_empty() {
+            self.should_quit = true;
         }
     }
 
@@ -1993,7 +2104,7 @@ impl App {
         }
         self.workspaces.remove(index);
         if self.workspaces.is_empty() {
-            self.should_quit = true;
+            self.all_workspaces_closed();
         } else if self.active_ws >= self.workspaces.len() {
             self.active_ws = self.workspaces.len() - 1;
         }
@@ -2438,6 +2549,26 @@ mod tests {
         // Past the expiry → cleared, returns true so the loop redraws once.
         assert!(app.tick_toast(Instant::now() + Duration::from_secs(5)));
         assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn server_mode_outlives_the_last_workspace() {
+        let _env = crate::persist::test_env("server-outlives");
+        // A server session keeps running when its last workspace closes: it
+        // resets to a fresh workspace instead of setting `should_quit`, so a
+        // detached client always has a live server to come back to.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.server_mode = true;
+        let id = app.layout().focus;
+        app.handle_event(AppEvent::PtyExit(id)); // the only pane's shell exits
+        assert!(!app.should_quit, "a server session outlives its windows");
+        assert_eq!(app.workspaces.len(), 1, "reset to a fresh workspace");
+        let fresh = app.layout().focus;
+        assert!(
+            app.panes.contains_key(&fresh),
+            "the fresh workspace has a live pane"
+        );
     }
 
     #[test]
@@ -3425,6 +3556,103 @@ mod tests {
 
         std::env::remove_var("BOHAY_HOME");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // A working agent shows an animated rotating-circle spinner in the AGENTS
+    // list dot slot (not the static `●`), advancing with `App.spinner`.
+    #[test]
+    fn working_agent_shows_spinner() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        // Make the default pane a working "claude" agent so it lists as active.
+        let pid = *app.panes.keys().next().unwrap();
+        let mut ps = PaneStatus::new("claude".into());
+        ps.state = crate::ui::theme::State::Working;
+        app.status.insert(pid, ps);
+
+        let frame_at = |app: &mut App, spin: u64| -> String {
+            app.spinner = spin;
+            let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            term.draw(|f| crate::ui::render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            // The dot is the first glyph of the agent row inside the sidebar.
+            (0..buf.area.height)
+                .flat_map(|r| (0..buf.area.width).map(move |c| (c, r)))
+                .filter_map(|(c, r)| buf.cell((c, r)).map(|x| x.symbol().to_string()))
+                .find(|s| ["◐", "◓", "◑", "◒"].contains(&s.as_str()))
+                .unwrap_or_default()
+        };
+        let f0 = frame_at(&mut app, 0);
+        let f1 = frame_at(&mut app, 1);
+        assert!(!f0.is_empty(), "a working agent shows a spinner glyph");
+        assert_ne!(f0, f1, "the spinner advances with app.spinner");
+    }
+
+    // An agent that finishes a working stretch (Working → Idle) queues the retro
+    // chime, whether or not its pane is focused.
+    #[test]
+    fn agent_finish_plays_sound() {
+        let _env = crate::persist::test_env("chime");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.config.notifications.sound, "sound on by default");
+
+        let pid = *app.panes.keys().next().unwrap();
+        let now = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        let mut ps = PaneStatus::new("claude".into());
+        ps.state = crate::ui::theme::State::Working; // currently working
+        ps.candidate = crate::ui::theme::State::Idle; // wants idle…
+        ps.candidate_since = now - std::time::Duration::from_secs(5); // …and has held long enough
+        ps.last_activity = now - std::time::Duration::from_secs(5); // quiet → classifies Idle
+        ps.agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "s".into(),
+        });
+        app.status.insert(pid, ps);
+
+        assert!(!app.pending_sound);
+        app.detect_tick(now);
+        assert!(
+            app.pending_sound,
+            "an agent finishing its working stretch plays the chime"
+        );
+    }
+
+    // docs/07: the same recent output reads Idle while the user is typing (echo)
+    // but Working when the agent is generating (no recent input).
+    #[test]
+    fn typing_is_not_mistaken_for_agent_working() {
+        use crate::ui::theme::State;
+        let _env = crate::persist::test_env("typing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        let now = std::time::Instant::now() + std::time::Duration::from_millis(200);
+
+        // There is recent output on the pane either way (fresh last_activity).
+        app.status.get_mut(&id).unwrap().state = State::Idle;
+        app.status.get_mut(&id).unwrap().last_activity = now;
+
+        // The user just typed: the recent output is keystroke echo → stays Idle.
+        app.status.get_mut(&id).unwrap().last_input = now;
+        app.detect_tick(now);
+        assert_eq!(
+            app.status.get(&id).unwrap().state,
+            State::Idle,
+            "typing echo must not read as agent working"
+        );
+
+        // No recent input: the same fresh output is the agent generating → Working.
+        let later = now + std::time::Duration::from_millis(150);
+        app.status.get_mut(&id).unwrap().last_activity = later;
+        app.status.get_mut(&id).unwrap().last_input = now - std::time::Duration::from_secs(5);
+        app.detect_tick(later);
+        assert_eq!(
+            app.status.get(&id).unwrap().state,
+            State::Working,
+            "output without recent typing is the agent working"
+        );
     }
 
     // docs/29: config with no `sidebars` migrates to today's default layout.

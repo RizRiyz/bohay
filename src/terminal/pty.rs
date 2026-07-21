@@ -52,6 +52,41 @@ impl Pane {
         )
     }
 
+    /// Spawn a shell pane whose shell starts by running a command (built by
+    /// `platform::shell_run_then_interactive`) — a restored agent pane resumes
+    /// its session on launch, no resume command typed at a visible prompt. The
+    /// pane keeps the shell's label so snapshots stay consistent with `spawn`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_shell_with(
+        id: PaneId,
+        cols: u16,
+        rows: u16,
+        cwd: PathBuf,
+        app_tx: Sender<AppEvent>,
+        initial: Option<&str>,
+        shell: &str,
+        argv: &[String],
+    ) -> Result<Pane> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(anyhow::anyhow!("empty shell command"));
+        };
+        let mut cmd = CommandBuilder::new(program);
+        for a in args {
+            cmd.arg(a);
+        }
+        Self::build(
+            id,
+            cols,
+            rows,
+            cwd,
+            app_tx,
+            initial,
+            cmd,
+            basename(shell),
+            &[],
+        )
+    }
+
     /// Spawn a pane running an explicit argv with extra environment — a module
     /// pane (docs/13 MOD-2). bohay's own identity vars always win over `env`.
     pub fn spawn_command(

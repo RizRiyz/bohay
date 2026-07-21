@@ -120,6 +120,10 @@ pub struct NotifyConfig {
     pub on_blocked: bool,
     #[serde(default = "yes")]
     pub on_done: bool,
+    /// Play a short retro jingle when an agent finishes (transition to Done).
+    /// Independent of the desktop-notification toggle above.
+    #[serde(default = "yes")]
+    pub sound: bool,
 }
 
 fn default_theme() -> String {
@@ -174,6 +178,7 @@ impl Default for NotifyConfig {
             enabled: false,
             on_blocked: true,
             on_done: true,
+            sound: true,
         }
     }
 }

@@ -536,11 +536,18 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                     Style::new().fg(t.subtext1)
                 };
                 agent_rects.push((id, Rect::new(area.x, y, area.width, 2)));
+                // A working agent gets a live rotating-circle spinner in the dot
+                // slot; every other state keeps its static dot.
+                let dot = if st == State::Working {
+                    crate::ui::theme::spinner_frame(app.spinner)
+                } else {
+                    st.dot()
+                };
                 line_at(
                     f,
                     y,
                     Line::from(vec![
-                        Span::styled(st.dot(), Style::new().fg(st.color(t))),
+                        Span::styled(dot, Style::new().fg(st.color(t))),
                         Span::styled(format!(" {}  ", st.label()), Style::new().fg(st.color(t))),
                         Span::styled(agent, name_style),
                     ]),

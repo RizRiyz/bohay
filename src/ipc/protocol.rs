@@ -36,6 +36,8 @@ pub enum ServerMessage {
     FrameDiff(FrameDiff),
     /// Ring the bell + raise a desktop notification on the client's terminal.
     Notify(String),
+    /// Play the retro "done" jingle on the client (an agent finished).
+    Sound,
     /// Set the client's system clipboard (OSC 52) to this text — sent when a
     /// mouse selection finishes, so drag-to-select auto-copies.
     Clipboard(String),

@@ -27,6 +27,7 @@ impl App {
                     p.scroll_to_bottom(); // pasting is input → snap to live
                     p.send(s.as_bytes());
                 }
+                self.mark_user_input(); // so the echo isn't misread as agent work
                 false // goes to the pane; its echo (PtyData) renders it
             }
             AppEvent::Resize(_, _) => true,
@@ -686,6 +687,16 @@ impl App {
         }
     }
 
+    /// Record that the user just typed into the focused pane, so detection can
+    /// tell typing (whose echo is PTY output) apart from the agent generating
+    /// (docs/07). Only the focused pane receives typed input.
+    fn mark_user_input(&mut self) {
+        let id = self.layout().focus;
+        if let Some(s) = self.status.get_mut(&id) {
+            s.last_input = Instant::now();
+        }
+    }
+
     /// Returns whether this key changed the **bohay UI** (so the server should
     /// render). Plain input forwarded to a pane returns `false`: the pane's echo
     /// arrives as a separate `PtyData` event and renders then, so we don't burn a
@@ -839,6 +850,7 @@ impl App {
                         p.scroll_to_bottom();
                         p.send(&bytes);
                     }
+                    self.mark_user_input(); // detection: this is typing, not work
                 }
                 false // plain input → the pane; its echo (PtyData) renders it
             }

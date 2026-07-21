@@ -379,6 +379,7 @@ fn draw_content(
                 (cat.set_enabled, toggle(n.enabled, t)),
                 (cat.set_notify_blocked, toggle(n.on_blocked, t)),
                 (cat.set_notify_done, toggle(n.on_done, t)),
+                (cat.set_notify_sound, toggle(n.sound, t)),
                 (
                     cat.set_test_notification,
                     Line::from(Span::styled(

@@ -36,6 +36,8 @@ pub fn run() -> Result<()> {
     let sock = persist::socket_path();
     api::set_socket_path(sock.clone());
     let mut app = App::restore_or_new(DEFAULT_SIZE.0, DEFAULT_SIZE.1, tx.clone())?;
+    app.server_mode = true;
+    shutdown::install();
 
     let (api_tx, api_rx) = mpsc::channel::<api::ApiRequest>();
     api::start_server(sock, api_tx, app.events.clone());
@@ -63,6 +65,10 @@ pub fn run() -> Result<()> {
     // Un-rendered activity waiting for the frame cap to expire — drives a trailing
     // render so a change that lands mid-interval isn't stuck until the next event.
     let mut dirty = false;
+    // Advances the working-agent spinner ~10x/s (the idle tick already wakes the
+    // loop every IDLE_INTERVAL, so this just gates the frame + a repaint).
+    let mut last_spin = Instant::now();
+    const SPIN_INTERVAL: Duration = Duration::from_millis(100);
 
     loop {
         // Pending + clients attached → wait only until the cap frees up (flush
@@ -111,6 +117,18 @@ pub fn run() -> Result<()> {
             );
             break;
         }
+        // A termination signal (kill, logout, system shutdown) requests a clean
+        // exit: notify clients and fall through to the final session save below,
+        // so the snapshot is current when the machine comes back.
+        if shutdown::requested() {
+            broadcast(
+                &mut clients,
+                ServerMessage::ServerShutdown {
+                    reason: "server terminated".into(),
+                },
+            );
+            break;
+        }
         if app.detach_requested {
             app.detach_requested = false;
             if let Some(id) = foreground.take() {
@@ -135,6 +153,10 @@ pub fn run() -> Result<()> {
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));
         }
+        if app.pending_sound {
+            app.pending_sound = false;
+            broadcast(&mut clients, ServerMessage::Sound);
+        }
         // A finished mouse selection copies to the client's clipboard (OSC 52).
         if let Some(text) = app.pending_clipboard.take() {
             broadcast(&mut clients, ServerMessage::Clipboard(text));
@@ -142,6 +164,13 @@ pub fn run() -> Result<()> {
         // An expired toast forces one render so it disappears (idle frames don't).
         if app.tick_toast(Instant::now()) {
             activity = true;
+        }
+        // Animate the sidebar spinner while any agent is working: advance the
+        // frame and mark dirty so the diff sends only the changed dot cell.
+        if app.any_working() && last_spin.elapsed() >= SPIN_INTERVAL {
+            app.spinner = app.spinner.wrapping_add(1);
+            last_spin = Instant::now();
+            dirty = true;
         }
         dirty |= activity;
 
@@ -390,4 +419,42 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>) {
             Ok(ClientMessage::Hello { .. }) => {}
         }
     }
+}
+
+/// Graceful shutdown on a termination signal. The handler only flips an atomic
+/// flag (the only async-signal-safe thing to do); the event loop polls it every
+/// idle tick (≤33ms) and exits through the normal path — clients notified, the
+/// session saved — instead of dying mid-state on SIGTERM (logout, `kill`,
+/// system shutdown).
+#[cfg(unix)]
+mod shutdown {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static FLAG: AtomicBool = AtomicBool::new(false);
+
+    pub fn requested() -> bool {
+        FLAG.load(Ordering::Relaxed)
+    }
+
+    pub fn install() {
+        extern "C" fn on_signal(_sig: libc::c_int) {
+            FLAG.store(true, Ordering::Relaxed);
+        }
+        unsafe {
+            let h = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::signal(libc::SIGTERM, h);
+            libc::signal(libc::SIGHUP, h);
+            libc::signal(libc::SIGINT, h);
+        }
+    }
+}
+
+/// Windows: no POSIX signals; the detached server is stopped via `server stop`.
+#[cfg(not(unix))]
+mod shutdown {
+    pub fn requested() -> bool {
+        false
+    }
+
+    pub fn install() {}
 }

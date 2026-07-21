@@ -384,6 +384,14 @@ impl State {
     }
 }
 
+/// One frame of the "working" spinner: a filled circle whose fill rotates
+/// clockwise. Advanced by `App.spinner` while any agent is working, so a busy
+/// agent shows a live rotating dot instead of a static `●`.
+pub fn spinner_frame(n: u64) -> &'static str {
+    const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+    FRAMES[(n as usize) % FRAMES.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -141,6 +141,52 @@ fn session_path() -> PathBuf {
     config_dir().join("session.json")
 }
 
+/// User-editable agent-detection manifests (docs/07). `~/.bohay/manifests/`.
+pub fn manifests_dir() -> PathBuf {
+    config_dir().join("manifests")
+}
+
+/// Create the manifests dir if it doesn't exist and drop an annotated example
+/// the first time, so the feature is discoverable. Best-effort; never fatal.
+pub fn ensure_manifests_dir() -> PathBuf {
+    let dir = manifests_dir();
+    if !dir.exists() {
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(dir.join("example.toml.txt"), MANIFEST_EXAMPLE);
+    }
+    dir
+}
+
+/// Sample manifest shipped into `~/.bohay/manifests/` on first run. The `.txt`
+/// suffix keeps it from being loaded; copy it to `<agent>.toml` and edit.
+const MANIFEST_EXAMPLE: &str = "\
+# bohay agent-detection manifest (docs/07). Copy to e.g. `claude.toml` and edit.
+# Every *.toml file here adds rules to bohay's built-in detection. Rules are
+# merged by priority (highest wins), so a higher-priority rule overrides a
+# built-in one for the same agent.
+
+# Which agent these rules apply to. `generic` (default) means all agents.
+agent = \"claude\"
+
+# One rule per [[rule]] block. `state` is working | blocked | idle.
+# `region` is screen (the recent bottom text, default) or title (the OSC title).
+# Conditions (all listed must hold): any / all / not (substring lists, case
+# insensitive) and spinner (a running braille spinner glyph is visible).
+
+[[rule]]
+state = \"working\"
+priority = 200
+region = \"screen\"
+any = [\"esc to interrupt\", \"esc to cancel\"]
+
+[[rule]]
+state = \"blocked\"
+priority = 300
+region = \"screen\"
+all = [\"do you want to proceed\"]
+not = [\"cancelled\"]
+";
+
 /// The JSON control-API socket path for this session.
 pub fn socket_path() -> PathBuf {
     config_dir().join("bohay.sock")
@@ -247,10 +293,13 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
     }
 }
 
-/// Save the app's session atomically. Skips empty sessions.
+/// Save the app's session atomically. An *empty* session clears the snapshot:
+/// the user deliberately closed everything, and a leftover file would resurrect
+/// those panes (re-running agent resume commands) on the next start.
 pub fn save(app: &App) {
     let snap = snapshot(app);
     if snap.workspaces.is_empty() {
+        let _ = fs::remove_file(session_path());
         return;
     }
     let dir = ensure_config_dir();
@@ -287,6 +336,26 @@ mod tests {
     // The control sockets grant command execution as the user, so the state
     // dir must be owner-only (0700) and each bound socket 0600 — regardless of
     // the process umask (see `ensure_config_dir` / `transport::bind`).
+    #[test]
+    fn empty_session_save_clears_the_snapshot() {
+        let _env = test_env("empty-save");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        save(&app);
+        assert!(session_path().exists(), "a live session snapshots");
+        // Close the only pane — the session is now deliberately empty, and the
+        // snapshot must go with it, or the next start would resurrect panes the
+        // user closed (re-running agent resume commands).
+        let id = app.layout().focus;
+        app.handle_event(crate::event::AppEvent::PtyExit(id));
+        assert!(app.workspaces.is_empty());
+        save(&app);
+        assert!(
+            !session_path().exists(),
+            "an empty session clears the snapshot"
+        );
+    }
+
     #[test]
     fn state_dir_and_sockets_are_owner_only() {
         let _env = test_env("perms");

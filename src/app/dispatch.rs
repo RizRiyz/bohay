@@ -48,6 +48,9 @@ impl App {
         let focus = self.layout().focus;
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         let mut changes: Vec<(PaneId, State, String)> = Vec::new();
+        // Panes that just finished a working stretch (Working → Idle/Done) — the
+        // retro "done" chime fires on these, whether or not the pane is focused.
+        let mut finished: Vec<PaneId> = Vec::new();
         // A newly-detected resumable agent means there's a session worth saving;
         // flag a snapshot so it's captured even if we later crash (no clean exit).
         let mut agent_appeared = false;
@@ -67,7 +70,21 @@ impl App {
                 .get(&id)
                 .map(|s| now.duration_since(s.last_activity) < ACTIVITY_WINDOW)
                 .unwrap_or(false);
-            let det = detect::classify(title.as_deref(), &bottom, recent, &base);
+            // The user typed into this pane within the same window, so its recent
+            // output is likely keystroke echo, not the agent generating.
+            let recent_input = self
+                .status
+                .get(&id)
+                .map(|s| now.duration_since(s.last_input) < ACTIVITY_WINDOW)
+                .unwrap_or(false);
+            let det = detect::classify(
+                title.as_deref(),
+                &bottom,
+                recent,
+                recent_input,
+                &base,
+                &self.manifests,
+            );
 
             if let Some(s) = self.status.get_mut(&id) {
                 let focused = id == focus;
@@ -119,8 +136,12 @@ impl App {
                 }
                 let dwell = commit_dwell(desired);
                 if s.state != desired && now.duration_since(s.candidate_since) >= dwell {
+                    let was_working = s.state == State::Working;
                     s.state = desired;
                     changes.push((id, s.state, s.agent.clone()));
+                    if was_working && matches!(desired, State::Idle | State::Done) {
+                        finished.push(id);
+                    }
                 }
             }
         }
@@ -129,9 +150,9 @@ impl App {
         }
         // A state transition (or a newly-resumable agent) changes the sidebar.
         let changed = !changes.is_empty() || agent_appeared;
-        let (notify_on, on_blocked, on_done) = {
+        let (notify_on, on_blocked, on_done, sound_on) = {
             let n = &self.config.notifications;
-            (n.enabled, n.on_blocked, n.on_done)
+            (n.enabled, n.on_blocked, n.on_done, n.sound)
         };
         for (id, st, agent) in changes {
             // Publishes to subscribers and fires any module `[[events]]` hooks.
@@ -165,6 +186,19 @@ impl App {
                     State::Done => on_done,
                     _ => false,
                 };
+            // The retro "done" chime fires whenever an *agent* finishes a working
+            // stretch, independent of the desktop-notification toggle and of
+            // whether the pane is focused. The debounce already absorbs mid-turn
+            // pauses, so this is one chime per real finish. A plain shell going
+            // quiet is not an agent, so it stays silent.
+            let is_agent_pane = crate::detect::is_agent(&agent)
+                || self
+                    .status
+                    .get(&id)
+                    .is_some_and(|s| s.agent_session.is_some());
+            if sound_on && is_agent_pane && finished.contains(&id) {
+                self.pending_sound = true;
+            }
             if wanted {
                 let proj = self
                     .panes
