@@ -3596,7 +3596,12 @@ mod tests {
         let _env = crate::persist::test_env("chime");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        assert!(app.config.notifications.sound, "sound on by default");
+        // The chime is optional: both sounds ship disabled.
+        assert!(
+            !app.config.notifications.sound_on_done && !app.config.notifications.sound_on_blocked,
+            "sounds are off by default"
+        );
+        app.config.notifications.sound_on_done = true;
 
         let pid = *app.panes.keys().next().unwrap();
         let now = std::time::Instant::now() + std::time::Duration::from_millis(200);
@@ -3787,7 +3792,7 @@ mod tests {
     }
 
     #[test]
-    fn notification_queued_on_blocked_transition() {
+    fn blocked_transition_plays_sound_when_enabled() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let id = app.layout().focus;
@@ -3800,39 +3805,52 @@ mod tests {
                 e.advance(&buf);
             }
         }
+        // The chime only rings for agent panes.
+        app.status.get_mut(&id).unwrap().agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "s".into(),
+        });
 
-        // Enabled + on_blocked → a transition queues a bell/desktop notification.
-        app.config.notifications.enabled = true;
-        app.config.notifications.on_blocked = true;
-        app.status.get_mut(&id).unwrap().state = State::Idle; // arm the transition
-        app.detect_tick(std::time::Instant::now());
-        assert!(
-            app.pending_notify.iter().any(|m| m.contains("blocked")),
-            "blocked transition queues a notification: {:?}",
-            app.pending_notify
-        );
+        // Successive ticks must each clear the detection cadence gate (~100ms),
+        // so drive them with explicitly advancing instants.
+        let t0 = std::time::Instant::now();
 
-        // Disabled → nothing is queued, even on the same transition.
-        app.pending_notify.clear();
-        app.config.notifications.enabled = false;
-        app.status.get_mut(&id).unwrap().state = State::Idle; // re-arm
-        app.detect_tick(std::time::Instant::now());
-        assert!(
-            app.pending_notify.is_empty(),
-            "disabled notifications stay silent"
-        );
+        // Off by default: the same transition stays silent.
+        app.status.get_mut(&id).unwrap().state = State::Idle;
+        app.detect_tick(t0);
+        assert!(!app.pending_sound, "sound on blocked is off by default");
+
+        // Enabled → a transition to Blocked rings once…
+        app.config.notifications.sound_on_blocked = true;
+        app.status.get_mut(&id).unwrap().state = State::Idle; // re-run the transition
+        app.detect_tick(t0 + Duration::from_millis(200));
+        assert!(app.pending_sound, "blocked transition rings when enabled");
+
+        // …and is disarmed: a flap back into Blocked doesn't ring again until
+        // the user looks at the pane (focus re-arms; this pane is focused, so
+        // simulate the unfocused case by moving focus away).
+        app.pending_sound = false;
+        let bogus = PaneId::alloc();
+        app.layout_mut().focus = bogus; // unfocused → no auto re-arm
+        app.status.get_mut(&id).unwrap().state = State::Idle;
+        app.detect_tick(t0 + Duration::from_millis(400));
+        assert!(!app.pending_sound, "an ignored prompt doesn't ring twice");
     }
 
     // A bursty/streaming agent has long pauses *within* one turn. The debounce
-    // (QUIET_DWELL) must hold the status at Working through those pauses, only
-    // commit Done on sustained quiet, ring once, and re-arm after the user looks.
+    // (QUIET_DWELL) must hold the status at Working through those pauses and
+    // only commit Done — and chime — on sustained quiet, once per real finish.
     #[test]
-    fn done_bell_fires_once_until_focused() {
+    fn done_chime_debounced_and_rings_per_finish() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        app.config.notifications.enabled = true;
-        app.config.notifications.on_done = true;
+        app.config.notifications.sound_on_done = true;
         let id = app.layout().focus;
+        // The chime only rings for agent panes.
+        app.status.get_mut(&id).unwrap().agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "s".into(),
+        });
         // Treat the pane as unfocused so it can reach the Done state.
         let bogus = PaneId::alloc();
         app.layout_mut().focus = bogus;
@@ -3858,15 +3876,17 @@ mod tests {
         app.detect_tick(t0); // candidate=Done, but not yet committed
         app.detect_tick(t0 + Duration::from_millis(500));
         assert_eq!(state(&app), State::Working, "a short pause stays Working");
-        assert!(app.pending_notify.is_empty(), "a short pause does not ring");
+        assert!(!app.pending_sound, "a short pause does not chime");
 
-        // (2) Sustained quiet past the dwell → Done, ringing exactly once.
+        // (2) Sustained quiet past the dwell → Done, chiming.
         app.detect_tick(t0 + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(state(&app), State::Done, "sustained quiet commits Done");
-        assert_eq!(app.pending_notify.len(), 1, "genuine completion rings once");
+        assert!(app.pending_sound, "a genuine completion chimes");
 
-        // (3) Work again, then complete again → does NOT re-ring (bell disarmed).
-        app.pending_notify.clear();
+        // (3) Work again, then complete again → a second genuine finish chimes
+        // too (the chime is per finish; the debounce is what stops mid-turn
+        // pauses from ringing).
+        app.pending_sound = false;
         let t1 = t0 + QUIET_DWELL + Duration::from_millis(300);
         app.status.get_mut(&id).unwrap().last_activity = t1; // fresh → Working
         app.detect_tick(t1); // commits Working instantly
@@ -3883,27 +3903,7 @@ mod tests {
             State::Done,
             "second completion still reaches Done"
         );
-        assert!(
-            app.pending_notify.is_empty(),
-            "re-completion does not re-ring"
-        );
-
-        // (4) Looking at the pane re-arms the bell; a later completion rings again.
-        let t2 = t1 + 3 * QUIET_DWELL;
-        app.layout_mut().focus = id;
-        app.detect_tick(t2); // focus re-arms + clears done
-        app.layout_mut().focus = bogus;
-        let t3 = t2 + Duration::from_millis(200);
-        app.status.get_mut(&id).unwrap().last_activity = t3;
-        app.detect_tick(t3); // Working
-        go_quiet(&mut app, t3);
-        app.detect_tick(t3 + QUIET_DWELL + Duration::from_millis(100)); // arm candidate=Done
-        app.detect_tick(t3 + 2 * QUIET_DWELL + Duration::from_millis(200)); // commit Done
-        assert_eq!(
-            app.pending_notify.len(),
-            1,
-            "after the user looks, a new completion rings"
-        );
+        assert!(app.pending_sound, "each real finish chimes");
     }
 
     // Keyboard scroll mode: Shift+↑ enters, plain keys navigate the scrollback

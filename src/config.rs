@@ -112,18 +112,16 @@ impl SidebarsConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+/// Sound alerts. The retro chime is optional, so both default to **off** —
+/// nothing rings until the user turns it on in Settings → Notifications.
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct NotifyConfig {
+    /// Play the retro chime when an agent finishes a working stretch.
     #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "yes")]
-    pub on_blocked: bool,
-    #[serde(default = "yes")]
-    pub on_done: bool,
-    /// Play a short retro jingle when an agent finishes (transition to Done).
-    /// Independent of the desktop-notification toggle above.
-    #[serde(default = "yes")]
-    pub sound: bool,
+    pub sound_on_done: bool,
+    /// Play the same chime when an agent blocks on a permission prompt.
+    #[serde(default)]
+    pub sound_on_blocked: bool,
 }
 
 fn default_theme() -> String {
@@ -168,17 +166,6 @@ impl Default for LayoutConfig {
             row_gap: 0,
             show_titles: true,
             resume_in_new_workspace: true,
-        }
-    }
-}
-
-impl Default for NotifyConfig {
-    fn default() -> Self {
-        NotifyConfig {
-            enabled: false,
-            on_blocked: true,
-            on_done: true,
-            sound: true,
         }
     }
 }
@@ -244,10 +231,13 @@ mod tests {
         assert_eq!(from_empty.theme, "noir");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         // Round-trip preserves values.
+        // Sounds are optional and must default to off.
+        assert!(!c.notifications.sound_on_done);
+        assert!(!c.notifications.sound_on_blocked);
         let c2 = Config {
             theme: "mono".into(),
             notifications: NotifyConfig {
-                enabled: true,
+                sound_on_done: true,
                 ..Default::default()
             },
             ..Default::default()
@@ -255,6 +245,7 @@ mod tests {
         let json = serde_json::to_string(&c2).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back.theme, "mono");
-        assert!(back.notifications.enabled);
+        assert!(back.notifications.sound_on_done);
+        assert!(!back.notifications.sound_on_blocked);
     }
 }

@@ -1,6 +1,6 @@
 ---
 title: Working with Agents
-description: Live status, notifications, zero-config session resume, and the optional integration hook.
+description: Live status, sound alerts, zero-config session resume, and the optional integration hook.
 ---
 
 bohay treats your AI agents as first-class citizens of the terminal: it knows
@@ -20,8 +20,9 @@ Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a live state:
 | **idle** | quiet, nothing pending | no recent activity |
 
 A **working** agent shows a rotating-circle spinner in its status dot, so you
-can tell at a glance which agents are still busy. When one finishes, bohay plays
-a short retro chime (toggle it in **Settings → Notifications**).
+can tell at a glance which agents are still busy. When one finishes or blocks,
+bohay can play a short retro chime. The sound is optional and off by default,
+turn it on in **Settings → Notifications**.
 
 Click a row to jump to that agent's pane from anywhere, across workspaces.
 
@@ -38,12 +39,14 @@ idle. That way you never get a false state or a false completion chime.
 The **All / Active** toggle in the header switches between live agents only
 (default) and the full resumable history.
 
-## Notifications
+## Sound alerts
 
-Enable **Settings → Notifications** to get a desktop notification when an agent
-**blocks** or **finishes**, silently (no terminal bell, ever). Each pane rings
-at most once until you've actually looked at it, so a chatty agent can't spam
-you.
+bohay can play a short retro chime when an agent **finishes** a working stretch
+or **blocks** on a permission prompt. Both sounds are off by default because
+sound is a matter of taste. Turn them on in **Settings → Notifications**, and
+use the **Test sound** row to hear the chime before you commit to it. The
+blocked chime rings at most once until you've actually looked at the pane, so
+a repeating prompt can't spam you.
 
 ## Session resume: the flagship
 

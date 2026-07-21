@@ -376,14 +376,12 @@ fn draw_content(
         SettingsTab::Notifications => {
             let n = &app.config.notifications;
             let rows = [
-                (cat.set_enabled, toggle(n.enabled, t)),
-                (cat.set_notify_blocked, toggle(n.on_blocked, t)),
-                (cat.set_notify_done, toggle(n.on_done, t)),
-                (cat.set_notify_sound, toggle(n.sound, t)),
+                (cat.set_sound_done, toggle(n.sound_on_done, t)),
+                (cat.set_sound_blocked, toggle(n.sound_on_blocked, t)),
                 (
-                    cat.set_test_notification,
+                    cat.set_test_sound,
                     Line::from(Span::styled(
-                        format!("[ {} ]", cat.act_send),
+                        format!("[ ♪ {} ]", cat.act_play),
                         Style::new().fg(t.accent).bold(),
                     )),
                 ),

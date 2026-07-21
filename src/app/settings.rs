@@ -140,7 +140,7 @@ impl App {
         match tab {
             SettingsTab::Theme => theme::THEMES.len(),
             SettingsTab::Layout => self.layout_rows().len(),
-            SettingsTab::Notifications => 5,
+            SettingsTab::Notifications => 3,
             SettingsTab::Keys => crate::app::Cmd::ALL.len(),
             SettingsTab::Modules => self.modules.modules.len(),
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
@@ -297,7 +297,7 @@ impl App {
             // radio tabs: ‹ › move the selection like up/down
             SettingsTab::Theme | SettingsTab::Language => self.settings_move(delta),
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
-            SettingsTab::Notifications if cursor < 4 => self.toggle_notify(cursor),
+            SettingsTab::Notifications if cursor < 2 => self.toggle_notify(cursor),
             SettingsTab::Notifications => {} // the Test row only reacts to Enter/click
             SettingsTab::Keys => {}          // rebind is Enter (capture), not ‹ ›
             SettingsTab::Integrations => self.settings_activate(cursor),
@@ -317,7 +317,7 @@ impl App {
                 self.apply_language(crate::i18n::LANGS[cursor.min(crate::i18n::LANGS.len() - 1)])
             }
             SettingsTab::Layout => self.activate_layout(cursor),
-            SettingsTab::Notifications if cursor == 4 => self.test_notification(),
+            SettingsTab::Notifications if cursor == 2 => self.test_sound(),
             SettingsTab::Notifications => self.toggle_notify(cursor),
             // Enter on a Keys row starts capturing the next key as its binding.
             SettingsTab::Keys => {
@@ -457,20 +457,20 @@ impl App {
 
     fn toggle_notify(&mut self, cursor: usize) {
         match cursor {
-            0 => self.config.notifications.enabled = !self.config.notifications.enabled,
-            1 => self.config.notifications.on_blocked = !self.config.notifications.on_blocked,
-            2 => self.config.notifications.on_done = !self.config.notifications.on_done,
-            3 => self.config.notifications.sound = !self.config.notifications.sound,
+            0 => self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done,
+            1 => {
+                self.config.notifications.sound_on_blocked =
+                    !self.config.notifications.sound_on_blocked
+            }
             _ => {}
         }
         config::save(&self.config);
     }
 
-    /// Fire a one-off desktop notification so the user can confirm it works.
-    /// Bypasses the enabled toggle — it's an explicit manual test.
-    fn test_notification(&mut self) {
-        self.pending_notify
-            .push("bohay — test notification".to_string());
+    /// Play the retro chime once so the user can hear it before turning it on.
+    /// Bypasses both sound toggles — it's an explicit manual test.
+    fn test_sound(&mut self) {
+        self.pending_sound = true;
     }
 
     /// Toggle an agent's integration hook: install if absent, uninstall if present.
@@ -495,4 +495,33 @@ fn lang_cursor(code: &str) -> usize {
         .iter()
         .position(|c| *c == code)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The Notifications tab is three rows: the two sound toggles (persisted)
+    // and a Test row that rings the chime immediately, regardless of toggles.
+    #[test]
+    fn notifications_tab_toggles_sounds_and_tests_the_chime() {
+        let _env = crate::persist::test_env("notify-tab");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::Notifications;
+        }
+        assert_eq!(app.settings_rows(SettingsTab::Notifications), 3);
+        app.settings_activate(0);
+        assert!(app.config.notifications.sound_on_done, "row 0 toggles done");
+        app.settings_activate(1);
+        assert!(
+            app.config.notifications.sound_on_blocked,
+            "row 1 toggles blocked"
+        );
+        assert!(!app.pending_sound);
+        app.settings_activate(2);
+        assert!(app.pending_sound, "the Test row rings the chime");
+    }
 }

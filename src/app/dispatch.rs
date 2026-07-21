@@ -150,9 +150,9 @@ impl App {
         }
         // A state transition (or a newly-resumable agent) changes the sidebar.
         let changed = !changes.is_empty() || agent_appeared;
-        let (notify_on, on_blocked, on_done, sound_on) = {
+        let (sound_done, sound_blocked) = {
             let n = &self.config.notifications;
-            (n.enabled, n.on_blocked, n.on_done, n.sound)
+            (n.sound_on_done, n.sound_on_blocked)
         };
         for (id, st, agent) in changes {
             // Publishes to subscribers and fires any module `[[events]]` hooks.
@@ -175,43 +175,25 @@ impl App {
                 "pane.agent_status_changed",
                 json!({ "pane": id.0.to_string(), "status": state_str(st), "agent": agent, "cwd": cwd, "project": project }),
             );
-            // Queue a bell/desktop notification on the configured transitions —
-            // but only if this pane's bell is armed, so a streaming agent that
-            // flaps in and out of Done doesn't ring on every pause.
-            let armed = self.status.get(&id).is_some_and(|s| s.notify_armed);
-            let wanted = notify_on
-                && armed
-                && match st {
-                    State::Blocked => on_blocked,
-                    State::Done => on_done,
-                    _ => false,
-                };
-            // The retro "done" chime fires whenever an *agent* finishes a working
-            // stretch, independent of the desktop-notification toggle and of
-            // whether the pane is focused. The debounce already absorbs mid-turn
-            // pauses, so this is one chime per real finish. A plain shell going
-            // quiet is not an agent, so it stays silent.
+            // The optional retro chime (off by default). A plain shell going
+            // quiet or blocking is not an agent, so it stays silent either way.
             let is_agent_pane = crate::detect::is_agent(&agent)
                 || self
                     .status
                     .get(&id)
                     .is_some_and(|s| s.agent_session.is_some());
-            if sound_on && is_agent_pane && finished.contains(&id) {
+            // *Done*: one chime per real finish of a working stretch — the
+            // debounce already absorbs mid-turn pauses, and it rings whether or
+            // not the pane is focused (that's the point: you looked away).
+            if sound_done && is_agent_pane && finished.contains(&id) {
                 self.pending_sound = true;
             }
-            if wanted {
-                let proj = self
-                    .panes
-                    .get(&id)
-                    .and_then(|p| p.cwd.file_name().and_then(|n| n.to_str()))
-                    .unwrap_or("");
-                let msg = if proj.is_empty() {
-                    format!("{agent} {}", state_str(st))
-                } else {
-                    format!("{agent} {} · {proj}", state_str(st))
-                };
-                self.pending_notify.push(msg);
-                // Disarm until the user focuses this pane again.
+            // *Blocked*: the same chime, but armed per pane — a prompt that
+            // flaps while you ignore it rings once, and focusing the pane
+            // re-arms it for the next prompt.
+            let armed = self.status.get(&id).is_some_and(|s| s.notify_armed);
+            if sound_blocked && is_agent_pane && st == State::Blocked && armed {
+                self.pending_sound = true;
                 if let Some(s) = self.status.get_mut(&id) {
                     s.notify_armed = false;
                 }

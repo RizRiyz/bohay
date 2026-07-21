@@ -29,8 +29,8 @@ permission while you watch another think, and a third finished ten minutes ago
 without you noticing. bohay puts them all in one place.
 
 - **See everything at once** — a sidebar with every agent's live state (*blocked ·
-  working · done · idle*) across all your projects, plus a desktop ping the moment
-  one needs you.
+  working · done · idle*) across all your projects, plus an optional retro chime
+  the moment one finishes or needs you.
 - **Never lose a session** — panes survive closing the terminal; reattach and each
   agent's own conversation resumes automatically, no flags to remember.
 - **Run agents in parallel, safely** — a task board gives each worker an isolated
@@ -87,7 +87,7 @@ Live status works out of the box for every agent. [Session resume & hooks →](h
 
 ## What's inside
 
-- **Live agent sidebar** — every agent's state across all projects, a spinner while it works, a retro chime when it finishes, and silent desktop notifications.
+- **Live agent sidebar** — every agent's state across all projects, a spinner while it works, and an optional retro chime when one finishes or blocks (off by default).
 - **States you can trust** — *working* needs on-screen proof (a spinner, an interrupt hint), so a launching CLI or your own typing never reads as work. Tune or add agents with plain TOML rules in `~/.bohay/manifests/`.
 - **Zero-config resume** — reopens each agent's own session after a restart, discovered automatically. Restored panes open straight into the resuming agent, nothing typed at a prompt.
 - **A session that can't die by accident** — only `bohay server stop` ends it. Closing the last pane keeps the server alive, and a reboot or kill saves everything on the way out.

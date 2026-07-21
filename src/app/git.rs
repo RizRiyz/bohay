@@ -73,7 +73,6 @@ impl App {
             GitPayload::Status(Ok(s)) => Some((s.ahead, s.behind)),
             _ => None,
         };
-        let notify = self.config.notifications.enabled;
         for wi in 0..self.workspaces.len() {
             for ti in 0..self.workspaces[wi].tabs.len() {
                 if let Some(g) = self.workspaces[wi].tabs[ti].git.as_deref_mut() {
@@ -82,14 +81,12 @@ impl App {
                         // payoff: code with Claude, get pinged when CI fails).
                         let mut alerts = Vec::new();
                         if let GitPayload::Prs(Ok(new)) = &payload {
-                            if notify {
-                                for pr in new {
-                                    let was = g.prev_pr_checks.get(&pr.number).copied();
-                                    if pr.checks == crate::git::Checks::Failing
-                                        && was.is_some_and(|w| w != crate::git::Checks::Failing)
-                                    {
-                                        alerts.push(format!("PR #{} checks failed", pr.number));
-                                    }
+                            for pr in new {
+                                let was = g.prev_pr_checks.get(&pr.number).copied();
+                                if pr.checks == crate::git::Checks::Failing
+                                    && was.is_some_and(|w| w != crate::git::Checks::Failing)
+                                {
+                                    alerts.push(format!("PR #{} checks failed", pr.number));
                                 }
                             }
                             g.prev_pr_checks = new.iter().map(|p| (p.number, p.checks)).collect();
@@ -895,7 +892,6 @@ mod tests {
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        app.config.notifications.enabled = true;
 
         let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
         view.prev_pr_checks.insert(42, Checks::Passing); // was green
