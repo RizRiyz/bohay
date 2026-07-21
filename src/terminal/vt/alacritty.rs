@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as VtColor, Processor};
@@ -124,9 +125,16 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn for_each_cell(&self, f: &mut dyn FnMut(u16, u16, RenderCell)) {
-        for indexed in self.term.grid().display_iter() {
-            let row = indexed.point.line.0;
-            if row < 0 {
+        // `display_iter` walks the *displayed* region, whose lines are *negative*
+        // once scrolled into history (it starts at `Line(-display_offset)`).
+        // Shift by the offset to get viewport rows `0..screen_lines`; dropping
+        // the negative ones instead would blank the pane the further you scroll.
+        let grid = self.term.grid();
+        let offset = grid.display_offset() as i32;
+        let rows = grid.screen_lines() as i32;
+        for indexed in grid.display_iter() {
+            let row = indexed.point.line.0 + offset;
+            if !(0..rows).contains(&row) {
                 continue;
             }
             let cell = indexed.cell;
@@ -147,34 +155,47 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn detection_text(&self, n: u16) -> String {
+        // Index the grid by `Line` rather than using `display_iter()`: line
+        // indexing is relative to the **live** screen (`Storage::compute_index`
+        // ignores `display_offset`), while `display_iter` follows the user's
+        // scrollback position. Agent state must describe what the agent is doing
+        // *now*, not whatever the user happens to be looking at — scrollback
+        // preserves the spinner/interrupt frames of earlier turns, so reading the
+        // scrolled viewport made a quiet agent read as Working the moment you
+        // scrolled up (docs/07).
         let grid = self.term.grid();
         let rows = grid.screen_lines();
-        let mut lines = vec![String::new(); rows];
-        for indexed in grid.display_iter() {
-            let r = indexed.point.line.0;
-            if r < 0 || r as usize >= rows {
-                continue;
-            }
-            if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let c = indexed.cell.c;
-            lines[r as usize].push(if c == '\0' { ' ' } else { c });
-        }
+        let cols = grid.columns();
         let start = rows.saturating_sub(n as usize);
-        lines[start..]
-            .iter()
-            .map(|l| l.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut out = String::new();
+        for r in start..rows {
+            let row = &grid[Line(r as i32)];
+            let mut line = String::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                line.push(if cell.c == '\0' { ' ' } else { cell.c });
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line.trim_end());
+        }
+        out
     }
 
     fn visible_rows(&self) -> Vec<String> {
+        // Same offset shift as `for_each_cell` — these are the rows the user can
+        // see, so a selection made while scrolled back must copy the history
+        // text, not come back empty.
         let grid = self.term.grid();
         let rows = grid.screen_lines();
+        let offset = grid.display_offset() as i32;
         let mut lines = vec![String::new(); rows];
         for indexed in grid.display_iter() {
-            let r = indexed.point.line.0;
+            let r = indexed.point.line.0 + offset;
             if r < 0 || r as usize >= rows {
                 continue;
             }
@@ -369,6 +390,85 @@ mod tests {
     fn feed_lines(e: &mut AlacrittyEngine, n: usize) {
         for i in 0..n {
             e.advance(format!("line{i}\r\n").as_bytes());
+        }
+    }
+
+    // docs/07: agent detection must read the **live** screen, never the
+    // scrolled-back viewport. Scrollback preserves the spinner/interrupt frames
+    // an agent printed earlier, so a user scrolling up would otherwise drag a
+    // stale "working" marker into the detection window and the pane would read
+    // as Working while the agent sits idle.
+    // Regression: `display_iter` yields *negative* lines once scrolled into
+    // history, so skipping `r < 0` progressively blanked the pane — at the top of
+    // history it drew nothing at all, and a selection there copied nothing.
+    #[test]
+    fn scrolled_back_still_renders_and_copies_history() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 6, tx);
+        e.advance(b"OLDEST\r\n");
+        feed_lines(&mut e, 40);
+
+        let cells = |e: &AlacrittyEngine| {
+            let mut n = 0usize;
+            e.for_each_cell(&mut |_r, _c, cell| {
+                if cell.c != ' ' {
+                    n += 1
+                }
+            });
+            n
+        };
+        assert!(cells(&e) > 0, "live screen draws");
+
+        e.scroll_to_top();
+        assert!(e.scroll_offset() > 0, "we are in history");
+        assert!(
+            cells(&e) > 0,
+            "the top of history must still draw — this rendered blank before"
+        );
+        let visible = e.visible_rows().join("\n");
+        assert!(
+            visible.contains("OLDEST"),
+            "history text is selectable/copyable: {visible:?}"
+        );
+    }
+
+    #[test]
+    fn detection_text_ignores_scrollback_offset() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx);
+        // An old turn that was working, now scrolled far above the live screen.
+        e.advance(b"\xE2\xA0\xB9 Thinking... (esc to interrupt)\r\n");
+        feed_lines(&mut e, 40);
+        // The live bottom is quiet.
+        e.advance(b"$ \r\n");
+
+        let live = e.detection_text(14);
+        assert!(
+            !live.contains("esc to interrupt"),
+            "live screen has no stale marker: {live:?}"
+        );
+
+        // Walk the whole history: at *every* offset the detection window must
+        // still describe the live screen, so no scroll position can fabricate a
+        // working marker.
+        e.scroll_to_top();
+        let top = e.scroll_offset();
+        assert!(top > 0, "there is history to scroll through");
+        e.scroll_to_bottom();
+        for _ in 0..top {
+            e.scroll(1);
+            let at = e.detection_text(14);
+            assert_eq!(
+                at,
+                live,
+                "detection text changed at scroll offset {}",
+                e.scroll_offset()
+            );
+            assert!(
+                !at.contains("esc to interrupt"),
+                "scrolling resurrected an old working marker at offset {}",
+                e.scroll_offset()
+            );
         }
     }
 

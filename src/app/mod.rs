@@ -3624,6 +3624,66 @@ mod tests {
         );
     }
 
+    // docs/07 regression: scrolling a pane back into history must never report
+    // the agent as working. Scrollback preserves the spinner / "esc to interrupt"
+    // frames of earlier turns, so reading the *scrolled* viewport made an idle
+    // agent flip to Working the moment the user scrolled up to read something.
+    #[test]
+    fn scrolling_back_does_not_read_as_working() {
+        use crate::ui::theme::State;
+        let _env = crate::persist::test_env("scroll-state");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+
+        // An earlier turn printed a spinner + interrupt hint; it has long since
+        // scrolled off, and the live screen is a quiet prompt.
+        if let Some(p) = app.panes.get(&id) {
+            if let Ok(mut e) = p.engine.lock() {
+                e.advance("⠹ Thinking… (esc to interrupt)\r\n".as_bytes());
+                for i in 0..60 {
+                    e.advance(format!("output line {i}\r\n").as_bytes());
+                }
+                e.advance(b"$ \r\n");
+            }
+        }
+        {
+            let s = app.status.get_mut(&id).unwrap();
+            s.agent = "claude".into();
+            s.state = State::Idle;
+            s.last_activity = std::time::Instant::now() - Duration::from_secs(5);
+        }
+        let t0 = std::time::Instant::now();
+        app.detect_tick(t0);
+        assert_eq!(
+            app.status.get(&id).unwrap().state,
+            State::Idle,
+            "a quiet agent starts idle"
+        );
+
+        // Scroll up until that old marker is genuinely back on screen.
+        if let Some(p) = app.panes.get(&id) {
+            p.scroll(60);
+        }
+        let visible = app
+            .panes
+            .get(&id)
+            .and_then(|p| p.engine.lock().ok().map(|e| e.visible_rows().join("\n")))
+            .unwrap_or_default();
+        assert!(
+            visible.contains("esc to interrupt"),
+            "precondition: the stale marker is visible in the scrolled viewport"
+        );
+
+        // It is on screen, but it is history — the agent is still idle.
+        app.detect_tick(t0 + Duration::from_millis(200));
+        assert_eq!(
+            app.status.get(&id).unwrap().state,
+            State::Idle,
+            "scrolling into history must not report the agent as working"
+        );
+    }
+
     // docs/07: the same recent output reads Idle while the user is typing (echo)
     // but Working when the agent is generating (no recent input).
     #[test]

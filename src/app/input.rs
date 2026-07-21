@@ -311,6 +311,9 @@ impl App {
                     .map(|(_, r)| *r);
                 // Set after the pane borrow ends: `Some(v)` writes `scroll_pane = v`.
                 let mut set_scroll: Option<Option<PaneId>> = None;
+                // Forwarding the wheel makes the app repaint; that output is the
+                // user scrolling, not the agent working (docs/07).
+                let mut scrolled_the_app = false;
                 if let Some(pane) = self.panes.get(&id) {
                     let (mouse_report, sgr) = pane.mouse_mode();
                     if mouse_report {
@@ -324,6 +327,7 @@ impl App {
                         for _ in 0..3 {
                             pane.send(&seq);
                         }
+                        scrolled_the_app = true;
                     } else if !pane.alt_screen() {
                         // Primary screen with real history: scroll bohay's
                         // scrollback viewport (`scroll` is -3 up / +3 down, and a
@@ -338,7 +342,11 @@ impl App {
                         for _ in 0..scroll.abs() {
                             pane.send(seq);
                         }
+                        scrolled_the_app = true;
                     }
+                }
+                if scrolled_the_app {
+                    self.mark_input_for(id);
                 }
                 if let Some(v) = set_scroll {
                     self.scroll_pane = v;
@@ -692,6 +700,12 @@ impl App {
     /// (docs/07). Only the focused pane receives typed input.
     fn mark_user_input(&mut self) {
         let id = self.layout().focus;
+        self.mark_input_for(id);
+    }
+
+    /// Same, for a specific pane — the wheel targets the pane under the cursor,
+    /// which is not necessarily the focused one.
+    fn mark_input_for(&mut self, id: PaneId) {
         if let Some(s) = self.status.get_mut(&id) {
             s.last_input = Instant::now();
         }
