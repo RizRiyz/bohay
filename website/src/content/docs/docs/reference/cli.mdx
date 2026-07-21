@@ -49,8 +49,13 @@ panes / agents:
   attach <id>                open the TUI into a single fullscreen pane
 
 appearance:
-  ui sidebar --width <n>     set the sidebar width (columns)
-  ui sidebar --hide|--show   toggle the sidebar
+  ui sidebar [--side left|right] --width <n>     set a sidebar's width (columns)
+  ui sidebar [--side left|right] --hide|--show   toggle a sidebar
+  ui dock list               list docks and which side each is on
+  ui dock move --id <id> --side left|right       place a dock on a side
+  ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
+                             feed a module's sidebar dock its rows (JSON array,
+                             or piped on stdin) — see docs/29 + the website
 
 modules (extensions):
   module search [<query>]    find modules published to the `bohay-module` GitHub topic

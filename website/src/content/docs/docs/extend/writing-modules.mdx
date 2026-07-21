@@ -105,6 +105,99 @@ pane (a TUI, a log tail, anything), runs in the module root with the full
 `BOHAY_*` environment, and is auto-untracked on close. A module pane that's
 open when you detach is re-opened on the next launch.
 
+### `[[docks]]` — a panel in the sidebar
+
+A **dock** is a section that lives in one of bohay's two sidebars (left or
+right), alongside the built-in Workspaces and Agents lists. It's the way a
+plugin puts an always-visible panel — a git status, a CI feed, a notifications
+list — into the chrome.
+
+```toml
+[[docks]]
+id = "you.ci"                    # local id: [a-z0-9:_-], ≤120, NO dots
+title = "CI"                     # the dock header
+placement = "sidebar.right"      # default side: sidebar.left | sidebar.right
+```
+
+Unlike a pane, **your module doesn't draw a dock** — bohay owns the rendering
+and your module just **pushes rows**. That keeps docks fast (nothing runs per
+frame), visually consistent with the rest of the UI, and freely relocatable:
+from **Settings → Layout**, the user can move any dock between the left sidebar,
+the right sidebar, or turn it **Off** with `[Left] [Right] [Off]` buttons.
+
+Push rows with the CLI:
+
+```sh
+"$BOHAY_BIN_PATH" ui dock push --id you.ci --title CI --rows '[
+  {"text": "build passing", "dot": "done",    "action": "open-ci"},
+  {"text": "3 checks",      "dot": "working"}
+]'
+```
+
+or pipe the JSON array on stdin (handy when you build it with `jq`):
+
+```sh
+printf '%s' "$rows_json" | "$BOHAY_BIN_PATH" ui dock push --id you.ci --title CI
+```
+
+Each **row** is an object:
+
+| Field | Required | Meaning |
+|---|:---:|---|
+| `text` | ✓ | The row label. |
+| `dot` | — | A status dot: `idle` / `working` / `blocked` / `done` (colored like the Agents list). |
+| `action` | — | A module **action id** run when the row is clicked. |
+
+The **first push mounts** the dock into its `placement` side automatically (or
+wherever the user has since moved it); later pushes just refresh the rows. Clear
+a dock with an empty array: `--rows '[]'`.
+
+A row with an `action` is **clickable** — clicking it runs that action (exactly
+like `bohay module run <your-id> <action>`), so a dock can be interactive: click
+a failing check to open its page, click a branch to check it out.
+
+Declared docks show up in the **registry** in Settings → Layout even before they
+push anything, so the user can place them straight away. Disabling or unlinking
+your module removes its docks.
+
+#### A dock that stays fresh
+
+Docks are **event-driven and cached** — bohay never polls your module. Push when
+your data changes: from an `[[events]]` hook, a timer, or a long-lived
+`[[panes]]` process. A live git panel refreshed whenever an agent's status
+changes:
+
+```toml
+[[docks]]
+id = "you.git"
+title = "Git"
+placement = "sidebar.right"
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "push-git.sh"]
+```
+
+```sh
+#!/bin/sh
+# push-git.sh — build the rows with jq and push them
+cwd=$(printf '%s' "$BOHAY_MODULE_CONTEXT_JSON" | jq -r .node.cwd)
+branch=$(git -C "$cwd" branch --show-current)
+dirty=$(git -C "$cwd" status --porcelain | wc -l | tr -d ' ')
+rows=$(jq -n --arg b "$branch" --arg d "$dirty" '[
+  {text: ("on " + $b),        dot: "idle"},
+  {text: ($d + " changed"),   dot: (if $d == "0" then "done" else "working" end)}
+]')
+printf '%s' "$rows" | "$BOHAY_BIN_PATH" ui dock push --id you.git --title Git
+```
+
+That's a live git dock in the sidebar, kept current with zero per-frame cost.
+
+:::tip
+Namespace your dock id (e.g. `you.ci`, `acme:builds`) so it can't collide with
+another plugin's dock. Colons are allowed in a dock id; dots are not.
+:::
+
 ### `[[build]]` — install-time setup
 
 ```toml
@@ -119,8 +212,8 @@ socket access). For local `link` you run your own setup.
 
 A manifest is rejected if: any `command` is empty (or contains an empty
 string) · `min_bohay_version` is newer than the host · an id uses characters
-outside its set, or a local id contains a dot · two actions/panes share an id
-· `platforms = []`.
+outside its set, or a local id contains a dot · two actions/panes/docks share
+an id · `platforms = []`.
 
 :::note
 Commands run **without a shell** — `["git", "status"]`, not `"git status"`.
@@ -183,6 +276,7 @@ cd "$node_cwd" && git status --short
 "$BOHAY_BIN_PATH" pane run "git pull"     # run a command in the focused pane
 "$BOHAY_BIN_PATH" pane split --down       # change the layout
 "$BOHAY_BIN_PATH" workspace list          # inspect (JSON to stdout)
+"$BOHAY_BIN_PATH" ui dock push --id you.ci --rows '[...]'   # feed your sidebar dock
 ```
 
 Anything in `bohay help` is available. Your command reads context from the

@@ -41,11 +41,31 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.bohay/bohay.so
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.invoke` · `module.pane.open` · `module.log` |
-| ui / server | `ui.sidebar` · `ping` · `server.stop` · `events.subscribe` |
+| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ping` · `server.stop` · `events.subscribe` |
 
 Parameter shapes mirror the CLI flags (`bohay task add --paths x` →
 `{"paths": ["x"]}`). When a method takes a pane and none is given, it defaults
 to `$BOHAY_PANE_ID` — the calling pane.
+
+## Sidebar docks
+
+For plugins that contribute a **sidebar dock** (a panel in the left or right
+sidebar — see [Writing a Module](/docs/extend/writing-modules/)). A module
+declares the dock in its manifest and pushes its content here; bohay owns the
+rendering.
+
+| Method | Params | Result |
+|---|---|---|
+| `ui.sidebar` | `{side?: "left"\|"right", width?: int, visible?: bool}` | `{width, visible}` for that side |
+| `ui.dock.push` | `{id, title?, placement?: "left"\|"right", rows: Row[]}` | `{type:"ok"}` |
+| `ui.dock.list` | `{}` | `{docks: [{id, side}]}` |
+| `ui.dock.move` | `{id, side: "left"\|"right"}` | `{type:"ok"}` |
+
+A `Row` is `{"text": string, "dot"?: "idle"|"working"|"blocked"|"done",
+"action"?: string}`. The first `push` mounts the dock into `placement` (default
+left); later pushes refresh its rows. A row's `action` is a module action id,
+run when the row is clicked. The CLI wrappers are `bohay ui dock push|list|move`
+(`push` also reads its rows from stdin).
 
 ## The event stream
 
