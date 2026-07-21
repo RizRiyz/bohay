@@ -41,6 +41,9 @@ pub struct TabSnap {
     /// dashboard tab; its data lives in the shared `orch.json` ledger.
     #[serde(default)]
     pub orch: bool,
+    /// User-chosen tab name (docs/28); `None` → the tab shows its number.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -163,6 +166,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                     panes: Vec::new(),
                     git: true,
                     orch: false,
+                    name: tab.name.clone(),
                 });
                 continue;
             }
@@ -174,6 +178,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                     panes: Vec::new(),
                     git: false,
                     orch: true,
+                    name: tab.name.clone(),
                 });
                 continue;
             }
@@ -225,6 +230,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                 panes,
                 git: false,
                 orch: false,
+                name: tab.name.clone(),
             });
         }
         workspaces.push(WsSnap {

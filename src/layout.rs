@@ -16,7 +16,7 @@ pub enum Dir {
     Down,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Axis {
     /// Children side by side (vertical divider).
     Col,
@@ -38,6 +38,23 @@ pub struct PaneInfo {
     pub id: PaneId,
     pub rect: Rect,
 }
+
+/// A resizable boundary between two panes: the split node it belongs to (as a
+/// root→node path of A/B turns), its axis, the cell line it sits on, and the
+/// perpendicular extent it spans. Produced by [`TileLayout::dividers`].
+#[derive(Clone)]
+pub struct Divider {
+    /// Turns from the root to the owning `Split` (`false` → child A, `true` → B).
+    pub path: Vec<bool>,
+    pub axis: Axis,
+    /// Col: the divider column x. Row: the divider row y.
+    pub line: u16,
+    /// Perpendicular extent `[lo, hi)` the divider spans.
+    pub span: (u16, u16),
+}
+
+/// Minimum cells a pane keeps along the split axis, so a resize can't crush it.
+pub const MIN_PANE: u16 = 4;
 
 pub struct TileLayout {
     root: Node,
@@ -162,6 +179,158 @@ impl TileLayout {
             }
         }
         best
+    }
+
+    // ── resize (docs/27) ────────────────────────────────────────────────────
+
+    /// Every inter-pane divider within `area` (the same recursion as `panes`).
+    pub fn dividers(&self, area: Rect) -> Vec<Divider> {
+        let mut out = Vec::new();
+        let mut path = Vec::new();
+        collect_dividers(&self.root, area, &mut path, &mut out);
+        out
+    }
+
+    /// The divider within `tol` cells of `(c, r)` (nearest wins), or `None`.
+    pub fn divider_at(&self, area: Rect, c: u16, r: u16, tol: u16) -> Option<Divider> {
+        let mut best: Option<(u16, Divider)> = None;
+        for d in self.dividers(area) {
+            let (on_span, dist) = match d.axis {
+                Axis::Col => (
+                    r >= d.span.0 && r < d.span.1,
+                    (c as i32 - d.line as i32).unsigned_abs() as u16,
+                ),
+                Axis::Row => (
+                    c >= d.span.0 && c < d.span.1,
+                    (r as i32 - d.line as i32).unsigned_abs() as u16,
+                ),
+            };
+            if on_span && dist <= tol && best.as_ref().is_none_or(|(bd, _)| dist < *bd) {
+                best = Some((dist, d));
+            }
+        }
+        best.map(|(_, d)| d)
+    }
+
+    /// The divider nearest `(c, r)` regardless of distance (the Ctrl+drag path).
+    pub fn nearest_divider(&self, area: Rect, c: u16, r: u16) -> Option<Divider> {
+        self.dividers(area)
+            .into_iter()
+            .min_by_key(|d| match d.axis {
+                Axis::Col => (c as i32 - d.line as i32).unsigned_abs(),
+                Axis::Row => (r as i32 - d.line as i32).unsigned_abs(),
+            })
+    }
+
+    /// The rect the split node at `path` currently occupies (root walk with live
+    /// ratios) — converts a mouse position into a ratio during a drag.
+    pub fn node_rect(&self, area: Rect, path: &[bool]) -> Option<Rect> {
+        let mut node = &self.root;
+        let mut rect = area;
+        for &side in path {
+            match node {
+                Node::Split { axis, ratio, a, b } => {
+                    let (ra, rb) = split_rect(rect, *axis, *ratio);
+                    if side {
+                        node = b;
+                        rect = rb;
+                    } else {
+                        node = a;
+                        rect = ra;
+                    }
+                }
+                Node::Leaf(_) => return None,
+            }
+        }
+        Some(rect)
+    }
+
+    /// Set the ratio of the split node at `path`, clamped so both children keep
+    /// at least [`MIN_PANE`] cells.
+    pub fn set_ratio(&mut self, area: Rect, path: &[bool], ratio: f32) {
+        let Some(rect) = self.node_rect(area, path) else {
+            return;
+        };
+        let mut node = &mut self.root;
+        for &side in path {
+            match node {
+                Node::Split { a, b, .. } => node = if side { b } else { a },
+                Node::Leaf(_) => return,
+            }
+        }
+        if let Node::Split { axis, ratio: r, .. } = node {
+            let len = match axis {
+                Axis::Col => rect.width,
+                Axis::Row => rect.height,
+            };
+            if len == 0 {
+                return;
+            }
+            // Cap `min` at 0.5 so a node too small for two MIN_PANE children just
+            // centers (a valid clamp range) instead of panicking.
+            let min = (MIN_PANE as f32 / len as f32).min(0.5);
+            *r = ratio.clamp(min, 1.0 - min);
+        }
+    }
+
+    /// Keyboard resize: grow the focused pane toward `dir` by `delta` cells, by
+    /// nudging the nearest ancestor split whose divider is on that side. Returns
+    /// whether a split moved.
+    pub fn resize_focused(&mut self, area: Rect, dir: Dir, delta: i16) -> bool {
+        // (axis to move, which side of that split the focus must be on, sign).
+        let (want_axis, want_side, sign): (Axis, bool, f32) = match dir {
+            Dir::Right => (Axis::Col, false, 1.0), // focus in child A, grow A
+            Dir::Left => (Axis::Col, true, -1.0),  // focus in child B, grow B
+            Dir::Down => (Axis::Row, false, 1.0),
+            Dir::Up => (Axis::Row, true, -1.0),
+        };
+        let mut leaf_path = Vec::new();
+        if !path_to_leaf(&self.root, self.focus, &mut leaf_path) {
+            return false;
+        }
+        // Deepest ancestor split matching (axis, side) — closest to the focus.
+        for k in (0..leaf_path.len()).rev() {
+            if leaf_path[k] != want_side {
+                continue;
+            }
+            let prefix = leaf_path[..k].to_vec();
+            let (axis, cur) = match self.node_at(&prefix) {
+                Some(Node::Split { axis, ratio, .. }) => (*axis, *ratio),
+                _ => continue,
+            };
+            if axis != want_axis {
+                continue;
+            }
+            let Some(rect) = self.node_rect(area, &prefix) else {
+                continue;
+            };
+            let len = match want_axis {
+                Axis::Col => rect.width,
+                Axis::Row => rect.height,
+            };
+            if len == 0 {
+                return false;
+            }
+            self.set_ratio(area, &prefix, cur + sign * (delta as f32 / len as f32));
+            return true;
+        }
+        false
+    }
+
+    /// Reset every split to an even 50/50 (the `=` action in resize mode).
+    pub fn equalize(&mut self) {
+        equalize_node(&mut self.root);
+    }
+
+    fn node_at(&self, path: &[bool]) -> Option<&Node> {
+        let mut node = &self.root;
+        for &side in path {
+            match node {
+                Node::Split { a, b, .. } => node = if side { b } else { a },
+                Node::Leaf(_) => return None,
+            }
+        }
+        Some(node)
     }
 }
 
@@ -334,6 +503,61 @@ fn center(r: Rect) -> (i32, i32) {
     )
 }
 
+/// Emit every split's divider (line + perpendicular span), tagging each with the
+/// path taken to reach it, then recurse into both children.
+fn collect_dividers(node: &Node, area: Rect, path: &mut Vec<bool>, out: &mut Vec<Divider>) {
+    if let Node::Split { axis, ratio, a, b } = node {
+        let (ra, rb) = split_rect(area, *axis, *ratio);
+        let (line, span) = match axis {
+            // The boundary sits just past child A (gap-aware, since `split_rect`
+            // already subtracted the gap when sizing A).
+            Axis::Col => (ra.right(), (area.y, area.bottom())),
+            Axis::Row => (ra.bottom(), (area.x, area.right())),
+        };
+        out.push(Divider {
+            path: path.clone(),
+            axis: *axis,
+            line,
+            span,
+        });
+        path.push(false);
+        collect_dividers(a, ra, path, out);
+        path.pop();
+        path.push(true);
+        collect_dividers(b, rb, path, out);
+        path.pop();
+    }
+}
+
+/// Fill `out` with the A/B turns from the root to the leaf `target`. Returns
+/// `false` (leaving `out` restored) if the leaf isn't in this subtree.
+fn path_to_leaf(node: &Node, target: PaneId, out: &mut Vec<bool>) -> bool {
+    match node {
+        Node::Leaf(id) => *id == target,
+        Node::Split { a, b, .. } => {
+            out.push(false);
+            if path_to_leaf(a, target, out) {
+                return true;
+            }
+            out.pop();
+            out.push(true);
+            if path_to_leaf(b, target, out) {
+                return true;
+            }
+            out.pop();
+            false
+        }
+    }
+}
+
+fn equalize_node(node: &mut Node) {
+    if let Node::Split { ratio, a, b, .. } = node {
+        *ratio = 0.5;
+        equalize_node(a);
+        equalize_node(b);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +583,94 @@ mod tests {
         assert_eq!(l.len(), 1);
         assert_eq!(l.focus, a);
         assert!(l.remove(a)); // empty
+    }
+
+    #[test]
+    fn dividers_and_set_ratio() {
+        let a = PaneId::alloc();
+        let mut l = TileLayout::new(a);
+        let b = PaneId::alloc();
+        l.split_focused(Axis::Col, b); // a | b, 50/50
+        let area = Rect::new(0, 0, 80, 24);
+
+        let divs = l.dividers(area);
+        assert_eq!(divs.len(), 1);
+        assert_eq!(divs[0].axis, Axis::Col);
+        // The divider sits at child A's right edge.
+        let a_rect = l.panes(area).into_iter().find(|p| p.id == a).unwrap().rect;
+        assert_eq!(divs[0].line, a_rect.right());
+
+        // Widen A and confirm the rects follow.
+        let path = divs[0].path.clone();
+        let width = |l: &TileLayout, id| {
+            l.panes(area)
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .rect
+                .width
+        };
+        l.set_ratio(area, &path, 0.75);
+        assert!(width(&l, a) > width(&l, b), "A wider after ratio 0.75");
+
+        // Absurd ratios clamp so neither child drops below MIN_PANE.
+        l.set_ratio(area, &path, 9.0);
+        assert!(
+            width(&l, b) >= MIN_PANE,
+            "B keeps >= MIN_PANE, got {}",
+            width(&l, b)
+        );
+        l.set_ratio(area, &path, -9.0);
+        assert!(
+            width(&l, a) >= MIN_PANE,
+            "A keeps >= MIN_PANE, got {}",
+            width(&l, a)
+        );
+    }
+
+    #[test]
+    fn keyboard_resize_grows_focus_then_equalizes() {
+        let a = PaneId::alloc();
+        let mut l = TileLayout::new(a);
+        let b = PaneId::alloc();
+        l.split_focused(Axis::Col, b); // focus = b (right child)
+        let area = Rect::new(0, 0, 80, 24);
+        let width = |l: &TileLayout, id| {
+            l.panes(area)
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .rect
+                .width
+        };
+
+        // Focus b (child B): Left grows it (divider moves left).
+        let before = width(&l, b);
+        assert!(l.resize_focused(area, Dir::Left, 6));
+        assert!(width(&l, b) > before, "focused B grew leftward");
+
+        // Equalize restores a near-even split.
+        l.equalize();
+        let (wa, wb) = (width(&l, a) as i32, width(&l, b) as i32);
+        assert!((wa - wb).abs() <= 1, "equalized: {wa} vs {wb}");
+    }
+
+    #[test]
+    fn resize_ratio_survives_serialization() {
+        let a = PaneId::alloc();
+        let mut l = TileLayout::new(a);
+        let b = PaneId::alloc();
+        l.split_focused(Axis::Row, b);
+        let area = Rect::new(0, 0, 40, 40);
+        let path = l.dividers(area)[0].path.clone();
+        l.set_ratio(area, &path, 0.3);
+        let want = l.panes(area).into_iter().find(|p| p.id == a).unwrap().rect;
+
+        // Round-trip through the serializable mirror.
+        let tree = l.to_tree();
+        let remap: HashMap<u32, PaneId> = [(a.0, a), (b.0, b)].into_iter().collect();
+        let l2 = TileLayout::from_tree(&tree, &remap, a.0).unwrap();
+        let got = l2.panes(area).into_iter().find(|p| p.id == a).unwrap().rect;
+        assert_eq!(want, got, "resized ratio persisted");
     }
 }

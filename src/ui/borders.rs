@@ -99,11 +99,23 @@ fn on_perimeter(x: u16, y: u16, r: Rect) -> bool {
     (in_y && (x == r.x || x == right)) || (in_x && (y == r.y || y == bottom))
 }
 
-/// Draw every pane's border in one overlay pass.
+/// True if cell `(x, y)` is on (within 1 cell of) divider `d` — the hover
+/// affordance grab zone (docs/27, RESIZE-4).
+fn divider_covers(d: &crate::layout::Divider, x: u16, y: u16) -> bool {
+    use crate::layout::Axis;
+    match d.axis {
+        Axis::Col => y >= d.span.0 && y < d.span.1 && (x as i32 - d.line as i32).abs() <= 1,
+        Axis::Row => x >= d.span.0 && x < d.span.1 && (y as i32 - d.line as i32).abs() <= 1,
+    }
+}
+
+/// Draw every pane's border in one overlay pass. `hover`, when set, brightens the
+/// divider under the cursor so it reads as draggable.
 pub(super) fn render_pane_borders(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     focus: PaneId,
+    hover: Option<&crate::layout::Divider>,
     t: &Theme,
 ) {
     if rects.len() < 2 {
@@ -123,7 +135,9 @@ pub(super) fn render_pane_borders(
         if x >= area.right() || y >= area.bottom() {
             continue;
         }
-        let focused = focus_rect.is_some_and(|r| on_perimeter(x, y, r));
+        // A hovered divider highlights like the focused pane (thick + accent).
+        let on_hover = hover.is_some_and(|d| divider_covers(d, x, y));
+        let focused = on_hover || focus_rect.is_some_and(|r| on_perimeter(x, y, r));
         let sym = line_cell_symbol(line, focused);
         if sym.is_empty() {
             continue;

@@ -65,8 +65,33 @@ impl App {
         }
     }
 
+    /// The key a click maps to on an open text-input modal's footer: `⏎` on the
+    /// commit button, `Esc` on cancel, `None` anywhere else. Lets the mouse drive
+    /// the same commit/cancel path as the keyboard.
+    fn modal_button_key(
+        &self,
+        m: &ratatui::crossterm::event::MouseEvent,
+    ) -> Option<ratatui::crossterm::event::KeyEvent> {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+        };
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let (c, r) = (m.column, m.row);
+            let on = |rect: Option<Rect>| {
+                rect.is_some_and(|x| c >= x.x && c < x.right() && r >= x.y && r < x.bottom())
+            };
+            if on(self.modal_commit_rect) {
+                return Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            if on(self.modal_cancel_rect) {
+                return Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            }
+        }
+        None
+    }
+
     fn handle_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
-        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
         // Any click dismisses the help overlay.
@@ -109,9 +134,64 @@ impl App {
             }
             return;
         }
+        // The workspace context menu / rename modal own the mouse while open.
+        if self.ws_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.ws_menu_click(m.column, m.row); // an item, or dismiss
+            }
+            return;
+        }
+        // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
+        // any other click is swallowed (the centered modal owns the screen).
+        if self.worktree_prompt.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_worktree_prompt_key(k);
+            }
+            return;
+        }
+        if self.tab_rename.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_tab_rename_key(k);
+            }
+            return;
+        }
+        if self.ws_rename.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_ws_rename_key(k);
+            }
+            return;
+        }
+        // Track which divider (if any) the cursor is over, for the hover
+        // highlight (docs/27, RESIZE-4).
+        self.update_hover_divider(m.column, m.row);
+        // Right-click a pane tab to rename it (docs/28), or a WORKSPACES row to
+        // open its context menu (rename / worktree / close).
+        if let MouseEventKind::Down(MouseButton::Right) = m.kind {
+            let (c, r) = (m.column, m.row);
+            let hit =
+                |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
+            if let Some((i, _)) = self.tab_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_tab_rename(*i);
+            } else if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_ws_menu(*i, c, r);
+            }
+            return;
+        }
         // ── pane text selection: drag to select, release auto-copies (OSC 52) ──
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Pane resize (docs/27) takes priority over selection: a divider
+                // sits on borders/gaps, outside any content rect, so grabbing one
+                // never conflicts. RESIZE-2 = drag the divider directly;
+                // RESIZE-5 = `Ctrl`+drag inside a pane grabs the nearest divider.
+                if self.begin_resize(m.column, m.row) {
+                    return;
+                }
+                if m.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.begin_resize_nearest(m.column, m.row)
+                {
+                    return;
+                }
                 // Begin a selection only inside a pane's content; otherwise drop
                 // any old one. Falls through to normal click handling (focus/etc).
                 self.selection = self
@@ -124,6 +204,10 @@ impl App {
                     });
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.resize_drag.is_some() {
+                    self.update_resize(m.column, m.row);
+                    return;
+                }
                 if let Some(sel) = self.selection.as_mut() {
                     let c = sel.content;
                     sel.cursor = (
@@ -134,6 +218,10 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.resize_drag.is_some() {
+                    self.end_resize();
+                    return;
+                }
                 // A real drag copies its text + flashes a toast; a plain click
                 // clears the (1-cell) selection so nothing stays highlighted.
                 match self.selection_text() {
@@ -240,6 +328,12 @@ impl App {
         // The sidebar gear opens Settings.
         if self.settings_icon_rect.is_some_and(hit) {
             self.open_settings();
+            return;
+        }
+        // The `❯` chevron (sidebar header, or the tab-bar's left edge when the
+        // sidebar is hidden) shows/hides the sidebar — same as ⌃Space b.
+        if self.sidebar_toggle_rect.is_some_and(hit) {
+            self.sidebar_visible = !self.sidebar_visible;
             return;
         }
         // Left click: close/add buttons first, then tabs → agents → ws → panes.
@@ -402,6 +496,35 @@ impl App {
     /// `j`/`k`/arrows = lines, `f`/`b`/Space/PageUp/Down = pages, `g`/`G` =
     /// top/live, `1`–`9` = jump (1 oldest … 9 newest), `0`/`G`/`q`/`Esc`/typing =
     /// back to live. See [`App::scroll_pane`].
+    /// Keyboard resize mode (docs/27, RESIZE-3): arrows / `hjkl` resize the
+    /// focused pane, `=`/`0` equalize, anything else (`Esc`/`Enter`/`q`/…) exits.
+    fn handle_resize_mode_key(&mut self, key: KeyEvent) -> bool {
+        use ratatui::crossterm::event::KeyModifiers;
+        const STEP: i16 = 3;
+        let big = key.modifiers.contains(KeyModifiers::SHIFT)
+            || matches!(key.code, KeyCode::Char('H' | 'J' | 'K' | 'L'));
+        let step = if big { STEP * 2 } else { STEP };
+        let dir = match key.code {
+            KeyCode::Left | KeyCode::Char('h' | 'H') => Some(Dir::Left),
+            KeyCode::Down | KeyCode::Char('j' | 'J') => Some(Dir::Down),
+            KeyCode::Up | KeyCode::Char('k' | 'K') => Some(Dir::Up),
+            KeyCode::Right | KeyCode::Char('l' | 'L') => Some(Dir::Right),
+            _ => None,
+        };
+        if let Some(dir) = dir {
+            let area = self.last_pane_area;
+            self.layout_mut().resize_focused(area, dir, step);
+            return true;
+        }
+        if matches!(key.code, KeyCode::Char('=' | '+' | '0')) {
+            self.layout_mut().equalize();
+            return true;
+        }
+        // Esc / Enter / q / the prefix / any other key leaves resize mode.
+        self.mode = Mode::Normal;
+        true
+    }
+
     fn handle_scroll_mode_key(&mut self, key: KeyEvent) -> bool {
         let Some(id) = self.scroll_pane else {
             return false;
@@ -555,6 +678,20 @@ impl App {
             self.handle_worktree_prompt_key(key);
             return true;
         }
+        // The tab-rename modal (docs/28) captures all input while open.
+        if self.tab_rename.is_some() {
+            self.handle_tab_rename_key(key);
+            return true;
+        }
+        // The workspace context menu / rename modal capture all input while open.
+        if self.ws_menu.is_some() {
+            self.handle_ws_menu_key(key);
+            return true;
+        }
+        if self.ws_rename.is_some() {
+            self.handle_ws_rename_key(key);
+            return true;
+        }
         // The board's new-task form captures all input while open (ORCH-7).
         if self.orch_form.is_some() {
             self.handle_orch_form_key(key);
@@ -564,6 +701,11 @@ impl App {
         // no `Ctrl+Space` prefix involved — the Mac-friendly path.
         if self.scroll_pane.is_some() {
             return self.handle_scroll_mode_key(key);
+        }
+        // Keyboard resize mode (docs/27, RESIZE-3) likewise owns every key until
+        // it's left (arrows/`hjkl` resize; `Esc`/`Enter`/`q` exit).
+        if self.mode == Mode::Resize {
+            return self.handle_resize_mode_key(key);
         }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the
         // `Ctrl+Space` prefix still works for global ops (switch tab/workspace, …).
@@ -654,6 +796,8 @@ impl App {
                 }
                 false // plain input → the pane; its echo (PtyData) renders it
             }
+            // Intercepted above (before this match); handled here too for safety.
+            Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
 }

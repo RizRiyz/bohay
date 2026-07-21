@@ -770,6 +770,238 @@ mod tests {
         assert!(text.contains("NORMAL"), "status mode missing");
     }
 
+    /// The bottom-left status button shows/hides the sidebar; hiding it also
+    /// clears the sidebar's stale click geometry so the old Menu spot can't fire.
+    #[test]
+    fn sidebar_toggle_button_shows_and_hides() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        thread::sleep(Duration::from_millis(100));
+
+        let (w, h) = (110u16, 32u16);
+        let render = |app: &mut App| -> String {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| ui::render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            buf.content().iter().map(|c| c.symbol()).collect()
+        };
+        let click = |app: &mut App, c: u16, r: u16| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: c,
+                row: r,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+
+        // Starts visible: header shows, and the brand `«` chevron (top-left of
+        // the sidebar) is the collapse toggle.
+        let text = render(&mut app);
+        assert!(text.contains("WORKSPACES"), "sidebar should start visible");
+        assert!(text.contains('«'), "brand collapse chevron shows");
+        let btn = app.sidebar_toggle_rect.expect("toggle placed");
+        assert_eq!(btn.y, 1, "toggle sits on the brand row");
+        assert!(btn.x < 4, "toggle near the top-left");
+        assert!(app.settings_icon_rect.is_some(), "menu present while shown");
+
+        // Click the chevron → sidebar hides and its stale click geometry clears.
+        click(&mut app, btn.x, btn.y);
+        assert!(!app.sidebar_visible, "click hides the sidebar");
+        let text = render(&mut app);
+        assert!(!text.contains("WORKSPACES"), "sidebar hidden after toggle");
+        assert!(
+            text.contains('»'),
+            "reopen expand chevron shows when hidden"
+        );
+        assert!(app.settings_icon_rect.is_none(), "stale menu rect cleared");
+        assert!(
+            app.agents_filter_rects.is_empty(),
+            "stale filter rects cleared"
+        );
+
+        // A reopen `»` now sits at the tab-bar's top-left corner.
+        let btn = app
+            .sidebar_toggle_rect
+            .expect("reopen toggle placed while hidden");
+        assert_eq!(
+            (btn.x, btn.y),
+            (0, 0),
+            "reopen toggle at the top-left corner"
+        );
+        click(&mut app, btn.x, btn.y);
+        assert!(app.sidebar_visible, "click shows the sidebar again");
+        assert!(render(&mut app).contains("WORKSPACES"), "sidebar restored");
+    }
+
+    /// The ⏎-commit / esc-cancel footer of the text-input modals is clickable,
+    /// driving the same commit/cancel path as the keyboard.
+    #[test]
+    fn modal_footer_buttons_are_clickable() {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::layout::Rect;
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        thread::sleep(Duration::from_millis(100));
+
+        let render = |app: &mut App| {
+            let mut t = Terminal::new(TestBackend::new(100, 32)).unwrap();
+            t.draw(|f| ui::render(f, app)).unwrap();
+        };
+        let click = |app: &mut App, r: Rect| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: r.x + 1,
+                row: r.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let typ = |app: &mut App, s: &str| {
+            for c in s.chars() {
+                app.handle_event(AppEvent::Key(KeyEvent::new(
+                    KeyCode::Char(c),
+                    KeyModifiers::NONE,
+                )));
+            }
+        };
+        let clear = |app: &mut App, n: usize| {
+            for _ in 0..n {
+                app.handle_event(AppEvent::Key(KeyEvent::new(
+                    KeyCode::Backspace,
+                    KeyModifiers::NONE,
+                )));
+            }
+        };
+
+        // Rename: type, then click the ⏎ commit button → label changes.
+        app.open_ws_rename(0);
+        render(&mut app);
+        let n = app.workspaces[0].name.chars().count();
+        clear(&mut app, n);
+        typ(&mut app, "clicked");
+        render(&mut app);
+        let commit = app.modal_commit_rect.expect("commit button placed");
+        click(&mut app, commit);
+        assert!(app.ws_rename.is_none(), "clicking ⏎ commits + closes");
+        assert_eq!(
+            app.workspaces[0].name, "clicked",
+            "commit applied via click"
+        );
+
+        // Rename again, then click esc cancel → the edit is discarded.
+        app.open_ws_rename(0);
+        render(&mut app);
+        typ(&mut app, "XXX");
+        render(&mut app);
+        let cancel = app.modal_cancel_rect.expect("cancel button placed");
+        click(&mut app, cancel);
+        assert!(app.ws_rename.is_none(), "clicking esc cancels + closes");
+        assert_eq!(
+            app.workspaces[0].name, "clicked",
+            "cancel discards the edit"
+        );
+
+        // The worktree prompt's cancel button also closes it (no worktree made).
+        app.worktree_prompt = Some("feature".into());
+        render(&mut app);
+        let cancel = app.modal_cancel_rect.expect("worktree cancel placed");
+        click(&mut app, cancel);
+        assert!(
+            app.worktree_prompt.is_none(),
+            "worktree prompt cancels via click"
+        );
+    }
+
+    /// Right-clicking a WORKSPACES row opens a context menu; picking Rename edits
+    /// the label (not the folder), and picking Close removes the workspace.
+    #[test]
+    fn workspace_context_menu_rename_and_close() {
+        use crate::app::WsMenuItem;
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        thread::sleep(Duration::from_millis(100));
+        // A second workspace so closing one doesn't quit the app.
+        app.create_workspace_at(std::env::temp_dir());
+
+        let render = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(110, 32)).unwrap();
+            term.draw(|f| ui::render(f, app)).unwrap();
+        };
+        let mouse = |app: &mut App, btn, c: u16, r: u16| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(btn),
+                column: c,
+                row: r,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        let key = |app: &mut App, code| {
+            app.handle_event(AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        let ws_row = |app: &App| {
+            app.ws_rects
+                .iter()
+                .find(|(i, _)| *i == 0)
+                .map(|(_, r)| *r)
+                .expect("workspace row rect")
+        };
+        let item_rect = |app: &App, want: WsMenuItem| {
+            app.ws_menu
+                .as_ref()
+                .expect("menu open")
+                .items
+                .iter()
+                .find(|(it, _)| *it == want)
+                .map(|(_, r)| *r)
+                .expect("menu item")
+        };
+
+        // Right-click the first workspace → its context menu opens.
+        render(&mut app);
+        let row = ws_row(&app);
+        mouse(&mut app, MouseButton::Right, row.x + 1, row.y);
+        assert!(app.ws_menu.is_some(), "right-click opens the menu");
+        render(&mut app); // populates item rects
+
+        // Pick Rename → the modal opens pre-filled with the current label.
+        let rn = item_rect(&app, WsMenuItem::Rename);
+        mouse(&mut app, MouseButton::Left, rn.x + 1, rn.y);
+        assert!(app.ws_menu.is_none(), "menu closes after a pick");
+        let name0 = app.workspaces[0].name.clone();
+        let cwd0 = app.workspaces[0].cwd.clone();
+        assert_eq!(
+            app.ws_rename.as_ref().expect("rename modal").buffer,
+            name0,
+            "prefilled with the name"
+        );
+        for _ in 0..name0.chars().count() {
+            key(&mut app, KeyCode::Backspace);
+        }
+        for ch in "renamed".chars() {
+            key(&mut app, KeyCode::Char(ch));
+        }
+        key(&mut app, KeyCode::Enter);
+        assert!(app.ws_rename.is_none(), "Enter commits + closes");
+        assert_eq!(app.workspaces[0].name, "renamed", "label updated");
+        assert_eq!(app.workspaces[0].cwd, cwd0, "folder path untouched");
+
+        // Right-click again → Close removes the workspace (without quitting).
+        let n = app.workspaces.len();
+        render(&mut app);
+        let row = ws_row(&app);
+        mouse(&mut app, MouseButton::Right, row.x + 1, row.y);
+        render(&mut app);
+        let cl = item_rect(&app, WsMenuItem::Close);
+        mouse(&mut app, MouseButton::Left, cl.x + 1, cl.y);
+        assert_eq!(app.workspaces.len(), n - 1, "Close removes the workspace");
+        assert!(!app.should_quit, "a workspace remains");
+    }
+
     /// An absurdly small terminal renders the "enlarge" notice instead of
     /// degraded chrome — and no size, however tiny, panics a draw path.
     #[test]

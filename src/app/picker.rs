@@ -83,6 +83,17 @@ impl App {
             .filter(|p| p.is_dir())
             .or_else(crate::platform::home_dir)
             .unwrap_or_else(|| PathBuf::from("/"));
+        self.open_folder_picker_at(start);
+    }
+
+    /// Open the folder picker starting at `start` (falls back to `$HOME` if it's
+    /// not a directory). Used by the workspace menu's "Open worktree".
+    pub fn open_folder_picker_at(&mut self, start: PathBuf) {
+        let start = start
+            .is_dir()
+            .then_some(start)
+            .or_else(crate::platform::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
         self.picker = Some(FolderPicker {
             path: start,
             entries: Vec::new(),
