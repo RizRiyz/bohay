@@ -167,6 +167,39 @@ impl PaneMenuItem {
     ];
 }
 
+/// What an [`AgentMenu`] targets: a resumable on-disk session (by list index) or
+/// a live agent pane.
+#[derive(Clone, Copy)]
+pub enum AgentTarget {
+    Session(usize),
+    Live(PaneId),
+}
+
+/// A right-click context menu on an AGENTS-list row. A resumable session offers
+/// **Resume** (reopen) + **Close** (remove from the list); a live agent offers
+/// **Close** (close its pane).
+pub struct AgentMenu {
+    pub target: AgentTarget,
+    pub anchor: (u16, u16),
+    pub items: Vec<(AgentMenuItem, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentMenuItem {
+    Resume,
+    Close,
+}
+
+impl AgentMenu {
+    /// The items shown for a given target, in render order.
+    pub fn items_for(target: AgentTarget) -> Vec<AgentMenuItem> {
+        match target {
+            AgentTarget::Session(_) => vec![AgentMenuItem::Resume, AgentMenuItem::Close],
+            AgentTarget::Live(_) => vec![AgentMenuItem::Close],
+        }
+    }
+}
+
 /// The workspace-rename modal: like [`TabRename`] but for a node's **label** (the
 /// folder on disk is never touched). Pre-filled with the current name.
 pub struct WsRename {
@@ -356,6 +389,8 @@ pub struct App {
     pub ws_menu: Option<WsMenu>,
     /// Active pane context menu (right-click inside a pane); `None` when closed.
     pub pane_menu: Option<PaneMenu>,
+    /// Active AGENTS-list context menu (right-click a row); `None` when closed.
+    pub agent_menu: Option<AgentMenu>,
     pub ws_rename: Option<WsRename>,
     /// Clickable ⏎-commit / esc-cancel footer buttons of whichever text-input
     /// modal is open (worktree prompt / tab rename / workspace rename), set each
@@ -462,7 +497,6 @@ pub struct App {
     /// Resumable-session rows in the sidebar (index into `resumable`).
     pub session_rects: Vec<(usize, Rect)>,
     /// The ✕ delete buttons on hovered resumable rows (index into `resumable`).
-    pub session_del_rects: Vec<(usize, Rect)>,
     pub new_ws_rect: Option<Rect>,
     /// Tab-bar scroll arrows (when tabs overflow), for mouse hit-testing.
     pub tab_prev_rect: Option<Rect>,
@@ -532,6 +566,7 @@ impl App {
             tab_rename: None,
             ws_menu: None,
             pane_menu: None,
+            agent_menu: None,
             ws_rename: None,
             modal_commit_rect: None,
             modal_cancel_rect: None,
@@ -586,7 +621,6 @@ impl App {
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
             session_rects: Vec::new(),
-            session_del_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,
             tab_prev_rect: None,
@@ -777,6 +811,7 @@ impl App {
             tab_rename: None,
             ws_menu: None,
             pane_menu: None,
+            agent_menu: None,
             ws_rename: None,
             modal_commit_rect: None,
             modal_cancel_rect: None,
@@ -831,7 +866,6 @@ impl App {
             agents_filter_rects: Vec::new(),
             agent_rects: Vec::new(),
             session_rects: Vec::new(),
-            session_del_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,
             tab_prev_rect: None,
@@ -1238,6 +1272,55 @@ impl App {
     pub fn handle_pane_menu_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.pane_menu = None;
+        }
+    }
+
+    /// Open the AGENTS-list context menu for `target` (a resumable session or a
+    /// live agent), anchored at the click.
+    pub fn open_agent_menu(&mut self, target: AgentTarget, col: u16, row: u16) {
+        self.agent_menu = Some(AgentMenu {
+            target,
+            anchor: (col, row),
+            items: Vec::new(),
+        });
+    }
+
+    /// A click inside the open AGENTS menu: run the hit item, else dismiss.
+    pub fn agent_menu_click(&mut self, col: u16, row: u16) {
+        let hit = self.agent_menu.as_ref().and_then(|m| {
+            m.items
+                .iter()
+                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .map(|(it, _)| *it)
+        });
+        match hit {
+            Some(it) => self.agent_menu_action(it),
+            None => self.agent_menu = None, // click outside dismisses
+        }
+    }
+
+    /// Run an AGENTS-menu action, then close the menu. Resume/Close act on a
+    /// session; Close on a live agent jumps to and closes its pane.
+    pub fn agent_menu_action(&mut self, item: AgentMenuItem) {
+        let Some(target) = self.agent_menu.as_ref().map(|m| m.target) else {
+            return;
+        };
+        self.agent_menu = None;
+        match (item, target) {
+            (AgentMenuItem::Resume, AgentTarget::Session(i)) => self.resume_session(i),
+            (AgentMenuItem::Close, AgentTarget::Session(i)) => self.dismiss_session(i),
+            (AgentMenuItem::Close, AgentTarget::Live(id)) => {
+                self.focus_pane_global(id); // switch to its tab so close targets it
+                self.close_pane(id);
+            }
+            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
+        }
+    }
+
+    /// Key handling while the AGENTS menu is open: `Esc` closes it.
+    pub fn handle_agent_menu_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.agent_menu = None;
         }
     }
 
@@ -2661,7 +2744,7 @@ mod tests {
     }
 
     #[test]
-    fn session_delete_button_dismisses() {
+    fn agent_menu_resumes_and_dismisses_a_session() {
         use ratatui::backend::TestBackend;
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
@@ -2675,33 +2758,40 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.resumable = vec![sess("s0", "/p/a"), sess("s1", "/p/b")];
-        app.agents_active_only = false; // show the resumable history (this tests its ✕)
+        app.agents_active_only = false; // show the resumable history
 
         let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
-        let mut draw = |app: &mut App| {
-            term.draw(|f| crate::ui::render(f, app))
-                .map(|_| ())
-                .unwrap()
-        };
-        // No delete affordance without hover.
-        draw(&mut app);
-        assert!(app.session_del_rects.is_empty());
-        // Hover the second session row → a ✕ appears for exactly that row.
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Right-click the second session row → an AGENTS menu with Resume + Close.
         let row = app.session_rects.iter().find(|(i, _)| *i == 1).unwrap().1;
-        app.hover = Some((row.x + 2, row.y));
-        draw(&mut app);
-        assert_eq!(app.session_del_rects.len(), 1, "hover reveals one ✕");
-        // Click the ✕ → the session leaves the list and is remembered as dismissed.
-        let xr = app.session_del_rects[0].1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: xr.x + 1,
-            row: xr.y,
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: row.x + 1,
+            row: row.y,
             modifiers: KeyModifiers::NONE,
         }));
         assert!(
+            app.agent_menu.is_some(),
+            "right-click opened the agent menu"
+        );
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let items = &app.agent_menu.as_ref().unwrap().items;
+        assert_eq!(items.len(), 2, "session menu has Resume + Close");
+        assert_eq!(items[0].0, AgentMenuItem::Resume);
+
+        // Click "Close" → the session leaves the list and stays dismissed.
+        let close = items[1].1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: close.x + 1,
+            row: close.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.agent_menu.is_none(), "menu closed after a click");
+        assert!(
             app.resumable.iter().all(|s| s.session_id != "s1"),
-            "session removed from the sidebar list"
+            "session removed from the list"
         );
         assert!(
             app.dismissed_sessions.contains("s1"),

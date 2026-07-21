@@ -30,12 +30,10 @@ fn rollup(app: &App, ws_index: usize) -> State {
 
 // ── sidebar ───────────────────────────────────────────────────────────────
 
-/// (workspace rows, live-agent rows, resumable-session rows, session ✕ buttons,
-/// new-workspace button).
+/// (workspace rows, live-agent rows, resumable-session rows, new-workspace button).
 pub(super) type SidebarHits = (
     Vec<(usize, Rect)>,
     Vec<(PaneId, Rect)>,
-    Vec<(usize, Rect)>,
     Vec<(usize, Rect)>,
     Option<Rect>,
 );
@@ -91,7 +89,6 @@ pub(super) fn draw_sidebar(
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
     let mut session_rects = Vec::new();
-    let mut session_del_rects = Vec::new();
     let hover = app.hover;
     let over = |rc: Rect| {
         hover
@@ -432,15 +429,8 @@ pub(super) fn draw_sidebar(
                         Style::new().fg(t.overlay0),
                     )),
                 );
-                // Hovering the row reveals a ✕ to remove it from the list.
-                if over(row) {
-                    let xr = Rect::new(area.right().saturating_sub(5), y, 3, 1);
-                    f.render_widget(
-                        Paragraph::new(Span::styled(" ✕ ", Style::new().fg(t.coral).bold())),
-                        xr,
-                    );
-                    session_del_rects.push((si, xr));
-                }
+                // Removing / reopening a session is on the row's right-click menu
+                // (docs/28) — no per-row ✕ button.
             }
         }
         draw_scrollbar(
@@ -453,13 +443,7 @@ pub(super) fn draw_sidebar(
         );
     }
 
-    (
-        ws_rects,
-        agent_rects,
-        session_rects,
-        session_del_rects,
-        new_ws_rect,
-    )
+    (ws_rects, agent_rects, session_rects, new_ws_rect)
 }
 
 fn header(text: &str, t: &Theme) -> Line<'static> {

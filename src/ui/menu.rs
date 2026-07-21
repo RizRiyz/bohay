@@ -1,38 +1,38 @@
-//! The workspace right-click context menu: rename / new worktree / open
-//! worktree / close, drawn as a small popup anchored at the click point.
+//! Right-click context menus (workspace + pane), drawn as a small popup anchored
+//! at the click point.
 
 use super::*;
-use crate::app::WsMenuItem;
+use crate::app::{AgentMenu, AgentMenuItem, PaneMenuItem, WsMenuItem};
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
 
-pub(super) fn draw_ws_menu(
+/// One row of a context-menu popup.
+struct MenuRow {
+    text: String,
+    divider: bool,
+    destructive: bool,
+}
+
+/// Render a context-menu popup anchored near `anchor` (clamped so it stays on
+/// screen) and return one clickable rect per row — dividers included — in order,
+/// for the input layer to hit-test.
+fn render_popup(
     f: &mut RenderTarget,
     area: Rect,
-    app: &mut App,
-    cat: &Catalog,
+    anchor: (u16, u16),
+    rows: &[MenuRow],
+    hover: Option<(u16, u16)>,
     t: &Theme,
-) {
-    let Some(menu) = app.ws_menu.as_ref() else {
-        return;
-    };
-    let (ax, ay) = menu.anchor;
-    let index = menu.index;
-    let labels: Vec<(WsMenuItem, String)> = app
-        .ws_menu_items(index)
-        .into_iter()
-        .map(|it| (it, label(it, cat)))
-        .collect();
-
-    // Size the box to the widest label (+ a leading pad + the border), then clamp
-    // its top-left so the whole popup stays on screen even near the edges.
-    let label_w = labels
+) -> Vec<Rect> {
+    let (ax, ay) = anchor;
+    // Size the box to the widest label (+ a leading pad + the border).
+    let label_w = rows
         .iter()
-        .map(|(_, s)| super::display_width(s))
+        .map(|r| super::display_width(&r.text))
         .max()
         .unwrap_or(6) as u16;
     let w = (label_w + 3).clamp(12, area.width.max(1));
-    let h = (labels.len() as u16 + 2).min(area.height.max(1));
+    let h = (rows.len() as u16 + 2).min(area.height.max(1));
     let x = ax.min(area.right().saturating_sub(w)).max(area.x);
     let y = ay.min(area.bottom().saturating_sub(h)).max(area.y);
     let popup = Rect::new(x, y, w, h);
@@ -45,11 +45,10 @@ pub(super) fn draw_ws_menu(
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let hover = app.hover;
-    let mut rects: Vec<(WsMenuItem, Rect)> = Vec::with_capacity(labels.len());
-    for (i, (it, lab)) in labels.iter().enumerate() {
+    let mut rects = Vec::with_capacity(rows.len());
+    for (i, r) in rows.iter().enumerate() {
         let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
-        if matches!(it, WsMenuItem::Divider) {
+        if r.divider {
             // A thin, non-interactive separator across the inner width.
             let line = "─".repeat(inner.width as usize);
             f.render_widget(
@@ -59,31 +58,116 @@ pub(super) fn draw_ws_menu(
                 )),
                 row,
             );
-            rects.push((*it, row));
+            rects.push(row);
             continue;
         }
-        let hot = hover.is_some_and(|(c, r)| c >= row.x && c < row.right() && r == row.y);
+        let hot = hover.is_some_and(|(c, hr)| c >= row.x && c < row.right() && hr == row.y);
         let fg = if hot {
             t.crust
-        } else if matches!(it, WsMenuItem::Close) {
+        } else if r.destructive {
             t.coral // the one destructive action
         } else {
             t.text
         };
         let bg = if hot { t.accent } else { t.surface0 };
         f.render_widget(
-            Paragraph::new(Span::styled(format!(" {lab}"), Style::new().fg(fg).bg(bg))),
+            Paragraph::new(Span::styled(
+                format!(" {}", r.text),
+                Style::new().fg(fg).bg(bg),
+            )),
             row,
         );
-        rects.push((*it, row));
+        rects.push(row);
     }
-    // Stash the row rects so the input layer can hit-test clicks on them.
+    rects
+}
+
+pub(super) fn draw_ws_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let Some(menu) = app.ws_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let items = app.ws_menu_items(menu.index);
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|it| MenuRow {
+            text: ws_label(*it, cat),
+            divider: matches!(it, WsMenuItem::Divider),
+            destructive: matches!(it, WsMenuItem::Close),
+        })
+        .collect();
+    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
     if let Some(menu) = app.ws_menu.as_mut() {
-        menu.items = rects;
+        menu.items = items.into_iter().zip(rects).collect();
     }
 }
 
-fn label(it: WsMenuItem, cat: &Catalog) -> String {
+pub(super) fn draw_pane_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let Some(menu) = app.pane_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let items = PaneMenuItem::ALL.to_vec();
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|it| MenuRow {
+            text: pane_label(*it, cat),
+            divider: matches!(it, PaneMenuItem::Divider),
+            destructive: matches!(it, PaneMenuItem::Close),
+        })
+        .collect();
+    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    if let Some(menu) = app.pane_menu.as_mut() {
+        menu.items = items.into_iter().zip(rects).collect();
+    }
+}
+
+pub(super) fn draw_agent_menu(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    let Some(menu) = app.agent_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let items = AgentMenu::items_for(menu.target);
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|it| MenuRow {
+            text: agent_label(*it, cat),
+            divider: false,
+            destructive: matches!(it, AgentMenuItem::Close),
+        })
+        .collect();
+    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    if let Some(menu) = app.agent_menu.as_mut() {
+        menu.items = items.into_iter().zip(rects).collect();
+    }
+}
+
+fn agent_label(it: AgentMenuItem, cat: &Catalog) -> String {
+    match it {
+        AgentMenuItem::Resume => cat.menu_resume.to_string(),
+        AgentMenuItem::Close => cap_first(cat.act_close),
+    }
+}
+
+fn ws_label(it: WsMenuItem, cat: &Catalog) -> String {
     match it {
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
@@ -92,6 +176,15 @@ fn label(it: WsMenuItem, cat: &Catalog) -> String {
         WsMenuItem::Divider => String::new(),
         WsMenuItem::OpenGit => cat.cmd_open_git.to_string(),
         WsMenuItem::OpenOrch => cat.cmd_open_board.to_string(),
+    }
+}
+
+fn pane_label(it: PaneMenuItem, cat: &Catalog) -> String {
+    match it {
+        PaneMenuItem::SplitVertical => cat.menu_split_vertical.to_string(),
+        PaneMenuItem::SplitHorizontal => cat.menu_split_horizontal.to_string(),
+        PaneMenuItem::Divider => String::new(),
+        PaneMenuItem::Close => cap_first(cat.act_close),
     }
 }
 

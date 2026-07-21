@@ -148,6 +148,13 @@ impl App {
             }
             return;
         }
+        // The AGENTS-list context menu (docs/28) owns the mouse while open.
+        if self.agent_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.agent_menu_click(m.column, m.row); // an item, or dismiss
+            }
+            return;
+        }
         // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
         // any other click is swallowed (the centered modal owns the screen).
         if self.worktree_prompt.is_some() {
@@ -182,6 +189,10 @@ impl App {
                 self.open_tab_rename(*i);
             } else if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_ws_menu(*i, c, r);
+            } else if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_agent_menu(AgentTarget::Live(*id), c, r); // live agent → Close
+            } else if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_agent_menu(AgentTarget::Session(*i), c, r); // session → Resume/Close
             } else if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_pane_menu(*id, c, r); // no-op on a git/orch dashboard tab
             }
@@ -398,13 +409,6 @@ impl App {
         if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {
             let id = *id;
             self.focus_pane_global(id);
-            return;
-        }
-        // The hovered row's ✕ removes the session from the list (checked first,
-        // since it sits on top of the row).
-        if let Some((i, _)) = self.session_del_rects.iter().find(|(_, rect)| hit(*rect)) {
-            let i = *i;
-            self.dismiss_session(i);
             return;
         }
         // Clicking a resumable session row reopens it into a pane.
@@ -701,6 +705,11 @@ impl App {
         // The pane context menu (docs/28) captures all input while open.
         if self.pane_menu.is_some() {
             self.handle_pane_menu_key(key);
+            return true;
+        }
+        // The AGENTS-list context menu (docs/28) captures all input while open.
+        if self.agent_menu.is_some() {
+            self.handle_agent_menu_key(key);
             return true;
         }
         if self.ws_rename.is_some() {
