@@ -11,11 +11,25 @@ When you run `bohay`, two things happen: a background **server** starts (once)
 and owns every pane, shell, and agent, and a thin **client** attaches to
 display it. The client is disposable. The server is durable.
 
-- Close the terminal → the client dies, **the session lives**.
-- `bohay` again → a new client attaches to the same session.
-- `bohay server stop` → actually end everything (the session snapshot is kept).
+- Close the terminal (or `Ctrl+Space d`) → the client detaches, **the session
+  lives**. Every shell and agent keeps running exactly where it was.
+- `bohay` again → a new client attaches to the same live session. Nothing
+  restarts and no command reruns, you are just looking at it again.
+- Close every workspace → the server stays up with a fresh one. Nothing you do
+  in the UI can kill the session by accident.
+- `bohay server stop` → the only way to actually end everything (the session
+  snapshot is kept).
 - `bohay server status` → what's running, and whether a newer binary is
   waiting for a `bohay server restart`.
+
+If the server itself goes away (a reboot, an upgrade via `bohay server
+restart`, or the process being killed), bohay saves the session shape on the
+way out and rebuilds it on the next start: workspaces, tabs, layout, each
+pane's folder and last screen, and any agent conversation it can
+[resume natively](/docs/guides/agents/#session-resume-the-flagship). A resumed
+pane opens straight into its agent, nothing gets typed into a prompt in front
+of you. Live processes can't outlive their owner, so shells come back fresh,
+but you land in the same place you left.
 
 ## 2. Workspace → Tab → Pane
 

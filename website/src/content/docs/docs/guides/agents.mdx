@@ -15,15 +15,25 @@ Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a live state:
 | State | Meaning | How it's detected |
 |---|---|---|
 | 🔴 **blocked** | waiting on you: approve/deny is on screen | a permission prompt is visible |
-| 🟠 **working** | producing output | recent terminal activity |
+| 🟠 **working** | the agent is generating | a spinner or "esc to interrupt" hint on screen |
 | 🟢 **done** | finished while unfocused | sustained quiet after working |
 | **idle** | quiet, nothing pending | no recent activity |
+
+A **working** agent shows a rotating-circle spinner in its status dot, so you
+can tell at a glance which agents are still busy. When one finishes, bohay plays
+a short retro chime (toggle it in **Settings → Notifications**).
 
 Click a row to jump to that agent's pane from anywhere, across workspaces.
 
 States are **debounced**: an agent that pauses mid-turn (thinking, tool calls,
 API latency) holds at *working* instead of flickering. You get one clean
 *working → done* per turn, not a dozen flaps.
+
+**Working needs proof.** An agent counts as working only when a real generating
+indicator is on screen, like a spinner or an interrupt hint. Output alone
+proves nothing. A CLI printing its whole welcome screen at launch is idle, your
+keystrokes echoing while you compose a prompt are idle, a scrolling log is
+idle. That way you never get a false state or a false completion chime.
 
 The **All / Active** toggle in the header switches between live agents only
 (default) and the full resumable history.
@@ -81,6 +91,53 @@ The hook powers the richer per-agent detail in the
 too, including permission cards you can approve from the notch and exact turn
 boundaries.
 :::
+
+## Custom detection rules
+
+Detection ships with a built-in rule set that already covers the known agents.
+If you run an agent bohay does not recognize, or you want to tune how an
+existing one reads, you can add your own rules as TOML files in
+`~/.bohay/manifests/`. Every `*.toml` file in that folder is merged on top of
+the built-ins, and the first time bohay runs it drops an annotated
+`example.toml.txt` there to copy from.
+
+A rule matches text on the pane's screen (or its window title) and, when it
+holds, sets the agent's state. Rules carry a priority, so the highest-priority
+match wins and a rule of yours can override a built-in one for the same agent.
+
+```toml
+# ~/.bohay/manifests/myagent.toml
+
+# Which agent these rules apply to. "generic" (the default) means every agent.
+agent = "myagent"
+
+[[rule]]
+state = "working"        # working | blocked | idle
+priority = 200
+region = "screen"        # screen (recent output, default) or title (window title)
+any = ["esc to interrupt", "esc to cancel"]
+
+[[rule]]
+state = "blocked"
+priority = 300
+region = "screen"
+all = ["do you want to proceed"]
+not = ["cancelled"]
+```
+
+Each rule holds when all of the conditions you list are true:
+
+| Field | Holds when |
+|---|---|
+| `any` | any listed substring is present (case insensitive) |
+| `all` | every listed substring is present |
+| `not` | none of the listed substrings are present |
+| `spinner` | a running braille spinner glyph is visible on a line |
+
+Priorities follow the built-ins: blocked prompts sit around 300, working hints
+around 100 to 200. Give a rule a higher number than the built-in you want it to
+beat. A file that fails to parse is skipped with a warning, so a typo never
+takes detection down.
 
 ## Agents can drive bohay
 
