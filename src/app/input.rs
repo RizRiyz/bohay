@@ -66,7 +66,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
-        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
         // Any click dismisses the help overlay.
@@ -109,9 +109,24 @@ impl App {
             }
             return;
         }
+        // Track which divider (if any) the cursor is over, for the hover
+        // highlight (docs/27, RESIZE-4).
+        self.update_hover_divider(m.column, m.row);
         // ── pane text selection: drag to select, release auto-copies (OSC 52) ──
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Pane resize (docs/27) takes priority over selection: a divider
+                // sits on borders/gaps, outside any content rect, so grabbing one
+                // never conflicts. RESIZE-2 = drag the divider directly;
+                // RESIZE-5 = `Ctrl`+drag inside a pane grabs the nearest divider.
+                if self.begin_resize(m.column, m.row) {
+                    return;
+                }
+                if m.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.begin_resize_nearest(m.column, m.row)
+                {
+                    return;
+                }
                 // Begin a selection only inside a pane's content; otherwise drop
                 // any old one. Falls through to normal click handling (focus/etc).
                 self.selection = self
@@ -124,6 +139,10 @@ impl App {
                     });
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.resize_drag.is_some() {
+                    self.update_resize(m.column, m.row);
+                    return;
+                }
                 if let Some(sel) = self.selection.as_mut() {
                     let c = sel.content;
                     sel.cursor = (
@@ -134,6 +153,10 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.resize_drag.is_some() {
+                    self.end_resize();
+                    return;
+                }
                 // A real drag copies its text + flashes a toast; a plain click
                 // clears the (1-cell) selection so nothing stays highlighted.
                 match self.selection_text() {
@@ -240,6 +263,12 @@ impl App {
         // The sidebar gear opens Settings.
         if self.settings_icon_rect.is_some_and(hit) {
             self.open_settings();
+            return;
+        }
+        // The `❯` chevron (sidebar header, or the tab-bar's left edge when the
+        // sidebar is hidden) shows/hides the sidebar — same as ⌃Space b.
+        if self.sidebar_toggle_rect.is_some_and(hit) {
+            self.sidebar_visible = !self.sidebar_visible;
             return;
         }
         // Left click: close/add buttons first, then tabs → agents → ws → panes.
@@ -402,6 +431,35 @@ impl App {
     /// `j`/`k`/arrows = lines, `f`/`b`/Space/PageUp/Down = pages, `g`/`G` =
     /// top/live, `1`–`9` = jump (1 oldest … 9 newest), `0`/`G`/`q`/`Esc`/typing =
     /// back to live. See [`App::scroll_pane`].
+    /// Keyboard resize mode (docs/27, RESIZE-3): arrows / `hjkl` resize the
+    /// focused pane, `=`/`0` equalize, anything else (`Esc`/`Enter`/`q`/…) exits.
+    fn handle_resize_mode_key(&mut self, key: KeyEvent) -> bool {
+        use ratatui::crossterm::event::KeyModifiers;
+        const STEP: i16 = 3;
+        let big = key.modifiers.contains(KeyModifiers::SHIFT)
+            || matches!(key.code, KeyCode::Char('H' | 'J' | 'K' | 'L'));
+        let step = if big { STEP * 2 } else { STEP };
+        let dir = match key.code {
+            KeyCode::Left | KeyCode::Char('h' | 'H') => Some(Dir::Left),
+            KeyCode::Down | KeyCode::Char('j' | 'J') => Some(Dir::Down),
+            KeyCode::Up | KeyCode::Char('k' | 'K') => Some(Dir::Up),
+            KeyCode::Right | KeyCode::Char('l' | 'L') => Some(Dir::Right),
+            _ => None,
+        };
+        if let Some(dir) = dir {
+            let area = self.last_pane_area;
+            self.layout_mut().resize_focused(area, dir, step);
+            return true;
+        }
+        if matches!(key.code, KeyCode::Char('=' | '+' | '0')) {
+            self.layout_mut().equalize();
+            return true;
+        }
+        // Esc / Enter / q / the prefix / any other key leaves resize mode.
+        self.mode = Mode::Normal;
+        true
+    }
+
     fn handle_scroll_mode_key(&mut self, key: KeyEvent) -> bool {
         let Some(id) = self.scroll_pane else {
             return false;
@@ -565,6 +623,11 @@ impl App {
         if self.scroll_pane.is_some() {
             return self.handle_scroll_mode_key(key);
         }
+        // Keyboard resize mode (docs/27, RESIZE-3) likewise owns every key until
+        // it's left (arrows/`hjkl` resize; `Esc`/`Enter`/`q` exit).
+        if self.mode == Mode::Resize {
+            return self.handle_resize_mode_key(key);
+        }
         // A focused git tab captures normal-mode keys (its own j/k/⏎/…); the
         // `Ctrl+Space` prefix still works for global ops (switch tab/workspace, …).
         if self.mode == Mode::Normal && (self.active_is_git() || self.active_is_orch()) {
@@ -654,6 +717,8 @@ impl App {
                 }
                 false // plain input → the pane; its echo (PtyData) renders it
             }
+            // Intercepted above (before this match); handled here too for safety.
+            Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
 }

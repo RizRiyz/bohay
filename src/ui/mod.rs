@@ -151,6 +151,13 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         if let Some(s) = sidebar {
             sidebar::draw_sidebar(f, s, app, &t)
         } else {
+            // Sidebar hidden: clear the click/scroll geometry it owns so stale
+            // rects sitting under the now-expanded pane area can't trigger the
+            // Menu, the All/Active filter, or list wheel-scrolling.
+            app.settings_icon_rect = None;
+            app.workspaces_area = Rect::ZERO;
+            app.agents_area = Rect::ZERO;
+            app.agents_filter_rects.clear();
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None)
         };
     let (tab_rects, tab_close_rects, tab_prev, tab_next) = tabbar::draw_tabbar(f, tabbar, app, &t);
@@ -188,7 +195,7 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         // Draw all pane borders in one overlay pass (manual cell-by-cell), then
         // the dot+path+close titles ON each top border row.
         if bordered {
-            borders::render_pane_borders(f, &rects, focus, &t);
+            borders::render_pane_borders(f, &rects, focus, app.hover_divider.as_ref(), &t);
             if app.config.layout.show_titles {
                 panes::draw_pane_titles(f, &rects, focus, app, &t);
             }

@@ -57,6 +57,9 @@ pub const SIDEBAR_WIDTH_MAX: u16 = 44;
 pub enum Mode {
     Normal,
     Prefix,
+    /// Keyboard pane-resize mode (docs/27, RESIZE-3): arrows/`hjkl` resize the
+    /// focused pane; `Esc`/`Enter`/`q` leave. Entered via `Ctrl+Space r`.
+    Resize,
 }
 
 pub struct Tab {
@@ -190,6 +193,18 @@ pub struct Selection {
     pub anchor: (u16, u16),
     pub cursor: (u16, u16),
 }
+
+/// An in-progress pane-divider resize drag (docs/27, RESIZE-2): the split node
+/// being dragged, addressed by its path in the layout tree.
+pub struct ResizeDrag {
+    pub path: Vec<bool>,
+    pub axis: Axis,
+}
+
+/// Cells of slack around a divider that still count as grabbing it. The gap
+/// between panes puts the two visible border lines ~2 cells apart, so a ±2 zone
+/// makes the seam comfortably grabbable without stealing clicks from content.
+const RESIZE_GRAB_TOL: u16 = 2;
 
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
@@ -334,6 +349,10 @@ pub struct App {
     /// the agent. Entered by wheel-up or `Shift+↑`; left by `q`/typing. A
     /// Mac-friendly path that needs no `Ctrl+Space` prefix.
     pub scroll_pane: Option<PaneId>,
+    /// Active pane-divider resize drag (docs/27, RESIZE-2); `None` when idle.
+    pub resize_drag: Option<ResizeDrag>,
+    /// Divider under the cursor, for the hover highlight (RESIZE-4).
+    pub hover_divider: Option<crate::layout::Divider>,
     pub tab_rects: Vec<(usize, Rect)>,
     pub tab_close_rects: Vec<(usize, Rect)>,
     pub ws_rects: Vec<(usize, Rect)>,
@@ -354,6 +373,8 @@ pub struct App {
     pub tab_next_rect: Option<Rect>,
     /// The focused pane's ✕ close button, for mouse hit-testing.
     pub pane_close_rect: Option<Rect>,
+    /// The status-bar sidebar toggle button (bottom-left), for mouse hit-testing.
+    pub sidebar_toggle_rect: Option<Rect>,
     // Settings modal hit-test geometry (populated by render when the modal is open).
     pub settings_icon_rect: Option<Rect>,
     pub settings_close_rect: Option<Rect>,
@@ -454,6 +475,8 @@ impl App {
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
+            resize_drag: None,
+            hover_divider: None,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             workspace_branch_rects: Vec::new(),
@@ -467,6 +490,7 @@ impl App {
             tab_prev_rect: None,
             tab_next_rect: None,
             pane_close_rect: None,
+            sidebar_toggle_rect: None,
             settings_icon_rect: None,
             settings_close_rect: None,
             settings_modal_rect: None,
@@ -684,6 +708,8 @@ impl App {
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
+            resize_drag: None,
+            hover_divider: None,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             workspace_branch_rects: Vec::new(),
@@ -697,6 +723,7 @@ impl App {
             tab_prev_rect: None,
             tab_next_rect: None,
             pane_close_rect: None,
+            sidebar_toggle_rect: None,
             settings_icon_rect: None,
             settings_close_rect: None,
             settings_modal_rect: None,
@@ -1103,6 +1130,97 @@ impl App {
     fn focus_dir(&mut self, dir: Dir) {
         let area = self.last_pane_area;
         self.layout_mut().focus_dir(area, dir);
+    }
+
+    // ── pane resize (docs/27) ───────────────────────────────────────────────
+
+    /// Start a divider drag if `(c, r)` grabs one (RESIZE-2). Returns whether a
+    /// drag began, so the mouse handler can skip selection/focus.
+    pub fn begin_resize(&mut self, c: u16, r: u16) -> bool {
+        if self.active_is_git() || self.active_is_orch() {
+            return false;
+        }
+        let area = self.last_pane_area;
+        match self.layout().divider_at(area, c, r, RESIZE_GRAB_TOL) {
+            Some(d) => {
+                self.resize_drag = Some(ResizeDrag {
+                    path: d.path,
+                    axis: d.axis,
+                });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Start a drag of the divider nearest `(c, r)` — the `Ctrl`+drag path
+    /// (RESIZE-5). Skips a pane that tracks the mouse itself (a TUI agent).
+    pub fn begin_resize_nearest(&mut self, c: u16, r: u16) -> bool {
+        if self.active_is_git() || self.active_is_orch() {
+            return false;
+        }
+        let over_mouse_app = self
+            .pane_rects
+            .iter()
+            .find(|(_, rect)| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom())
+            .and_then(|(id, _)| self.panes.get(id))
+            .is_some_and(|p| p.mouse_mode().0);
+        if over_mouse_app {
+            return false;
+        }
+        let area = self.last_pane_area;
+        match self.layout().nearest_divider(area, c, r) {
+            Some(d) => {
+                self.resize_drag = Some(ResizeDrag {
+                    path: d.path,
+                    axis: d.axis,
+                });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drive the active resize from the cursor position (RESIZE-2).
+    pub fn update_resize(&mut self, c: u16, r: u16) {
+        let Some(drag) = self.resize_drag.as_ref() else {
+            return;
+        };
+        let path = drag.path.clone();
+        let axis = drag.axis;
+        let area = self.last_pane_area;
+        if let Some(rect) = self.layout().node_rect(area, &path) {
+            let ratio = match axis {
+                Axis::Col => c.saturating_sub(rect.x) as f32 / rect.width.max(1) as f32,
+                Axis::Row => r.saturating_sub(rect.y) as f32 / rect.height.max(1) as f32,
+            };
+            self.layout_mut().set_ratio(area, &path, ratio);
+        }
+    }
+
+    /// End an active resize drag (RESIZE-2).
+    pub fn end_resize(&mut self) {
+        self.resize_drag = None;
+    }
+
+    /// Recompute the divider under the cursor for the hover highlight (RESIZE-4).
+    pub fn update_hover_divider(&mut self, c: u16, r: u16) {
+        self.hover_divider = if self.active_is_git() || self.active_is_orch() {
+            None
+        } else {
+            let area = self.last_pane_area;
+            self.layout().divider_at(area, c, r, RESIZE_GRAB_TOL)
+        };
+    }
+
+    /// Enter keyboard resize mode (RESIZE-3) — a no-op with nothing to resize.
+    fn enter_resize_mode(&mut self) {
+        if self.active_is_git() || self.active_is_orch() || self.layout().len() < 2 {
+            return;
+        }
+        self.mode = Mode::Resize;
+        let msg = self.catalog.mode_resize_hint;
+        self.show_toast(msg);
     }
 
     fn close_pane(&mut self, id: PaneId) {
@@ -1730,6 +1848,125 @@ mod tests {
         // classify() falls back to the shell command — the exact trigger.
         app.detect_tick(Instant::now());
         assert_eq!(app.status.get(&focus).unwrap().agent, "claude");
+    }
+
+    #[test]
+    fn mouse_drag_resizes_pane_and_content_press_still_selects() {
+        let _env = crate::persist::test_env("pane-resize-mouse");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight); // two side-by-side panes
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let area = app.last_pane_area;
+        let divs = app.layout().dividers(area);
+        assert_eq!(divs.len(), 1, "one vertical divider");
+        let line = divs[0].line;
+        let leaves = app.layout().leaves();
+        let left = leaves[0];
+        let width = |app: &App, id| {
+            app.layout()
+                .panes(area)
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .rect
+                .width
+        };
+        let before = width(&app, left);
+
+        let mouse = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Grab the divider and drag it 20 cells left.
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            line,
+            area.y + 2,
+        )));
+        assert!(app.resize_drag.is_some(), "grabbed the divider");
+        let target = line.saturating_sub(20);
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            target,
+            area.y + 2,
+        )));
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            target,
+            area.y + 2,
+        )));
+        assert!(app.resize_drag.is_none(), "released the drag");
+        assert!(
+            width(&app, left) < before,
+            "left pane narrowed: {before} -> {}",
+            width(&app, left)
+        );
+
+        // A press deep inside a pane's content still starts a selection (no
+        // regression): re-render so content rects reflect the new geometry.
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let right = *app.layout().leaves().last().unwrap();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == right)
+            .map(|(_, r)| *r)
+            .expect("right pane content rect");
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            content.x + 3,
+            content.y + 3,
+        )));
+        assert!(app.resize_drag.is_none(), "content press is not a resize");
+        assert!(app.selection.is_some(), "content press starts a selection");
+    }
+
+    #[test]
+    fn keyboard_resize_mode_enters_resizes_and_exits() {
+        let _env = crate::persist::test_env("pane-resize-keys");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 120, 40);
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let key = |code, m| AppEvent::Key(KeyEvent::new(code, m));
+
+        // Ctrl+Space then `r` enters resize mode.
+        app.handle_event(key(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        app.handle_event(key(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Resize);
+
+        let area = app.last_pane_area;
+        let focus = app.layout().focus; // the new (right) pane
+        let width = |app: &App| {
+            app.layout()
+                .panes(area)
+                .into_iter()
+                .find(|p| p.id == focus)
+                .unwrap()
+                .rect
+                .width
+        };
+        let before = width(&app);
+        // Left arrow grows the focused right pane (moves the divider left).
+        app.handle_event(key(KeyCode::Left, KeyModifiers::NONE));
+        assert!(width(&app) > before, "arrow resized the focused pane");
+
+        // Esc leaves resize mode.
+        app.handle_event(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]

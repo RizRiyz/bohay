@@ -25,6 +25,21 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
         return;
     }
 
+    // Keyboard resize mode owns the status line with its own hint (docs/27).
+    if app.mode == Mode::Resize {
+        let mut left: Vec<Span> = vec![Span::raw(" ")];
+        left.push(Span::styled(
+            format!(" {} ", cat.mode_resize),
+            Style::new().fg(t.crust).bg(t.accent).bold(),
+        ));
+        left.push(Span::styled(
+            format!("  {}", cat.mode_resize_hint),
+            Style::new().fg(t.subtext0),
+        ));
+        f.render_widget(Paragraph::new(Line::from(left)), area);
+        return;
+    }
+
     let prefix = app.mode == Mode::Prefix;
 
     let mut left: Vec<Span> = vec![Span::raw(" ")];
