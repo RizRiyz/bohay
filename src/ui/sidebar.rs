@@ -240,15 +240,6 @@ pub(super) fn draw_sidebar(
                 format!("  {b}"),
                 Style::new().fg(if active { t.green } else { t.overlay0 }),
             ));
-            // Ahead/behind badge (set once the workspace's git tab fetches status).
-            if let Some((ahead, behind)) = ws.git_ahead_behind {
-                if ahead > 0 || behind > 0 {
-                    line1.push(Span::styled(
-                        format!(" ↑{ahead}↓{behind}"),
-                        Style::new().fg(t.amber),
-                    ));
-                }
-            }
         }
         line_at(f, y, Line::from(line1));
         // Row 2: the project path, indented under the name (extra for members).

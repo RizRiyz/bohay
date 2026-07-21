@@ -56,6 +56,7 @@ mod board;
 mod borders;
 mod git;
 mod help;
+mod menu;
 mod panes;
 mod picker;
 mod settings;
@@ -246,9 +247,34 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     if app.help_open {
         help::draw_help(f, area, app, &t);
     }
+    // Text-input modals: each returns the rects of its clickable ⏎/esc footer
+    // hints (or `None` while an error occupies the line), stashed so the mouse
+    // layer can act on them. Only one is ever open; clear first so a closed modal
+    // leaves nothing behind.
+    let hover = app.hover;
+    app.modal_commit_rect = None;
+    app.modal_cancel_rect = None;
     // The new-worktree branch prompt (docs/18 WT).
-    if let Some(buf) = &app.worktree_prompt {
-        picker::draw_worktree_prompt(f, area, buf, app.worktree_error.as_deref(), cat, &t);
+    if let Some(buf) = app.worktree_prompt.clone() {
+        let err = app.worktree_error.clone();
+        let (c, x) = picker::draw_worktree_prompt(f, area, &buf, err.as_deref(), hover, cat, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+    }
+    // The tab-rename modal (docs/28).
+    if let Some(buf) = app.tab_rename.as_ref().map(|r| r.buffer.clone()) {
+        let (c, x) = picker::draw_tab_rename(f, area, &buf, hover, cat, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+    }
+    // The workspace-rename modal, then the right-click context menu (on top).
+    if let Some(buf) = app.ws_rename.as_ref().map(|r| r.buffer.clone()) {
+        let (c, x) = picker::draw_ws_rename(f, area, &buf, hover, cat, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+    }
+    if app.ws_menu.is_some() {
+        menu::draw_ws_menu(f, area, app, cat, &t);
     }
     // The board's new-task form (docs/22 ORCH-7).
     if let Some(form) = &app.orch_form {
@@ -263,6 +289,9 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         || picker_open
         || app.help_open
         || app.worktree_prompt.is_some()
+        || app.tab_rename.is_some()
+        || app.ws_rename.is_some()
+        || app.ws_menu.is_some()
         || app.orch_form.is_some()
     {
         None

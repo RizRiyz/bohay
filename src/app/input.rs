@@ -65,6 +65,31 @@ impl App {
         }
     }
 
+    /// The key a click maps to on an open text-input modal's footer: `⏎` on the
+    /// commit button, `Esc` on cancel, `None` anywhere else. Lets the mouse drive
+    /// the same commit/cancel path as the keyboard.
+    fn modal_button_key(
+        &self,
+        m: &ratatui::crossterm::event::MouseEvent,
+    ) -> Option<ratatui::crossterm::event::KeyEvent> {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+        };
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let (c, r) = (m.column, m.row);
+            let on = |rect: Option<Rect>| {
+                rect.is_some_and(|x| c >= x.x && c < x.right() && r >= x.y && r < x.bottom())
+            };
+            if on(self.modal_commit_rect) {
+                return Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            if on(self.modal_cancel_rect) {
+                return Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            }
+        }
+        None
+    }
+
     fn handle_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
@@ -109,9 +134,49 @@ impl App {
             }
             return;
         }
+        // The workspace context menu / rename modal own the mouse while open.
+        if self.ws_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.ws_menu_click(m.column, m.row); // an item, or dismiss
+            }
+            return;
+        }
+        // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
+        // any other click is swallowed (the centered modal owns the screen).
+        if self.worktree_prompt.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_worktree_prompt_key(k);
+            }
+            return;
+        }
+        if self.tab_rename.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_tab_rename_key(k);
+            }
+            return;
+        }
+        if self.ws_rename.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_ws_rename_key(k);
+            }
+            return;
+        }
         // Track which divider (if any) the cursor is over, for the hover
         // highlight (docs/27, RESIZE-4).
         self.update_hover_divider(m.column, m.row);
+        // Right-click a pane tab to rename it (docs/28), or a WORKSPACES row to
+        // open its context menu (rename / worktree / close).
+        if let MouseEventKind::Down(MouseButton::Right) = m.kind {
+            let (c, r) = (m.column, m.row);
+            let hit =
+                |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
+            if let Some((i, _)) = self.tab_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_tab_rename(*i);
+            } else if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_ws_menu(*i, c, r);
+            }
+            return;
+        }
         // ── pane text selection: drag to select, release auto-copies (OSC 52) ──
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -611,6 +676,20 @@ impl App {
         // The new-worktree branch prompt captures all input while open.
         if self.worktree_prompt.is_some() {
             self.handle_worktree_prompt_key(key);
+            return true;
+        }
+        // The tab-rename modal (docs/28) captures all input while open.
+        if self.tab_rename.is_some() {
+            self.handle_tab_rename_key(key);
+            return true;
+        }
+        // The workspace context menu / rename modal capture all input while open.
+        if self.ws_menu.is_some() {
+            self.handle_ws_menu_key(key);
+            return true;
+        }
+        if self.ws_rename.is_some() {
+            self.handle_ws_rename_key(key);
             return true;
         }
         // The board's new-task form captures all input while open (ORCH-7).

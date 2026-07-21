@@ -152,9 +152,10 @@ pub(super) fn draw_worktree_prompt(
     area: Rect,
     buf: &str,
     error: Option<&str>,
+    hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
-) {
+) -> (Option<Rect>, Option<Rect>) {
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
     let modal = centered_rect(area, w, 6);
@@ -180,22 +181,19 @@ pub(super) fn draw_worktree_prompt(
         ])),
         Rect::new(inner.x, inner.y + 2, inner.width, 1),
     );
-    // Bottom line: the error (red) if the last create failed, else the key hints.
-    let bottom = inner.bottom().saturating_sub(1);
+    // Bottom line: the error (red) if the last create failed — never a silent
+    // no-op — else the clickable key hints.
+    let bottom = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
     if let Some(e) = error {
         let e = trunc_tail(e, inner.width.saturating_sub(2) as usize);
         f.render_widget(
             Paragraph::new(Span::styled(format!(" {e}"), Style::new().fg(t.coral))),
-            Rect::new(inner.x, bottom, inner.width, 1),
+            bottom,
         );
+        (None, None) // no hint buttons while the error occupies the line
     } else {
-        f.render_widget(
-            Paragraph::new(hint_line(
-                &[("⏎", cat.act_create), ("esc", cat.act_cancel)],
-                t,
-            )),
-            Rect::new(inner.x, bottom, inner.width, 1),
-        );
+        let (c, x) = footer_hints(f, bottom, cat.act_create, cat.act_cancel, hover, t);
+        (Some(c), Some(x))
     }
 }
 
@@ -205,53 +203,37 @@ pub(super) fn draw_tab_rename(
     f: &mut RenderTarget,
     area: Rect,
     buf: &str,
+    hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
-) {
-    dim_backdrop(f, area, t);
-    let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
-    let modal = centered_rect(area, w, 6);
-    f.render_widget(Clear, modal);
-    let block = Block::new()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
-        .style(Style::new().bg(t.surface0));
-    let inner = block.inner(modal);
-    f.render_widget(block, modal);
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            format!(" {}", cat.rename_tab),
-            Style::new().fg(t.text).bold(),
-        )),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(buf.to_string(), Style::new().fg(t.accent).bold()),
-            Span::styled("▏", Style::new().fg(t.accent)),
-        ])),
-        Rect::new(inner.x, inner.y + 2, inner.width, 1),
-    );
-    let bottom = inner.bottom().saturating_sub(1);
-    f.render_widget(
-        Paragraph::new(hint_line(
-            &[("⏎", cat.act_save), ("esc", cat.act_cancel)],
-            t,
-        )),
-        Rect::new(inner.x, bottom, inner.width, 1),
-    );
+) -> (Option<Rect>, Option<Rect>) {
+    draw_rename(f, area, cat.rename_tab, buf, hover, cat, t)
 }
 
-/// The workspace-rename modal: same shape as [`draw_tab_rename`], titled for a
-/// node. The on-disk folder is never touched; this edits the label only.
+/// The workspace-rename modal: titled for a node. The on-disk folder is never
+/// touched; this edits the label only.
 pub(super) fn draw_ws_rename(
     f: &mut RenderTarget,
     area: Rect,
     buf: &str,
+    hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
-) {
+) -> (Option<Rect>, Option<Rect>) {
+    draw_rename(f, area, cat.menu_rename, buf, hover, cat, t)
+}
+
+/// Shared single-field rename modal (tab / workspace): a title, an editable
+/// buffer, and the clickable ⏎/esc footer hints. Returns each hint's rect.
+fn draw_rename(
+    f: &mut RenderTarget,
+    area: Rect,
+    title: &str,
+    buf: &str,
+    hover: Option<(u16, u16)>,
+    cat: &Catalog,
+    t: &Theme,
+) -> (Option<Rect>, Option<Rect>) {
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
     let modal = centered_rect(area, w, 6);
@@ -264,7 +246,7 @@ pub(super) fn draw_ws_rename(
     f.render_widget(block, modal);
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!(" {}", cat.menu_rename),
+            format!(" {title}"),
             Style::new().fg(t.text).bold(),
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
@@ -277,13 +259,66 @@ pub(super) fn draw_ws_rename(
         ])),
         Rect::new(inner.x, inner.y + 2, inner.width, 1),
     );
-    let bottom = inner.bottom().saturating_sub(1);
+    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let (c, x) = footer_hints(f, footer, cat.act_save, cat.act_cancel, hover, t);
+    (Some(c), Some(x))
+}
+
+/// Render the footer `⏎ commit · esc cancel` hints (the original left-aligned
+/// look) and return each hint's clickable rect, so a click drives the same
+/// commit / cancel as the key. The hint under the cursor gets a subtle highlight.
+fn footer_hints(
+    f: &mut RenderTarget,
+    row: Rect,
+    commit: &str,
+    cancel: &str,
+    hover: Option<(u16, u16)>,
+    t: &Theme,
+) -> (Rect, Rect) {
+    // Each hint is padded by a space each side, so its hover pill is a little
+    // wider than the text and reads as a proper button.
+    let cw = super::display_width(&format!("⏎ {commit}")) as u16 + 2;
+    let xw = super::display_width(&format!("esc {cancel}")) as u16 + 2;
+    let commit_rect = Rect::new(row.x, row.y, cw.min(row.width), 1);
+    let sep_x = row.x + cw; // the `·` sits between the two pills' padding
+    let cancel_x = (sep_x + 1).min(row.right());
+    let cancel_rect = Rect::new(
+        cancel_x,
+        row.y,
+        xw.min(row.right().saturating_sub(cancel_x)),
+        1,
+    );
+    let over = |r: Rect| hover.is_some_and(|(c, hr)| c >= r.x && c < r.right() && hr == r.y);
+    draw_hint(f, commit_rect, "⏎", commit, over(commit_rect), t);
+    if sep_x < row.right() {
+        f.render_widget(
+            Paragraph::new(Span::styled("·", Style::new().fg(t.overlay0))),
+            Rect::new(sep_x, row.y, 1, 1),
+        );
+    }
+    draw_hint(f, cancel_rect, "esc", cancel, over(cancel_rect), t);
+    (commit_rect, cancel_rect)
+}
+
+/// One footer hint ` ⏎ label `. When `hot`, the whole padded pill fills with the
+/// theme accent (dark text on green); otherwise the key is the accent and the
+/// label is light text, over the modal background (the original look).
+fn draw_hint(f: &mut RenderTarget, rect: Rect, key: &str, label: &str, hot: bool, t: &Theme) {
+    if hot {
+        fill_bg(f, rect, t.accent);
+    }
+    let (kfg, lfg) = if hot {
+        (t.crust, t.crust)
+    } else {
+        (t.accent, t.subtext1)
+    };
     f.render_widget(
-        Paragraph::new(hint_line(
-            &[("⏎", cat.act_save), ("esc", cat.act_cancel)],
-            t,
-        )),
-        Rect::new(inner.x, bottom, inner.width, 1),
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(key.to_string(), Style::new().fg(kfg).bold()),
+            Span::styled(format!(" {label} "), Style::new().fg(lfg)),
+        ])),
+        rect,
     );
 }
 

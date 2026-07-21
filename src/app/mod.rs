@@ -72,6 +72,9 @@ pub struct Tab {
     /// the task/lease dashboard from `App.orch` instead of panes. Same placeholder
     /// -leaf trick as a git tab; mutually exclusive with `git`.
     pub orch: bool,
+    /// User-chosen tab name (docs/28). `None` → the tab bar shows its number.
+    /// Git/orch tabs keep their fixed `⎇ git` / `◇ orch` label and are never named.
+    pub name: Option<String>,
 }
 
 impl Tab {
@@ -81,6 +84,7 @@ impl Tab {
             layout,
             git: None,
             orch: false,
+            name: None,
         }
     }
 
@@ -91,7 +95,56 @@ impl Tab {
     pub fn is_orch(&self) -> bool {
         self.orch
     }
+
+    /// Pane tabs can be renamed; the git/orch dashboards keep their fixed label.
+    pub fn is_renameable(&self) -> bool {
+        !self.is_git() && !self.is_orch()
+    }
 }
+
+/// The tab-rename modal (docs/28): the tab being renamed + its editable buffer,
+/// pre-filled with the current name. Opened by right-clicking a pane tab.
+pub struct TabRename {
+    pub index: usize,
+    pub buffer: String,
+}
+
+/// Cap a custom tab name so a pathological paste can't bloat the session.
+const TAB_NAME_MAX: usize = 40;
+
+/// A right-click context menu on a WORKSPACES row: rename / worktree / close the
+/// node. Opened by right-clicking a workspace in the sidebar.
+pub struct WsMenu {
+    /// Target workspace index.
+    pub index: usize,
+    /// Top-left corner of the popup (the click point, clamped to fit on screen).
+    pub anchor: (u16, u16),
+    /// Each visible item + its clickable rect, filled in by the renderer.
+    pub items: Vec<(WsMenuItem, Rect)>,
+}
+
+/// An action offered by the workspace context menu. Worktree / git actions only
+/// appear for nodes inside a git repo. `Divider` is a non-interactive separator.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WsMenuItem {
+    Close,
+    Rename,
+    NewWorktree,
+    OpenWorktree,
+    Divider,
+    OpenGit,
+    OpenOrch,
+}
+
+/// The workspace-rename modal: like [`TabRename`] but for a node's **label** (the
+/// folder on disk is never touched). Pre-filled with the current name.
+pub struct WsRename {
+    pub index: usize,
+    pub buffer: String,
+}
+
+/// Cap a custom workspace name (same reasoning as [`TAB_NAME_MAX`]).
+const WS_NAME_MAX: usize = 40;
 
 /// The in-TUI **new-task form** (ORCH-7): create an orchestration task without the
 /// CLI. Fields are plain text; `paths`/`deps` are whitespace-split on submit.
@@ -266,6 +319,16 @@ pub struct App {
     /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
     /// open, holding the branch being typed.
     pub worktree_prompt: Option<String>,
+    /// Active tab-rename modal (docs/28); `None` when closed.
+    pub tab_rename: Option<TabRename>,
+    /// The workspace right-click context menu, and the workspace-rename modal.
+    pub ws_menu: Option<WsMenu>,
+    pub ws_rename: Option<WsRename>,
+    /// Clickable ⏎-commit / esc-cancel footer buttons of whichever text-input
+    /// modal is open (worktree prompt / tab rename / workspace rename), set each
+    /// render so the mouse layer can hit-test them.
+    pub modal_commit_rect: Option<Rect>,
+    pub modal_cancel_rect: Option<Rect>,
     /// The repo the pending worktree is created in — the active workspace's folder
     /// (`Ctrl+Space G`) or the folder browsed in the picker (`w`).
     pub worktree_repo: Option<PathBuf>,
@@ -433,6 +496,11 @@ impl App {
             picker_rects: Vec::new(),
             help_open: false,
             worktree_prompt: None,
+            tab_rename: None,
+            ws_menu: None,
+            ws_rename: None,
+            modal_commit_rect: None,
+            modal_cancel_rect: None,
             worktree_repo: None,
             worktree_error: None,
             mode: Mode::Normal,
@@ -538,6 +606,7 @@ impl App {
                             layout: TileLayout::new(placeholder),
                             git: Some(Box::new(view)),
                             orch: false,
+                            name: None,
                         });
                     }
                     continue;
@@ -550,6 +619,7 @@ impl App {
                         layout: TileLayout::new(placeholder),
                         git: None,
                         orch: true,
+                        name: None,
                     });
                     continue;
                 }
@@ -618,7 +688,11 @@ impl App {
                 // cleaned up and every other tab/workspace is kept, instead of
                 // discarding the user's entire session.
                 match TileLayout::from_tree(&tab.tree, &remap, tab.focus) {
-                    Some(layout) => tabs.push(Tab::panes(layout)),
+                    Some(layout) => {
+                        let mut t = Tab::panes(layout);
+                        t.name = tab.name.clone();
+                        tabs.push(t);
+                    }
                     None => {
                         for id in remap.values() {
                             panes.remove(id);
@@ -666,6 +740,11 @@ impl App {
             picker_rects: Vec::new(),
             help_open: false,
             worktree_prompt: None,
+            tab_rename: None,
+            ws_menu: None,
+            ws_rename: None,
+            modal_commit_rect: None,
+            modal_cancel_rect: None,
             worktree_repo: None,
             worktree_error: None,
             mode: Mode::Normal,
@@ -871,15 +950,7 @@ impl App {
         }
         // Nest under the **main** worktree's name, so every checkout of one repo
         // groups under a single folder even when you branch off another worktree.
-        let repo_name = crate::git::local::worktrees(repo)
-            .ok()
-            .and_then(|wts| {
-                wts.into_iter()
-                    .find(|w| w.is_main)
-                    .map(|w| ws_name(&w.path))
-            })
-            .unwrap_or_else(|| ws_name(repo));
-        let base = persist::config_dir().join("worktrees").join(repo_name);
+        let base = worktrees_dir_for(repo);
         let _ = std::fs::create_dir_all(&base);
         // `git worktree add` requires the target not to exist, so pick the first
         // free `<branch>` / `<branch>-2` / `<branch>-3` … under the repo folder.
@@ -902,6 +973,185 @@ impl App {
         if crate::git::local::is_repo(&cwd) {
             self.worktree_repo = Some(cwd);
             self.worktree_prompt = Some(String::new());
+        }
+    }
+
+    /// Open the rename modal for tab `index` (docs/28). No-op for the git/orch
+    /// dashboards or the `+` button (index past the last tab).
+    pub fn open_tab_rename(&mut self, index: usize) {
+        if let Some(tab) = self.ws().tabs.get(index) {
+            if tab.is_renameable() {
+                let buffer = tab.name.clone().unwrap_or_default();
+                self.tab_rename = Some(TabRename { index, buffer });
+            }
+        }
+    }
+
+    /// Key handling while the tab-rename modal is open. `Enter` commits (an empty
+    /// name clears the custom name, reverting to the number); `Esc` cancels.
+    pub fn handle_tab_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.tab_rename = None,
+            KeyCode::Enter => {
+                if let Some(r) = self.tab_rename.take() {
+                    let name = r.buffer.trim();
+                    let value = (!name.is_empty()).then(|| name.to_string());
+                    let ws = &mut self.workspaces[self.active_ws];
+                    if let Some(tab) = ws.tabs.get_mut(r.index) {
+                        tab.name = value;
+                    }
+                    self.session_dirty = true;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(r) = self.tab_rename.as_mut() {
+                    r.buffer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(r) = self.tab_rename.as_mut() {
+                    if r.buffer.chars().count() < TAB_NAME_MAX {
+                        r.buffer.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ── workspace context menu (right-click a WORKSPACES row) ──
+
+    /// Open the workspace context menu for row `index`, anchored at the cursor.
+    pub fn open_ws_menu(&mut self, index: usize, col: u16, row: u16) {
+        if index < self.workspaces.len() {
+            self.ws_menu = Some(WsMenu {
+                index,
+                anchor: (col, row),
+                items: Vec::new(),
+            });
+        }
+    }
+
+    /// The items shown for workspace `index`, in render order: node actions
+    /// (close / rename / worktrees) above a divider, then the open-tab actions
+    /// (git / orch). Worktree + git actions only appear for nodes in a git repo.
+    pub fn ws_menu_items(&self, index: usize) -> Vec<WsMenuItem> {
+        let is_repo = self
+            .workspaces
+            .get(index)
+            .is_some_and(|w| crate::git::local::is_repo(&w.cwd));
+        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename];
+        if is_repo {
+            items.push(WsMenuItem::NewWorktree);
+            items.push(WsMenuItem::OpenWorktree);
+        }
+        items.push(WsMenuItem::Divider);
+        if is_repo {
+            items.push(WsMenuItem::OpenGit);
+        }
+        items.push(WsMenuItem::OpenOrch);
+        items
+    }
+
+    /// A click inside the open context menu: run the hit item, else dismiss.
+    pub fn ws_menu_click(&mut self, col: u16, row: u16) {
+        let hit = self.ws_menu.as_ref().and_then(|m| {
+            m.items
+                .iter()
+                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .map(|(it, _)| *it)
+        });
+        match hit {
+            Some(WsMenuItem::Divider) => {} // non-interactive; keep the menu open
+            Some(it) => self.ws_menu_action(it),
+            None => self.ws_menu = None, // click outside dismisses
+        }
+    }
+
+    /// Run a context-menu action for the menu's target, then close the menu.
+    pub fn ws_menu_action(&mut self, item: WsMenuItem) {
+        let Some(index) = self.ws_menu.as_ref().map(|m| m.index) else {
+            return;
+        };
+        self.ws_menu = None;
+        let cwd = self.workspaces.get(index).map(|w| w.cwd.clone());
+        match item {
+            WsMenuItem::Divider => {}
+            WsMenuItem::Rename => self.open_ws_rename(index),
+            WsMenuItem::Close => self.close_workspace(index),
+            WsMenuItem::NewWorktree => {
+                if let Some(cwd) = cwd.filter(|p| crate::git::local::is_repo(p)) {
+                    self.worktree_repo = Some(cwd);
+                    self.worktree_prompt = Some(String::new());
+                    self.worktree_error = None;
+                }
+            }
+            WsMenuItem::OpenWorktree => {
+                if let Some(cwd) = cwd.filter(|p| crate::git::local::is_repo(p)) {
+                    // Land in this repo's worktrees folder so its checkouts list.
+                    let wt = worktrees_dir_for(&cwd);
+                    let start = if wt.is_dir() { wt } else { cwd };
+                    self.open_folder_picker_at(start);
+                }
+            }
+            // Both switch to the node first, then open (or focus) its dashboard.
+            WsMenuItem::OpenGit => self.open_git_tab(index), // no-op for non-repos
+            WsMenuItem::OpenOrch => {
+                if index < self.workspaces.len() {
+                    self.active_ws = index;
+                    self.open_orch_board();
+                }
+            }
+        }
+    }
+
+    /// Open the rename modal for workspace `index`, pre-filled with its label.
+    pub fn open_ws_rename(&mut self, index: usize) {
+        if let Some(w) = self.workspaces.get(index) {
+            self.ws_rename = Some(WsRename {
+                index,
+                buffer: w.name.clone(),
+            });
+        }
+    }
+
+    /// Key handling while the workspace-rename modal is open (mirrors tab rename).
+    /// `Enter` commits a non-empty name (the on-disk folder is never renamed);
+    /// `Esc` cancels.
+    pub fn handle_ws_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.ws_rename = None,
+            KeyCode::Enter => {
+                if let Some(r) = self.ws_rename.take() {
+                    let name = r.buffer.trim();
+                    if !name.is_empty() {
+                        if let Some(w) = self.workspaces.get_mut(r.index) {
+                            w.name = name.to_string();
+                        }
+                        self.session_dirty = true;
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(r) = self.ws_rename.as_mut() {
+                    r.buffer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(r) = self.ws_rename.as_mut() {
+                    if r.buffer.chars().count() < WS_NAME_MAX {
+                        r.buffer.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Key handling while the workspace context menu is open: `Esc` closes it.
+    pub fn handle_ws_menu_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.ws_menu = None;
         }
     }
 
@@ -1136,8 +1386,17 @@ impl App {
 
     /// Start a divider drag if `(c, r)` grabs one (RESIZE-2). Returns whether a
     /// drag began, so the mouse handler can skip selection/focus.
+    /// The focused pane's close button sits on the top-right **border** cell,
+    /// which for a stacked pane lands exactly on the horizontal divider. Resize
+    /// must yield there, or the divider grab zone swallows every click on the ✕
+    /// and the pane can't be closed by mouse.
+    fn on_pane_close(&self, c: u16, r: u16) -> bool {
+        self.pane_close_rect
+            .is_some_and(|rc| c >= rc.x && c < rc.right() && r >= rc.y && r < rc.bottom())
+    }
+
     pub fn begin_resize(&mut self, c: u16, r: u16) -> bool {
-        if self.active_is_git() || self.active_is_orch() {
+        if self.active_is_git() || self.active_is_orch() || self.on_pane_close(c, r) {
             return false;
         }
         let area = self.last_pane_area;
@@ -1156,7 +1415,7 @@ impl App {
     /// Start a drag of the divider nearest `(c, r)` — the `Ctrl`+drag path
     /// (RESIZE-5). Skips a pane that tracks the mouse itself (a TUI agent).
     pub fn begin_resize_nearest(&mut self, c: u16, r: u16) -> bool {
-        if self.active_is_git() || self.active_is_orch() {
+        if self.active_is_git() || self.active_is_orch() || self.on_pane_close(c, r) {
             return false;
         }
         let over_mouse_app = self
@@ -1205,12 +1464,13 @@ impl App {
 
     /// Recompute the divider under the cursor for the hover highlight (RESIZE-4).
     pub fn update_hover_divider(&mut self, c: u16, r: u16) {
-        self.hover_divider = if self.active_is_git() || self.active_is_orch() {
-            None
-        } else {
-            let area = self.last_pane_area;
-            self.layout().divider_at(area, c, r, RESIZE_GRAB_TOL)
-        };
+        self.hover_divider =
+            if self.active_is_git() || self.active_is_orch() || self.on_pane_close(c, r) {
+                None
+            } else {
+                let area = self.last_pane_area;
+                self.layout().divider_at(area, c, r, RESIZE_GRAB_TOL)
+            };
     }
 
     /// Enter keyboard resize mode (RESIZE-3) — a no-op with nothing to resize.
@@ -1334,6 +1594,21 @@ fn ws_name(cwd: &std::path::Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("workspace")
         .to_string()
+}
+
+/// `~/.bohay/worktrees/<repo>/` — the folder that holds all of `repo`'s bohay
+/// worktrees. Nested under the **main** worktree's name so every checkout of one
+/// repo groups under a single folder (same rule `create_worktree` uses).
+fn worktrees_dir_for(repo: &std::path::Path) -> PathBuf {
+    let repo_name = crate::git::local::worktrees(repo)
+        .ok()
+        .and_then(|wts| {
+            wts.into_iter()
+                .find(|w| w.is_main)
+                .map(|w| ws_name(&w.path))
+        })
+        .unwrap_or_else(|| ws_name(repo));
+    persist::config_dir().join("worktrees").join(repo_name)
 }
 
 /// Worktree grouping for a workspace at `cwd` (docs/18 WT): its git common dir, if
@@ -1932,6 +2207,37 @@ mod tests {
     }
 
     #[test]
+    fn resize_yields_to_pane_close_button() {
+        let _env = crate::persist::test_env("resize-close-x");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitDown); // two stacked panes; focus = bottom
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.layout().len(), 2);
+
+        // The focused (bottom) pane's close ✕ sits on the top border — which is
+        // the horizontal divider. Clicking it must close the pane, not resize.
+        let x = app
+            .pane_close_rect
+            .expect("focused pane has a close button");
+        let down = AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x.x + 1,
+            row: x.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_event(down);
+        assert!(app.resize_drag.is_none(), "✕ click did not grab a divider");
+        assert_eq!(app.layout().len(), 1, "✕ click closed the pane");
+    }
+
+    #[test]
     fn keyboard_resize_mode_enters_resizes_and_exits() {
         let _env = crate::persist::test_env("pane-resize-keys");
         use crate::event::AppEvent;
@@ -1967,6 +2273,49 @@ mod tests {
         // Esc leaves resize mode.
         app.handle_event(key(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn tab_rename_sets_name_persists_and_excludes_dashboards() {
+        let _env = crate::persist::test_env("tab-rename");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let ch = |c| AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let code = |c| AppEvent::Key(KeyEvent::new(c, KeyModifiers::NONE));
+
+        // Rename tab 0 → "build".
+        app.open_tab_rename(0);
+        assert!(app.tab_rename.is_some(), "rename modal opened");
+        for c in "build".chars() {
+            app.handle_event(ch(c));
+        }
+        app.handle_event(code(KeyCode::Enter));
+        assert!(app.tab_rename.is_none(), "modal closed on Enter");
+        assert_eq!(app.ws().tabs[0].name.as_deref(), Some("build"));
+
+        // Persists across snapshot → restore.
+        let json = serde_json::to_string(&persist::snapshot(&app)).unwrap();
+        let snap: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snap, tx2).unwrap();
+        assert_eq!(restored.ws().tabs[0].name.as_deref(), Some("build"));
+
+        // Clearing the name (empty on Enter) reverts to the number.
+        app.open_tab_rename(0);
+        for _ in 0.."build".len() {
+            app.handle_event(code(KeyCode::Backspace));
+        }
+        app.handle_event(code(KeyCode::Enter));
+        assert_eq!(app.ws().tabs[0].name, None, "empty name clears the label");
+
+        // The orchestration board (a dashboard tab) cannot be renamed.
+        app.run_cmd(crate::app::keys::Cmd::OpenBoard);
+        let board_idx = app.ws().active_tab;
+        assert!(app.ws().tabs[board_idx].is_orch());
+        app.open_tab_rename(board_idx);
+        assert!(app.tab_rename.is_none(), "dashboard tab is not renameable");
     }
 
     #[test]
