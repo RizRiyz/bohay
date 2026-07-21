@@ -33,6 +33,7 @@ pub enum Cmd {
     OpenBoard,
     OpenSettings,
     ToggleSidebar,
+    ToggleRightSidebar,
     ToggleAgents,
     Detach,
 }
@@ -61,6 +62,7 @@ impl Cmd {
         Cmd::OpenBoard,
         Cmd::OpenSettings,
         Cmd::ToggleSidebar,
+        Cmd::ToggleRightSidebar,
         Cmd::ToggleAgents,
         Cmd::Detach,
     ];
@@ -89,6 +91,7 @@ impl Cmd {
             Cmd::OpenBoard => "open_board",
             Cmd::OpenSettings => "open_settings",
             Cmd::ToggleSidebar => "toggle_sidebar",
+            Cmd::ToggleRightSidebar => "toggle_right_sidebar",
             Cmd::ToggleAgents => "toggle_agents",
             Cmd::Detach => "detach",
         }
@@ -120,6 +123,7 @@ impl Cmd {
             Cmd::OpenBoard => cat.cmd_open_board,
             Cmd::OpenSettings => cat.cmd_open_settings,
             Cmd::ToggleSidebar => cat.cmd_toggle_sidebar,
+            Cmd::ToggleRightSidebar => cat.cmd_toggle_right_sidebar,
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
             Cmd::Detach => cat.cmd_detach,
         }
@@ -149,6 +153,7 @@ impl Cmd {
             Cmd::OpenBoard => "o",
             Cmd::OpenSettings => ",",
             Cmd::ToggleSidebar => "b",
+            Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
             Cmd::Detach => "d",
         }
@@ -271,7 +276,8 @@ impl App {
             Cmd::OpenGit => self.open_git_tab_active(),
             Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
-            Cmd::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Cmd::ToggleSidebar => self.toggle_side(crate::app::Side::Left),
+            Cmd::ToggleRightSidebar => self.toggle_side(crate::app::Side::Right),
             Cmd::ToggleAgents => self.agents_active_only = !self.agents_active_only,
             Cmd::Detach => self.detach_requested = true,
         }

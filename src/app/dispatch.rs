@@ -471,17 +471,86 @@ impl App {
             }
             // ── ui / appearance ──
             "ui.sidebar" => {
+                // `side` selects left (default) or right (docs/29).
+                let side = match p.get("side").and_then(|v| v.as_str()) {
+                    Some("right") => crate::app::Side::Right,
+                    _ => crate::app::Side::Left,
+                };
                 if let Some(w) = param_usize(p, "width") {
-                    self.set_sidebar_width(w as u16);
+                    self.set_side_width(side, w as u16);
                 }
                 if let Some(v) = p.get("visible").and_then(|v| v.as_bool()) {
-                    self.sidebar_visible = v;
+                    self.sidebars.get_mut(side).visible = v;
                 }
+                let s = self.sidebars.get(side);
                 Ok(json!({
                     "type": "ok",
-                    "width": self.sidebar_width,
-                    "visible": self.sidebar_visible,
+                    "width": s.width,
+                    "visible": s.visible,
                 }))
+            }
+            // A module pushes rows into its sidebar dock (docs/29, DOCK-4).
+            "ui.dock.push" => {
+                let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if id.is_empty() {
+                    return Ok(json!({"type":"error","message":"dock id required"}));
+                }
+                let title = p
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let placement = match p.get("placement").and_then(|v| v.as_str()) {
+                    Some("right") | Some("sidebar.right") => crate::app::Side::Right,
+                    _ => crate::app::Side::Left,
+                };
+                let rows = p
+                    .get("rows")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|r| crate::app::DockRow {
+                                text: r
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                dot: r.get("dot").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                action: r
+                                    .get("action")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.push_module_dock(id, title, placement, rows);
+                Ok(json!({"type":"ok"}))
+            }
+            "ui.dock.list" => {
+                let arr: Vec<Value> = self
+                    .docks_flat()
+                    .iter()
+                    .map(|k| {
+                        let side = match self.sidebars.side_of(k) {
+                            Some(crate::app::Side::Right) => "right",
+                            _ => "left",
+                        };
+                        json!({"id": k.id(), "side": side})
+                    })
+                    .collect();
+                Ok(json!({"type":"dock_list","docks":arr}))
+            }
+            "ui.dock.move" => {
+                let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if id.is_empty() {
+                    return Ok(json!({"type":"error","message":"dock id required"}));
+                }
+                let side = match p.get("side").and_then(|v| v.as_str()) {
+                    Some("right") => crate::app::Side::Right,
+                    _ => crate::app::Side::Left,
+                };
+                self.move_dock(&crate::app::DockKind::from_id(id), side);
+                Ok(json!({"type":"ok"}))
             }
             // ── modules (docs/13) ──
             "module.list" => {

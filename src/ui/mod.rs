@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{App, Mode};
+use crate::app::{App, DockKind, Mode, Side};
 use crate::ids::PaneId;
 use crate::ui::theme::{State, Theme};
 
@@ -109,19 +109,37 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 
     let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
-    let (sidebar, content) = if app.sidebar_visible {
-        // Honor the configured width, but never starve the pane area.
-        let sw = app.sidebar_width.min(main.width.saturating_sub(24));
-        if sw >= crate::app::SIDEBAR_WIDTH_MIN {
-            let [s, c] =
-                Layout::horizontal([Constraint::Length(sw), Constraint::Min(0)]).areas(main);
-            (Some(s), c)
+    // Two sidebars flank the content (docs/29). Each is shown only if visible,
+    // non-empty, and it (with the other) leaves the panes at least 24 columns —
+    // the right yields space first, then the left. A width that would fall below
+    // the minimum drops the sidebar entirely (matching the original behavior).
+    let min = crate::app::SIDEBAR_WIDTH_MIN;
+    let fit = |w: u16, budget: u16| -> u16 {
+        let w = w.min(budget.saturating_sub(24));
+        if w >= min {
+            w
         } else {
-            (None, main)
+            0
         }
-    } else {
-        (None, main)
     };
+    let lw = if app.sidebars.left.shown() {
+        fit(app.sidebars.left.width, main.width)
+    } else {
+        0
+    };
+    let rw = if app.sidebars.right.shown() {
+        fit(app.sidebars.right.width, main.width.saturating_sub(lw))
+    } else {
+        0
+    };
+    let [left_area, content, right_area] = Layout::horizontal([
+        Constraint::Length(lw),
+        Constraint::Min(0),
+        Constraint::Length(rw),
+    ])
+    .areas(main);
+    let sidebar_left = (lw > 0).then_some(left_area);
+    let sidebar_right = (rw > 0).then_some(right_area);
 
     let [tabbar, pane_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
@@ -148,18 +166,30 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         }
     }
 
-    let (ws_rects, agent_rects, session_rects, new_ws_rect) = if let Some(s) = sidebar {
-        sidebar::draw_sidebar(f, s, app, &t)
-    } else {
-        // Sidebar hidden: clear the click/scroll geometry it owns so stale
-        // rects sitting under the now-expanded pane area can't trigger the
-        // Menu, the All/Active filter, or list wheel-scrolling.
-        app.settings_icon_rect = None;
-        app.workspaces_area = Rect::ZERO;
-        app.agents_area = Rect::ZERO;
-        app.agents_filter_rects.clear();
-        (Vec::new(), Vec::new(), Vec::new(), None)
-    };
+    // Clear every dock/sidebar hit-geometry up front, then let each drawn dock
+    // set its own. A dock mounted nowhere (or a hidden sidebar) leaves its rects
+    // zeroed, so nothing fires from under a widened pane area (docs/29).
+    app.settings_icon_rect = None;
+    app.sidebar_toggle_rect = None;
+    app.right_sidebar_toggle_rect = None;
+    app.workspaces_area = Rect::ZERO;
+    app.agents_area = Rect::ZERO;
+    app.agents_filter_rects.clear();
+    app.workspace_branch_rects.clear();
+    app.module_dock_rects.clear();
+    let mut ws_rects = Vec::new();
+    let mut agent_rects = Vec::new();
+    let mut session_rects = Vec::new();
+    let mut new_ws_rect = None;
+    for (opt, side) in [(sidebar_left, Side::Left), (sidebar_right, Side::Right)] {
+        if let Some(s) = opt {
+            let (w, a, se, n) = sidebar::draw_sidebar(f, side, s, app, &t);
+            ws_rects.extend(w);
+            agent_rects.extend(a);
+            session_rects.extend(se);
+            new_ws_rect = new_ws_rect.or(n);
+        }
+    }
     let (tab_rects, tab_close_rects, tab_prev, tab_next) = tabbar::draw_tabbar(f, tabbar, app, &t);
     // Behind the panes, use the (dark) pane background.
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), pane_area);

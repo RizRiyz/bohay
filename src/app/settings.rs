@@ -70,14 +70,58 @@ pub struct SettingsUi {
     pub capturing: bool,
 }
 
-/// Pane-Layout control rows. The Shell picker (row 5) is Windows-only — on Unix
-/// panes always use `$SHELL`, so the row is hidden.
-#[cfg(windows)]
-const LAYOUT_ROWS: usize = 6;
-#[cfg(not(windows))]
-const LAYOUT_ROWS: usize = 5;
+/// A selectable row in the Layout tab (docs/15 + docs/29). The pane-layout rows
+/// come first, then a `── Docks ──` divider, then the sidebar + dock controls.
+/// `Dock` rows carry `[Left] [Right]` place buttons.
+#[derive(Clone)]
+pub enum LayoutRow {
+    SidebarWidth,
+    ColGap,
+    RowGap,
+    PaneTitles,
+    ResumeWs,
+    #[cfg(windows)]
+    Shell,
+    LeftVisible,
+    RightVisible,
+    RightWidth,
+    Dock(DockKind),
+}
 
 impl App {
+    /// The Layout tab's ordered selectable rows (docs/29). The first index of the
+    /// dock section (used to draw the `── Docks ──` divider) is `dock_section_start`.
+    pub fn layout_rows(&self) -> Vec<LayoutRow> {
+        let mut v = vec![
+            LayoutRow::SidebarWidth,
+            LayoutRow::ColGap,
+            LayoutRow::RowGap,
+            LayoutRow::PaneTitles,
+            LayoutRow::ResumeWs,
+        ];
+        #[cfg(windows)]
+        v.push(LayoutRow::Shell);
+        v.push(LayoutRow::LeftVisible);
+        v.push(LayoutRow::RightVisible);
+        v.push(LayoutRow::RightWidth);
+        for k in self.available_docks() {
+            v.push(LayoutRow::Dock(k));
+        }
+        v
+    }
+
+    /// Index of the first dock-section row (where the `── Docks ──` divider goes).
+    pub fn dock_section_start(&self) -> usize {
+        #[cfg(windows)]
+        {
+            6
+        }
+        #[cfg(not(windows))]
+        {
+            5
+        }
+    }
+
     pub fn open_settings(&mut self) {
         let cursor = theme_cursor(&self.config.theme);
         self.settings = Some(SettingsUi {
@@ -95,7 +139,7 @@ impl App {
     pub fn settings_rows(&self, tab: SettingsTab) -> usize {
         match tab {
             SettingsTab::Theme => theme::THEMES.len(),
-            SettingsTab::Layout => LAYOUT_ROWS,
+            SettingsTab::Layout => self.layout_rows().len(),
             SettingsTab::Notifications => 4,
             SettingsTab::Keys => crate::app::Cmd::ALL.len(),
             SettingsTab::Modules => self.modules.modules.len(),
@@ -142,7 +186,7 @@ impl App {
             KeyCode::Backspace | KeyCode::Delete if tab == SettingsTab::Keys => {
                 self.reset_binding(Self::keys_cmd_at(cursor));
             }
-            KeyCode::Char(c) if ('1'..='6').contains(&c) => {
+            KeyCode::Char(c) if ('1'..='7').contains(&c) => {
                 self.settings_set_tab(SettingsTab::from_index(c as usize - '1' as usize));
             }
             _ => {}
@@ -195,7 +239,18 @@ impl App {
             if let Some(ui) = self.settings.as_mut() {
                 ui.cursor = i;
             }
-            let is_slider = matches!(tab, Some(SettingsTab::Layout)) && i == 0;
+            // Slider/button rows only change via their arrows/buttons, so a click
+            // on the row body just selects it: the Layout width sliders and dock
+            // `[Left] [Right]` place rows.
+            let is_slider = match tab {
+                Some(SettingsTab::Layout) => matches!(
+                    self.layout_rows().get(i),
+                    Some(LayoutRow::SidebarWidth)
+                        | Some(LayoutRow::RightWidth)
+                        | Some(LayoutRow::Dock(_))
+                ),
+                _ => false,
+            };
             if !is_slider {
                 self.settings_activate(i);
             }
@@ -261,7 +316,7 @@ impl App {
             SettingsTab::Language => {
                 self.apply_language(crate::i18n::LANGS[cursor.min(crate::i18n::LANGS.len() - 1)])
             }
-            SettingsTab::Layout => self.adjust_layout(cursor, 1),
+            SettingsTab::Layout => self.activate_layout(cursor),
             SettingsTab::Notifications if cursor == 3 => self.test_notification(),
             SettingsTab::Notifications => self.toggle_notify(cursor),
             // Enter on a Keys row starts capturing the next key as its binding.
@@ -307,34 +362,77 @@ impl App {
         config::save(&self.config);
     }
 
+    /// Layout tab ‹ ›/click on a row's control (docs/29). Width sliders step by
+    /// `delta`; toggles flip; a `Dock` row's `[Left]`/`[Right]` buttons (which map
+    /// to `delta < 0` / `delta > 0`) place the dock on that side.
     fn adjust_layout(&mut self, cursor: usize, delta: i32) {
-        match cursor {
-            0 => {
-                let w = (self.sidebar_width as i32 + 2 * delta)
+        let Some(row) = self.layout_rows().get(cursor).cloned() else {
+            return;
+        };
+        match row {
+            LayoutRow::SidebarWidth => {
+                let w = (self.sidebars.left.width as i32 + 2 * delta)
                     .clamp(SIDEBAR_WIDTH_MIN as i32, SIDEBAR_WIDTH_MAX as i32)
                     as u16;
-                self.set_sidebar_width(w); // persists config.sidebar_width too
+                self.set_side_width(Side::Left, w);
             }
-            1 => {
+            LayoutRow::RightWidth => {
+                let w = (self.sidebars.right.width as i32 + 2 * delta)
+                    .clamp(SIDEBAR_WIDTH_MIN as i32, SIDEBAR_WIDTH_MAX as i32)
+                    as u16;
+                self.set_side_width(Side::Right, w);
+            }
+            LayoutRow::ColGap => {
                 self.config.layout.col_gap ^= 1;
                 self.apply_gaps();
             }
-            2 => {
+            LayoutRow::RowGap => {
                 self.config.layout.row_gap ^= 1;
                 self.apply_gaps();
             }
-            3 => {
+            LayoutRow::PaneTitles => {
                 self.config.layout.show_titles = !self.config.layout.show_titles;
                 config::save(&self.config);
             }
-            4 => {
+            LayoutRow::ResumeWs => {
                 self.config.layout.resume_in_new_workspace =
                     !self.config.layout.resume_in_new_workspace;
                 config::save(&self.config);
             }
             #[cfg(windows)]
-            5 => self.cycle_shell(delta),
-            _ => {}
+            LayoutRow::Shell => self.cycle_shell(delta),
+            LayoutRow::LeftVisible => {
+                self.sidebars.left.visible = !self.sidebars.left.visible;
+                self.save_sidebars();
+            }
+            LayoutRow::RightVisible => {
+                self.sidebars.right.visible = !self.sidebars.right.visible;
+                self.save_sidebars();
+            }
+            LayoutRow::Dock(kind) => {
+                // Buttons encode the target as `delta`: -1 = Left, +1 = Right,
+                // +2 = Off (unmount). `←`/`→` keys (∓1) place left/right.
+                if delta <= -1 {
+                    self.move_dock(&kind, Side::Left);
+                } else if delta == 1 {
+                    self.move_dock(&kind, Side::Right);
+                } else {
+                    self.unmount_dock(&kind);
+                }
+            }
+        }
+    }
+
+    /// Enter/click on a Layout row: bump a slider, flip a toggle, or (for a dock)
+    /// cycle Left → Right → Off → Left.
+    fn activate_layout(&mut self, cursor: usize) {
+        match self.layout_rows().get(cursor).cloned() {
+            Some(LayoutRow::Dock(kind)) => match self.sidebars.side_of(&kind) {
+                Some(Side::Left) => self.move_dock(&kind, Side::Right),
+                Some(Side::Right) => self.unmount_dock(&kind),
+                None => self.move_dock(&kind, Side::Left),
+            },
+            _ => self.adjust_layout(cursor, 1),
         }
     }
 

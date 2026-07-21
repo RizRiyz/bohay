@@ -775,6 +775,9 @@ mod tests {
     #[test]
     fn sidebar_toggle_button_shows_and_hides() {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        // Isolate config so a concurrent config-writing test can't change the
+        // sidebar layout under us via the shared `BOHAY_HOME` env var.
+        let _env = crate::persist::test_env("toggle");
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
         thread::sleep(Duration::from_millis(100));
@@ -807,7 +810,7 @@ mod tests {
 
         // Click the chevron → sidebar hides and its stale click geometry clears.
         click(&mut app, btn.x, btn.y);
-        assert!(!app.sidebar_visible, "click hides the sidebar");
+        assert!(!app.sidebars.left.visible, "click hides the sidebar");
         let text = render(&mut app);
         assert!(!text.contains("WORKSPACES"), "sidebar hidden after toggle");
         assert!(
@@ -830,7 +833,7 @@ mod tests {
             "reopen toggle at the top-left corner"
         );
         click(&mut app, btn.x, btn.y);
-        assert!(app.sidebar_visible, "click shows the sidebar again");
+        assert!(app.sidebars.left.visible, "click shows the sidebar again");
         assert!(render(&mut app).contains("WORKSPACES"), "sidebar restored");
     }
 

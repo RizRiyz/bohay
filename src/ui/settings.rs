@@ -3,7 +3,7 @@
 //! when open; returns the hit-test rects `render()` stores on the `App`.
 
 use super::*;
-use crate::app::SettingsTab;
+use crate::app::{LayoutRow, SettingsTab};
 use ratatui::widgets::{Borders, Clear};
 
 pub(super) struct SettingsHits {
@@ -216,33 +216,161 @@ fn draw_content(
             }
         }
         SettingsTab::Layout => {
+            // Pane-layout rows, then a blank gap + `── Docks ──` divider, then the
+            // sidebar + dock-placement rows. The list scrolls to keep the cursor
+            // visible (docs/29), so a long registry of plugin docks stays reachable.
+            let rows = app.layout_rows();
+            let dock_start = app.dock_section_start();
             let l = &app.config.layout;
-            // Index 0 is a real range (clickable ‹ › arrows); the rest are 0/1.
-            let row = slider_row(
-                f,
-                area,
-                cursor == 0,
-                cat.set_sidebar_width,
-                app.sidebar_width.to_string(),
-                t,
-                &mut arrows,
-            );
-            ctls.push((0, row));
-            let toggles = [
-                (cat.set_column_gap, l.col_gap == 1),
-                (cat.set_row_gap, l.row_gap == 1),
-                (cat.set_pane_titles, l.show_titles),
-                (cat.set_resume_workspace, l.resume_in_new_workspace),
-            ];
-            for (k, (label, on)) in toggles.into_iter().enumerate() {
-                ctls.push(ctl_row(f, area, k + 1, cursor, label, toggle(on, t), t));
+            // Visual sequence: control rows plus a blank + divider before the docks.
+            enum V {
+                Ctl(usize),
+                Blank,
+                Divider,
             }
-            // Shell selector (cycles on click / ‹ › keys) — Windows-only; on Unix
-            // panes always use $SHELL, so there's nothing to choose.
-            #[cfg(windows)]
-            {
-                let shell = crate::platform::shell_label(&app.config.shell);
-                ctls.push(ctl_row(f, area, 5, cursor, "Shell", picker(shell, t), t));
+            let mut vis = Vec::new();
+            for i in 0..rows.len() {
+                if i == dock_start {
+                    vis.push(V::Blank);
+                    vis.push(V::Divider);
+                }
+                vis.push(V::Ctl(i));
+            }
+            let avail = area.height.max(1) as usize;
+            let cur_vis = vis
+                .iter()
+                .position(|v| matches!(v, V::Ctl(i) if *i == cursor))
+                .unwrap_or(0);
+            let scroll = cur_vis
+                .saturating_sub(avail.saturating_sub(1))
+                .min(vis.len().saturating_sub(avail));
+            for (row_i, v) in vis.iter().enumerate().skip(scroll).take(avail) {
+                let y = area.y + (row_i - scroll) as u16;
+                let i = match v {
+                    V::Blank => continue,
+                    V::Divider => {
+                        hline(f, area.x, y, area.width, t);
+                        f.render_widget(
+                            Paragraph::new(Span::styled(
+                                format!(" {} ", cat.tab_docks),
+                                Style::new().fg(t.subtext0).bg(t.surface0),
+                            )),
+                            Rect::new(area.x + 2, y, 12.min(area.width), 1),
+                        );
+                        continue;
+                    }
+                    V::Ctl(i) => *i,
+                };
+                match &rows[i] {
+                    LayoutRow::SidebarWidth => {
+                        let r = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_sidebar_width,
+                            app.sidebars.left.width.to_string(),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, r));
+                    }
+                    LayoutRow::ColGap => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_column_gap,
+                            toggle(l.col_gap == 1, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::RowGap => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_row_gap,
+                            toggle(l.row_gap == 1, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::PaneTitles => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_pane_titles,
+                            toggle(l.show_titles, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::ResumeWs => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_resume_workspace,
+                            toggle(l.resume_in_new_workspace, t),
+                            t,
+                        ));
+                    }
+                    #[cfg(windows)]
+                    LayoutRow::Shell => {
+                        let shell = crate::platform::shell_label(&app.config.shell);
+                        ctls.push(ctl_row(f, area, y, i, cursor, "Shell", picker(shell, t), t));
+                    }
+                    LayoutRow::LeftVisible => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            &format!("◧ {}", cat.side_left),
+                            toggle(app.sidebars.left.visible, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::RightVisible => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            &format!("◨ {}", cat.side_right),
+                            toggle(app.sidebars.right.visible, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::RightWidth => {
+                        let r = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_sidebar_width,
+                            app.sidebars.right.width.to_string(),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, r));
+                    }
+                    LayoutRow::Dock(kind) => {
+                        ctls.push(dock_row(f, area, y, i, cursor, app, kind, t, &mut arrows));
+                    }
+                }
             }
         }
         SettingsTab::Notifications => {
@@ -260,7 +388,16 @@ fn draw_content(
                 ),
             ];
             for (i, (label, val)) in rows.into_iter().enumerate() {
-                ctls.push(ctl_row(f, area, i, cursor, label, val, t));
+                ctls.push(ctl_row(
+                    f,
+                    area,
+                    area.y + i as u16,
+                    i,
+                    cursor,
+                    label,
+                    val,
+                    t,
+                ));
             }
         }
         SettingsTab::Integrations => {
@@ -277,7 +414,16 @@ fn draw_content(
                         Style::new().fg(t.accent).bold(),
                     ))
                 };
-                ctls.push(ctl_row(f, area, i, cursor, agent, val, t));
+                ctls.push(ctl_row(
+                    f,
+                    area,
+                    area.y + i as u16,
+                    i,
+                    cursor,
+                    agent,
+                    val,
+                    t,
+                ));
             }
         }
         SettingsTab::Keys => {
@@ -389,19 +535,22 @@ fn draw_content(
     (ctls, arrows)
 }
 
-/// The `‹ value ›` slider row (always control index 0). Records the two arrow
-/// cells as decrement/increment targets so the left arrow decreases and the
-/// right increases.
+/// The `‹ value ›` slider row for control `idx`. Records the two arrow cells as
+/// decrement/increment targets so the left arrow decreases and the right
+/// increases.
+#[allow(clippy::too_many_arguments)]
 fn slider_row(
     f: &mut RenderTarget,
     area: Rect,
+    y: u16,
+    idx: usize,
     sel: bool,
     label: &str,
     value: String,
     t: &Theme,
     arrows: &mut Vec<(usize, i32, Rect)>,
 ) -> Rect {
-    let row = Rect::new(area.x, area.y, area.width, 1);
+    let row = Rect::new(area.x, y, area.width, 1);
     if sel {
         fill_bg(f, row, t.sel_bg);
     }
@@ -423,22 +572,24 @@ fn slider_row(
         ])),
         Rect::new(sx, row.y, w, 1),
     );
-    arrows.push((0, -1, Rect::new(sx, row.y, 2, 1)));
-    arrows.push((0, 1, Rect::new(sx + w.saturating_sub(2), row.y, 2, 1)));
+    arrows.push((idx, -1, Rect::new(sx, row.y, 2, 1)));
+    arrows.push((idx, 1, Rect::new(sx + w.saturating_sub(2), row.y, 2, 1)));
     row
 }
 
 /// A label + right-aligned value control row, highlighted when selected.
+#[allow(clippy::too_many_arguments)]
 fn ctl_row(
     f: &mut RenderTarget,
     area: Rect,
+    y: u16,
     i: usize,
     cursor: usize,
     label: &str,
     value: Line<'static>,
     t: &Theme,
 ) -> (usize, Rect) {
-    let row = Rect::new(area.x, area.y + i as u16, area.width, 1);
+    let row = Rect::new(area.x, y, area.width, 1);
     let sel = i == cursor;
     if sel {
         fill_bg(f, row, t.sel_bg);
@@ -455,6 +606,73 @@ fn ctl_row(
         Rect::new(row.x, row.y, row.width.saturating_sub(2), 1),
     );
     (i, row)
+}
+
+/// A dock placement row (docs/29): the dock name on the left, and wide
+/// `[Left] [Right]` buttons on the right with the current side highlighted. The
+/// buttons are registered as `idx` arrows (`-1` = left, `+1` = right), so a click
+/// on either moves the dock — big, obvious targets, not tiny `‹ ›` glyphs.
+#[allow(clippy::too_many_arguments)]
+fn dock_row(
+    f: &mut RenderTarget,
+    area: Rect,
+    y: u16,
+    idx: usize,
+    cursor: usize,
+    app: &App,
+    kind: &crate::app::DockKind,
+    t: &Theme,
+    arrows: &mut Vec<(usize, i32, Rect)>,
+) -> (usize, Rect) {
+    let row = Rect::new(area.x, y, area.width, 1);
+    let sel = idx == cursor;
+    if sel {
+        fill_bg(f, row, t.sel_bg);
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {}", app.dock_label(kind)),
+            Style::new().fg(if sel { t.text } else { t.subtext1 }),
+        )),
+        row,
+    );
+    // Three place buttons: [Left] [Right] [Off]. The current state is highlighted;
+    // each is registered as an `idx` arrow (-1 = left, +1 = right, +2 = off) so a
+    // click routes through the normal settings-adjust path.
+    let side = app.sidebars.side_of(kind);
+    let cat = app.catalog;
+    let btns = [
+        (
+            format!(" {} ", cat.side_left),
+            -1i32,
+            side == Some(crate::app::Side::Left),
+        ),
+        (
+            format!(" {} ", cat.side_right),
+            1,
+            side == Some(crate::app::Side::Right),
+        ),
+        (format!(" {} ", cat.side_off), 2, side.is_none()),
+    ];
+    let on = Style::new().fg(t.crust).bg(t.accent).bold();
+    let off = Style::new().fg(t.subtext0).bg(t.surface1);
+    let total: u16 = btns
+        .iter()
+        .map(|(l, _, _)| display_width(l) as u16 + 1)
+        .sum::<u16>()
+        .saturating_sub(1);
+    let mut bx = row.right().saturating_sub(2 + total);
+    for (label, delta, active) in btns {
+        let w = display_width(&label) as u16;
+        let r = Rect::new(bx, y, w, 1);
+        f.render_widget(
+            Paragraph::new(Span::styled(label, if active { on } else { off })),
+            r,
+        );
+        arrows.push((idx, delta, r));
+        bx += w + 1;
+    }
+    (idx, row)
 }
 
 /// A `‹ value ›` picker display (cycled by click / keys; no arrow hit-rects).

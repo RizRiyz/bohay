@@ -19,7 +19,11 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     // When the sidebar is hidden its brand `«` toggle is gone, so surface a
     // `»` (expand) at the tab-bar's left edge to bring the sidebar back. Tabs
     // start after it. (When the sidebar is shown, its header owns the toggle.)
-    let tog_w = if app.sidebar_visible {
+    // The left sidebar's `«` collapse lives in its header; when it's hidden but
+    // still has docks to restore, surface a `»` (expand) at the tab-bar's left
+    // edge. (The right sidebar reopens via ⌃Space B or Settings.)
+    let left_hidden = !app.sidebars.left.visible && !app.sidebars.left.docks.is_empty();
+    let tog_w = if !left_hidden {
         0
     } else {
         let r = Rect::new(area.x, area.y, 3, 1);
@@ -33,6 +37,26 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         };
         f.render_widget(Paragraph::new(Span::styled(" » ", style)), r);
         app.sidebar_toggle_rect = Some(r);
+        3u16
+    };
+
+    // Mirror image for the right sidebar: when it's hidden but has docks, a `«`
+    // (expand) at the tab-bar's right edge brings it back (docs/29, DOCK-5).
+    let right_hidden = !app.sidebars.right.visible && !app.sidebars.right.docks.is_empty();
+    let right_tog_w = if !right_hidden {
+        0
+    } else {
+        let r = Rect::new(area.right().saturating_sub(3), area.y, 3, 1);
+        let hov = app
+            .hover
+            .is_some_and(|(c, rr)| c >= r.x && c < r.right() && rr == r.y);
+        let style = if hov {
+            Style::new().fg(t.crust).bg(t.accent).bold()
+        } else {
+            Style::new().fg(t.accent).bg(t.surface0).bold()
+        };
+        f.render_widget(Paragraph::new(Span::styled(" « ", style)), r);
+        app.right_sidebar_toggle_rect = Some(r);
         3u16
     };
 
@@ -50,7 +74,7 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     let plus_w: u16 = 3;
     let unit = CELL + GAP;
     let left = area.x + 1 + tog_w;
-    let right = area.right();
+    let right = area.right().saturating_sub(right_tog_w);
     let total = right.saturating_sub(left);
 
     // Do all tabs fit without scroll arrows (leaving room for the "+")?

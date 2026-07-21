@@ -351,10 +351,14 @@ impl App {
             self.open_settings();
             return;
         }
-        // The `❯` chevron (sidebar header, or the tab-bar's left edge when the
-        // sidebar is hidden) shows/hides the sidebar — same as ⌃Space b.
+        // The `«`/`»` chevrons show/hide their sidebar — same as ⌃Space b (left)
+        // / ⌃Space B (right).
         if self.sidebar_toggle_rect.is_some_and(hit) {
-            self.sidebar_visible = !self.sidebar_visible;
+            self.toggle_side(crate::app::Side::Left);
+            return;
+        }
+        if self.right_sidebar_toggle_rect.is_some_and(hit) {
+            self.toggle_side(crate::app::Side::Right);
             return;
         }
         // Left click: close/add buttons first, then tabs → agents → ws → panes.
@@ -415,6 +419,24 @@ impl App {
         if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
             self.resume_session(i);
+            return;
+        }
+        // Clicking a module dock row with an action invokes it (docs/29, DOCK-4).
+        if let Some((dock_id, row_i, _)) = self
+            .module_dock_rects
+            .iter()
+            .find(|(_, _, rect)| hit(*rect))
+            .cloned()
+        {
+            if let Some(action) = self
+                .module_docks
+                .get(&dock_id)
+                .and_then(|d| d.rows.get(row_i))
+                .and_then(|r| r.action.clone())
+            {
+                let owner = self.module_owning_dock(&dock_id);
+                let _ = self.module_invoke_action(&action, owner.as_deref(), "dock");
+            }
             return;
         }
         // Clicking a workspace's branch opens its git tab (docs/17).

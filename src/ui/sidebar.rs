@@ -1,4 +1,8 @@
-//! The left sidebar: the WORKSPACES and AGENTS lists.
+//! The sidebar: brand/Menu chrome plus a stack of **docks** (docs/29). The
+//! built-in docks are WORKSPACES and AGENTS; `draw_sidebar` is a thin container
+//! that lays out its dock list and dispatches to each dock's draw fn. With the
+//! default list `[Workspaces, Agents]` the output is identical to the original
+//! single-purpose left sidebar.
 
 use super::*;
 
@@ -37,6 +41,10 @@ pub(super) type SidebarHits = (
     Vec<(usize, Rect)>,
     Option<Rect>,
 );
+
+/// Clickable geometry a single dock reports back to the container.
+type WorkspaceHits = (Vec<(usize, Rect)>, Option<Rect>);
+type AgentHits = (Vec<(PaneId, Rect)>, Vec<(usize, Rect)>);
 
 /// Rows each list item occupies: two content rows, drawn back-to-back.
 const ROW_STRIDE: u16 = 2;
@@ -77,38 +85,126 @@ fn draw_scrollbar(
     }
 }
 
+/// Split a sidebar `body` rect into `n` stacked dock slots with a one-row
+/// divider between each. Reduces to the legacy 50/50 split for two docks (the
+/// divider is taken from the remainder, so `slot0 = body.height / n`).
+/// Returns `(slots, divider_rows)`.
+fn dock_slots(body: Rect, n: usize) -> (Vec<Rect>, Vec<u16>) {
+    let mut slots = Vec::with_capacity(n);
+    let mut dividers = Vec::new();
+    if n == 0 {
+        return (slots, dividers);
+    }
+    let bottom = body.bottom();
+    let mut y = body.y;
+    for i in 0..n {
+        let remaining = bottom.saturating_sub(y);
+        let docks_left = (n - i) as u16;
+        let h = remaining / docks_left;
+        slots.push(Rect::new(body.x, y, body.width, h));
+        y += h;
+        if i + 1 < n {
+            dividers.push(y);
+            y += 1;
+        }
+    }
+    (slots, dividers)
+}
+
+/// A one-row horizontal rule between two stacked docks.
+fn draw_dock_divider(f: &mut RenderTarget, area: Rect, y: u16, t: &Theme) {
+    let buf = f.buffer_mut();
+    for x in (area.x + 1)..area.right().saturating_sub(1) {
+        buf[(x, y)]
+            .set_symbol("─")
+            .set_style(Style::new().fg(t.surface1).bg(t.base));
+    }
+}
+
 pub(super) fn draw_sidebar(
     f: &mut RenderTarget,
+    side: Side,
     area: Rect,
     app: &mut App,
     t: &Theme,
 ) -> SidebarHits {
-    // `catalog` is `&'static` (Copy), so binding it here sidesteps borrow
-    // conflicts with the `&mut app` rect bookkeeping below.
-    let cat = app.catalog;
-    let mut ws_rects = Vec::new();
-    let mut agent_rects = Vec::new();
-    let mut session_rects = Vec::new();
-    let hover = app.hover;
-    let over = |rc: Rect| {
-        hover
-            .is_some_and(|(hc, hr)| hc >= rc.x && hc < rc.right() && hr >= rc.y && hr < rc.bottom())
-    };
     f.render_widget(Block::new().style(Style::new().bg(t.base)), area);
     {
-        // Sidebar's right-edge separator (standard vertical rule).
+        // Edge separator (standard vertical rule): the left sidebar carries it on
+        // its right edge, the right sidebar on its left edge.
+        let sep_x = match side {
+            Side::Left => area.right().saturating_sub(1),
+            Side::Right => area.x,
+        };
         let buf = f.buffer_mut();
-        let x = area.right().saturating_sub(1);
         for y in area.top()..area.bottom() {
-            buf[(x, y)]
+            buf[(sep_x, y)]
                 .set_symbol("│")
                 .set_style(Style::new().fg(t.surface0).bg(t.base));
         }
     }
 
+    // Chrome (brand + Menu on the left; a lone collapse chevron on the right),
+    // then the dock body below it.
+    match side {
+        Side::Left => draw_left_chrome(f, area, app, t),
+        Side::Right => draw_right_chrome(f, area, app, t),
+    }
+
+    // The dock stack fills the sidebar below the chrome. The body is inset by one
+    // column on the separator side so a dock never paints over the edge rule; the
+    // dock draw fns stay side-agnostic.
+    let body_top = area.y + 3;
+    let (body_x, body_w) = match side {
+        Side::Left => (area.x, area.width),
+        Side::Right => (area.x + 1, area.width.saturating_sub(1)),
+    };
+    let body = Rect::new(
+        body_x,
+        body_top,
+        body_w,
+        area.bottom().saturating_sub(body_top),
+    );
+    let docks = app.sidebars.get(side).docks.clone();
+    let (slots, dividers) = dock_slots(body, docks.len());
+    for &dy in &dividers {
+        draw_dock_divider(f, body, dy, t);
+    }
+
+    let mut ws_rects = Vec::new();
+    let mut agent_rects = Vec::new();
+    let mut session_rects = Vec::new();
+    let mut new_ws_rect = None;
+    for (kind, slot) in docks.iter().zip(slots) {
+        match kind {
+            DockKind::Workspaces => {
+                let (w, n) = draw_workspaces_dock(f, slot, app, t);
+                ws_rects = w;
+                new_ws_rect = n;
+            }
+            DockKind::Agents => {
+                let (a, s) = draw_agents_dock(f, slot, app, t);
+                agent_rects = a;
+                session_rects = s;
+            }
+            DockKind::Module(id) => draw_module_dock(f, slot, id, app, t),
+        }
+    }
+
+    (ws_rects, agent_rects, session_rects, new_ws_rect)
+}
+
+/// The left sidebar's chrome: the `bohay` wordmark + version, the Menu pill, and
+/// the `«` collapse chevron. Sets `settings_icon_rect` + `sidebar_toggle_rect`.
+fn draw_left_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
+    let cat = app.catalog;
+    let hover = app.hover;
+    let over = |rc: Rect| {
+        hover
+            .is_some_and(|(hc, hr)| hc >= rc.x && hc < rc.right() && hr >= rc.y && hr < rc.bottom())
+    };
     let cx = area.x + 2;
     let cw = area.width.saturating_sub(3);
-    let bar_col = area.right().saturating_sub(2);
     let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
         if y < area.bottom() {
             f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
@@ -149,9 +245,7 @@ pub(super) fn draw_sidebar(
         Style::new().fg(t.accent).bg(t.surface0).bold()
     };
     f.render_widget(Paragraph::new(Span::styled(" « ", chev_style)), toggle);
-    let menu_hover = app
-        .hover
-        .is_some_and(|(c, r)| c >= menu.x && c < menu.right() && r == menu.y);
+    let menu_hover = over(menu);
     let (fg, bg) = if menu_hover {
         (t.crust, t.accent)
     } else {
@@ -162,15 +256,74 @@ pub(super) fn draw_sidebar(
         menu,
     );
     app.settings_icon_rect = Some(menu);
+}
 
-    // Two stacked halves: WORKSPACES (top) and AGENTS (bottom), with a divider.
-    let body_top = area.y + 3;
-    let split = body_top + area.bottom().saturating_sub(body_top) / 2;
+/// The right sidebar's chrome: just a `»` collapse chevron at its top-right (no
+/// brand or Menu — those live on the left). Sets `right_sidebar_toggle_rect`.
+fn draw_right_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
+    let hover = app.hover;
+    let over = |rc: Rect| {
+        hover.is_some_and(|(c, r)| c >= rc.x && c < rc.right() && r >= rc.y && r < rc.bottom())
+    };
+    let toggle = Rect::new(
+        area.right().saturating_sub(3),
+        area.y + 1,
+        3.min(area.width),
+        1,
+    );
+    app.right_sidebar_toggle_rect = Some(toggle);
+    let style = if over(toggle) {
+        Style::new().fg(t.crust).bg(t.accent).bold()
+    } else {
+        Style::new().fg(t.accent).bg(t.surface0).bold()
+    };
+    f.render_widget(Paragraph::new(Span::styled(" » ", style)), toggle);
 
-    // ── WORKSPACES ──
-    line_at(f, body_top, header(cat.workspaces, t));
+    // If the left sidebar (which normally owns the Menu button) isn't shown,
+    // surface Menu here so Settings is never stranded (docs/29). Placed at the
+    // top-left, clear of the `»` collapse chevron on the right.
+    if !app.sidebars.left.shown() {
+        let label = format!(" {} ", app.catalog.menu);
+        let w = crate::ui::display_width(&label) as u16;
+        let menu = Rect::new(area.x + 2, area.y + 1, w.min(area.width), 1);
+        if menu.right() <= toggle.x {
+            let (fg, bg) = if over(menu) {
+                (t.crust, t.accent)
+            } else {
+                (t.accent, t.surface1)
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(label, Style::new().fg(fg).bg(bg).bold())),
+                menu,
+            );
+            app.settings_icon_rect = Some(menu);
+        }
+    }
+}
+
+/// The WORKSPACES dock: node rows (state dot + name + branch + path), the `+`
+/// new-workspace button, and a scrollbar. `area` is the dock slot; the header is
+/// on `area.y`, the list below it.
+fn draw_workspaces_dock(
+    f: &mut RenderTarget,
+    area: Rect,
+    app: &mut App,
+    t: &Theme,
+) -> WorkspaceHits {
+    let cat = app.catalog;
+    let cx = area.x + 2;
+    let cw = area.width.saturating_sub(3);
+    let bar_col = area.right().saturating_sub(2);
+    let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
+        if y < area.bottom() {
+            f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
+        }
+    };
+    let mut ws_rects = Vec::new();
+
+    line_at(f, area.y, header(cat.workspaces, t));
     let new_ws_rect = if area.width >= 8 {
-        let rect = Rect::new(area.right().saturating_sub(4), body_top, 3, 1);
+        let rect = Rect::new(area.right().saturating_sub(4), area.y, 3, 1);
         f.render_widget(
             Paragraph::new(Span::styled(
                 " + ",
@@ -182,8 +335,8 @@ pub(super) fn draw_sidebar(
     } else {
         None
     };
-    let nlist_top = body_top + 1;
-    let nrows = split.saturating_sub(nlist_top);
+    let nlist_top = area.y + 1;
+    let nrows = area.height.saturating_sub(1);
     let ncap = list_capacity(nrows);
     let ntotal = app.workspaces.len();
     // Auto-reveal the active workspace when it changes (cycle / new / resume), without
@@ -274,19 +427,26 @@ pub(super) fn draw_sidebar(
         nscroll,
         t,
     );
+    (ws_rects, new_ws_rect)
+}
 
-    // ── divider ──
-    {
-        let buf = f.buffer_mut();
-        for x in (area.x + 1)..area.right().saturating_sub(1) {
-            buf[(x, split)]
-                .set_symbol("─")
-                .set_style(Style::new().fg(t.surface1).bg(t.base));
+/// The AGENTS dock: live agents then the on-disk resumable-session history as
+/// one scrollable list, with an All/Active header filter. `area` is the dock
+/// slot; the header is on `area.y`, the list below it.
+fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) -> AgentHits {
+    let cat = app.catalog;
+    let cx = area.x + 2;
+    let cw = area.width.saturating_sub(3);
+    let bar_col = area.right().saturating_sub(2);
+    let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
+        if y < area.bottom() {
+            f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
         }
-    }
+    };
+    let mut agent_rects = Vec::new();
+    let mut session_rects = Vec::new();
 
-    // ── AGENTS — live agents then resumable sessions, as one scrollable list ──
-    let aheader = split + 1;
+    let aheader = area.y;
     line_at(f, aheader, header(cat.agents, t));
     // All/Active filter toggle, right-aligned in the header row. "All" shows the
     // session history too; "Active" shows only live agents.
@@ -443,7 +603,54 @@ pub(super) fn draw_sidebar(
         );
     }
 
-    (ws_rects, agent_rects, session_rects, new_ws_rect)
+    (agent_rects, session_rects)
+}
+
+/// A module-contributed dock (docs/29, DOCK-4): a header (its cached title) and
+/// one row per pushed item — an optional state dot + text. Rows with an `action`
+/// are recorded in `app.module_dock_rects` so a click can invoke it. `area` is
+/// the dock slot; header on `area.y`, rows below (one row each).
+fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t: &Theme) {
+    let cx = area.x + 2;
+    let cw = area.width.saturating_sub(3);
+    let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
+        if y < area.bottom() {
+            f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
+        }
+    };
+    let (title, rows) = match app.module_docks.get(id) {
+        Some(d) => (d.title.clone(), d.rows.clone()),
+        None => (id.to_string(), Vec::new()),
+    };
+    line_at(f, area.y, header(&title, t));
+    let list_top = area.y + 1;
+    let cap = area.height.saturating_sub(1) as usize;
+    for (i, row) in rows.iter().take(cap).enumerate() {
+        let y = list_top + i as u16;
+        let mut spans: Vec<Span> = Vec::new();
+        if let Some(dot) = &row.dot {
+            let st = state_from_name(dot);
+            spans.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(row.text.clone(), Style::new().fg(t.subtext1)));
+        line_at(f, y, Line::from(spans));
+        if row.action.is_some() {
+            app.module_dock_rects
+                .push((id.to_string(), i, Rect::new(area.x, y, area.width, 1)));
+        }
+    }
+}
+
+/// Map a module-supplied state name to a status `State` (else `Unknown`).
+fn state_from_name(s: &str) -> State {
+    match s {
+        "working" => State::Working,
+        "blocked" => State::Blocked,
+        "done" => State::Done,
+        "idle" => State::Idle,
+        _ => State::Unknown,
+    }
 }
 
 fn header(text: &str, t: &Theme) -> Line<'static> {
@@ -470,6 +677,9 @@ mod tests {
 
     #[test]
     fn agents_all_active_toggle_filters_history() {
+        // Isolate config so a concurrent test's saved sidebar layout can't leak in
+        // via the shared `BOHAY_HOME` env var (fresh temp → default docks).
+        let _env = crate::persist::test_env("agents");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         // One resumable session in the on-disk history (no live agents by default).
