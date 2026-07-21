@@ -52,20 +52,24 @@ impl App {
                 "{id} is a linked module (its files aren't managed by bohay) — use `module unlink`"
             ));
         }
+        let dock_ids = self.module_dock_ids(id);
         self.modules.modules.retain(|m| m.id != id);
         registry::save(&self.modules);
         let _ = std::fs::remove_dir_all(&root);
+        self.remove_module_docks(&dock_ids);
         Ok(())
     }
 
     /// Remove a module from the registry (does not touch its files).
     pub fn module_unlink(&mut self, id: &str) -> Result<(), String> {
+        let dock_ids = self.module_dock_ids(id);
         let before = self.modules.modules.len();
         self.modules.modules.retain(|m| m.id != id);
         if self.modules.modules.len() == before {
             return Err(format!("no module {id}"));
         }
         registry::save(&self.modules);
+        self.remove_module_docks(&dock_ids);
         Ok(())
     }
 
@@ -76,7 +80,30 @@ impl App {
             .ok_or_else(|| format!("no module {id}"))?;
         m.enabled = on;
         registry::save(&self.modules);
+        // Disabling a module retires its docks; re-enabling re-mounts them on the
+        // module's next `ui.dock.push` (docs/29, DOCK-4).
+        if !on {
+            let dock_ids = self.module_dock_ids(id);
+            self.remove_module_docks(&dock_ids);
+        }
         Ok(())
+    }
+
+    /// The dock ids a module declares in its manifest (docs/29, DOCK-4).
+    fn module_dock_ids(&self, id: &str) -> Vec<String> {
+        self.modules
+            .find(id)
+            .map(|m| m.manifest.docks.iter().map(|d| d.id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The id of the module that declares dock `dock_id`, if any.
+    pub fn module_owning_dock(&self, dock_id: &str) -> Option<String> {
+        self.modules
+            .modules
+            .iter()
+            .find(|m| m.manifest.docks.iter().any(|d| d.id == dock_id))
+            .map(|m| m.id.clone())
     }
 
     /// Ensure (and return) a module's config dir.
@@ -640,7 +667,7 @@ command = ["sh", "-c", "sleep 5"]
         app.handle_event(AppEvent::Key(KeyEvent::new(
             KeyCode::Char('5'),
             KeyModifiers::NONE,
-        ))); // Modules (tab 5 after Theme/Layout/Notify/Keys)
+        ))); // Modules (Theme/Layout/Notify/Keys/Modules)
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         assert_eq!(app.settings_ctl_rects.len(), 2, "one row per module");

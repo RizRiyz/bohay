@@ -27,7 +27,7 @@ tools to run many agents on one project without conflicts.
     ```sh
     cargo install bohay
     ```
-    Any platform with Rust ≥ 1.82 — including Intel macs.
+    Any platform with Rust ≥ 1.82, including Intel macs.
   </TabItem>
   <TabItem label="Windows">
     ```powershell
@@ -40,13 +40,13 @@ tools to run many agents on one project without conflicts.
 ## Run it
 
 ```sh
-bohay          # launch — or reattach to — your session
+bohay          # launch or reattach to your session
 bohay doctor   # check your setup: git, gh, ssh, and what each unlocks
 ```
 
 That's genuinely it. `bohay` starts a background server that owns your panes and
-attaches a lightweight client — close the terminal any time and everything keeps
-running. Start your agents in panes like you normally would; bohay recognizes
+attaches a lightweight client. Close the terminal any time and everything keeps
+running. Start your agents in panes like you normally would, and bohay recognizes
 them automatically and shows their live state in the sidebar.
 
 :::caution[macOS: free the prefix key]

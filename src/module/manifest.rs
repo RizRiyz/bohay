@@ -28,6 +28,10 @@ pub struct ModuleManifest {
     pub events: Vec<EventHook>,
     #[serde(default)]
     pub panes: Vec<PaneEntry>,
+    /// Sidebar docks this module contributes (docs/29). The module pushes their
+    /// content over the socket (`ui.dock.push`); bohay owns rendering.
+    #[serde(default)]
+    pub docks: Vec<DockEntry>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -61,6 +65,20 @@ pub struct PaneEntry {
 
 fn default_placement() -> String {
     "split".to_string()
+}
+
+/// A sidebar dock a module contributes (docs/29). `placement` is the default
+/// side (`sidebar.left` / `sidebar.right`); the user can move it afterwards.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DockEntry {
+    pub id: String,
+    pub title: String,
+    #[serde(default = "default_dock_placement")]
+    pub placement: String,
+}
+
+fn default_dock_placement() -> String {
+    "sidebar.left".to_string()
 }
 
 impl ModuleManifest {
@@ -132,6 +150,18 @@ impl ModuleManifest {
         }
         for e in &self.events {
             check_argv(&e.command, &format!("event {}", e.on))?;
+        }
+        let mut dock_ids = HashSet::new();
+        for d in &self.docks {
+            if !valid_local_id(&d.id) {
+                return Err(format!(
+                    "invalid dock id {:?} (use [a-z0-9:_-], no dots)",
+                    d.id
+                ));
+            }
+            if !dock_ids.insert(d.id.as_str()) {
+                return Err(format!("duplicate dock id: {}", d.id));
+            }
         }
         Ok(())
     }
@@ -255,6 +285,7 @@ mod tests {
             actions: vec![],
             events: vec![],
             panes: vec![],
+            docks: vec![],
         }
     }
 

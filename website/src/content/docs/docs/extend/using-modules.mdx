@@ -1,11 +1,11 @@
 ---
 title: Using Modules
-description: Discover, install, and manage bohay extensions — safely.
+description: Discover, install, and manage bohay extensions, safely.
 ---
 
 A **module** extends bohay with new commands, panels, and automations. Modules
-are ordinary programs (any language) declared in a small manifest — no SDK, no
-plugin runtime.
+are ordinary programs (any language) declared in a small manifest, with no SDK
+and no plugin runtime.
 
 ```sh
 bohay module search            # community modules (GitHub topic: bohay-module)
@@ -15,8 +15,8 @@ bohay module enable <id> · disable <id> · uninstall <id>
 ```
 
 **Trust model:** installing shows you **every command the module declares and
-asks for confirmation before anything runs**; builds run with a scrubbed
-environment; a module's declared manifest can't silently change after install.
+asks for confirmation before anything runs**. Builds run with a scrubbed
+environment, and a module's declared manifest can't silently change after install.
 Modules you're just developing locally can be registered with
 `bohay module link <path>`.
 

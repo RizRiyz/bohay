@@ -1,10 +1,10 @@
 ---
 title: The Git Tab
-description: A keyboard-driven git dashboard — commits, branches, PRs, issues, and repo status — without leaving the terminal.
+description: A keyboard-driven git dashboard for commits, branches, PRs, issues, and repo status, without leaving the terminal.
 ---
 
 Click a workspace's **branch name** in the sidebar (or press `Ctrl+Space g`) to
-open its git tab — a dashboard, not a shell.
+open its git tab, which is a dashboard, not a shell.
 
 ## Six views
 
@@ -17,23 +17,23 @@ Switch by clicking the tabs, pressing `1`–`6`, or `Tab`:
 | **Branches** | local branches with ahead/behind, author, age |
 | **PRs** | open pull requests with live CI check status |
 | **Issues** | open issues |
-| **Status** | repo overview — remote, contributors, and the working tree |
+| **Status** | repo overview: remote, contributors, and the working tree |
 
-Navigate lists with `j`/`k` or the wheel; `r` refreshes; `q` closes the tab.
+Navigate lists with `j`/`k` or the wheel. `r` refreshes, and `q` closes the tab.
 
 ## Actions
 
-- `⏎` on a branch **checks it out**; on a PR it opens the **detail panel** —
-  checks, reviews, mergeability — where you can approve, merge, or check out
+- `⏎` on a branch **checks it out**. On a PR it opens the **detail panel**
+  (checks, reviews, mergeability) where you can approve, merge, or check out
   the PR branch.
 - `d` shows a **diff/log** for the selection in your terminal pane.
-- `o` opens the selection on GitHub; `c` starts `gh pr create`.
+- `o` opens the selection on GitHub, and `c` starts `gh pr create`.
 - `m` toggles scope between *this repo* and *my work* (everything involving you).
 
 ## GitHub without GitHub
 
 Local data (commits, branches, status) comes from `git` directly. PRs, issues,
-and checks come from the **`gh` CLI** — if `gh` isn't installed or
+and checks come from the **`gh` CLI**. If `gh` isn't installed or
 authenticated, the tab degrades gracefully to a local-git viewer. Run
 `bohay doctor` to check.
 

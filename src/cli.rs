@@ -34,7 +34,7 @@ pub fn is_cli(args: &[String]) -> bool {
 }
 
 const USAGE: &str = "\
-bohay — terminal workspace manager for AI coding agents
+bohay: Mission controlfor your AI agents
 
 usage: bohay <command> [args]
 
@@ -73,8 +73,13 @@ panes / agents:
   attach <id>                open the TUI into a single fullscreen pane
 
 appearance:
-  ui sidebar --width <n>     set the sidebar width (columns)
-  ui sidebar --hide|--show   toggle the sidebar
+  ui sidebar [--side left|right] --width <n>     set a sidebar's width (columns)
+  ui sidebar [--side left|right] --hide|--show   toggle a sidebar
+  ui dock list               list docks and which side each is on
+  ui dock move --id <id> --side left|right       place a dock on a side
+  ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
+                             feed a module's sidebar dock its rows (JSON array,
+                             or piped on stdin). See docs/29 + the website
 
 modules (extensions):
   module search [<query>]    find modules published to the `bohay-module` GitHub topic
@@ -104,20 +109,20 @@ worktrees:
   worktree open <path>       open an existing worktree as a workspace
   worktree remove <path>     remove a worktree (its branch is kept)
 
-orchestration (multiple agents, one project — docs/22):
+orchestration (multiple agents on one project, docs/22):
   task add \"<title>\" [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
   task next [--start] [--agent <cmd>]   claim the next ready task (--start spawns
-                             an isolated worker); for an agent loop draining the queue
+                             an isolated worker), for an agent loop draining the queue
   task start <id> [--branch <b>] [--agent <cmd>]   spawn an isolated worker:
                              a git worktree + pane, auto-claimed and path-leased
   task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into bohay/integration
-                             (isolated worktree; conflicts block the task)
+                             (isolated worktree, conflicts block the task)
   task release <id>          return a claimed task to the queue
   lease acquire <glob>... --task <id>   reserve file paths (denied if they overlap)
   lease release <id>         release a lease
@@ -599,6 +604,9 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         ("ui", "sidebar") => {
             let mut obj = serde_json::Map::new();
+            if let Some(s) = flag(args, "--side") {
+                obj.insert("side".to_string(), json!(s));
+            }
             if let Some(w) = flag(args, "--width") {
                 obj.insert("width".to_string(), json!(w));
             }
@@ -608,6 +616,54 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 obj.insert("visible".to_string(), json!(true));
             }
             ("ui.sidebar".into(), Value::Object(obj))
+        }
+
+        // Sidebar docks for module/plugin authors (docs/29). `push` feeds rows to
+        // a dock: `--rows '<json array>'`, or pipe the JSON array on stdin.
+        ("ui", "dock") => {
+            let sub = rest.first().map(String::as_str).unwrap_or("list");
+            match sub {
+                "push" => {
+                    let mut obj = serde_json::Map::new();
+                    let id = flag(args, "--id")
+                        .ok_or_else(|| anyhow!("usage: bohay ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]"))?;
+                    obj.insert("id".to_string(), json!(id));
+                    if let Some(tt) = flag(args, "--title") {
+                        obj.insert("title".to_string(), json!(tt));
+                    }
+                    if let Some(side) = flag(args, "--side") {
+                        obj.insert("placement".to_string(), json!(side));
+                    }
+                    let rows_str = match flag(args, "--rows") {
+                        Some(s) => s,
+                        None => {
+                            use std::io::Read;
+                            let mut s = String::new();
+                            let _ = std::io::stdin().read_to_string(&mut s);
+                            s
+                        }
+                    };
+                    let rows: Value = if rows_str.trim().is_empty() {
+                        json!([])
+                    } else {
+                        serde_json::from_str(&rows_str)
+                            .map_err(|e| anyhow!("--rows must be a JSON array: {e}"))?
+                    };
+                    obj.insert("rows".to_string(), rows);
+                    ("ui.dock.push".into(), Value::Object(obj))
+                }
+                "move" => {
+                    let mut obj = serde_json::Map::new();
+                    if let Some(id) = flag(args, "--id") {
+                        obj.insert("id".to_string(), json!(id));
+                    }
+                    if let Some(side) = flag(args, "--side") {
+                        obj.insert("side".to_string(), json!(side));
+                    }
+                    ("ui.dock.move".into(), Value::Object(obj))
+                }
+                _ => ("ui.dock.list".into(), json!({})),
+            }
         }
 
         ("workspace" | "node", "new") => ("workspace.new".into(), json!({})),
@@ -932,6 +988,53 @@ mod tests {
         assert_eq!(m, "tab.new");
         let (m, _) = parse(&argv("bohay agent list")).unwrap();
         assert_eq!(m, "agent.list");
+    }
+
+    #[test]
+    fn maps_sidebar_dock_commands() {
+        std::env::remove_var("BOHAY_PANE_ID");
+
+        // A dock push with inline rows (docs/29) — the plugin API.
+        let av: Vec<String> = vec![
+            "bohay".into(),
+            "ui".into(),
+            "dock".into(),
+            "push".into(),
+            "--id".into(),
+            "you.ci".into(),
+            "--title".into(),
+            "CI".into(),
+            "--side".into(),
+            "right".into(),
+            "--rows".into(),
+            r#"[{"text":"build ok","dot":"done","action":"open"}]"#.into(),
+        ];
+        let (m, p) = parse(&av).unwrap();
+        assert_eq!(m, "ui.dock.push");
+        assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("you.ci"));
+        assert_eq!(p.get("title").and_then(|v| v.as_str()), Some("CI"));
+        assert_eq!(p.get("placement").and_then(|v| v.as_str()), Some("right"));
+        let rows = p.get("rows").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("text").and_then(|v| v.as_str()),
+            Some("build ok")
+        );
+
+        // Missing --id is a clear error.
+        assert!(parse(&argv("bohay ui dock push")).is_err());
+
+        let (m, p) = parse(&argv("bohay ui dock move --id you.ci --side left")).unwrap();
+        assert_eq!(m, "ui.dock.move");
+        assert_eq!(p.get("side").and_then(|v| v.as_str()), Some("left"));
+
+        let (m, _) = parse(&argv("bohay ui dock list")).unwrap();
+        assert_eq!(m, "ui.dock.list");
+
+        // `ui sidebar` now takes an optional side.
+        let (m, p) = parse(&argv("bohay ui sidebar --side right --width 30")).unwrap();
+        assert_eq!(m, "ui.sidebar");
+        assert_eq!(p.get("side").and_then(|v| v.as_str()), Some("right"));
     }
 
     #[test]

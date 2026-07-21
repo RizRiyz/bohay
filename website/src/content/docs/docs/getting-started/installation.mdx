@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install bohay on macOS, Linux, or Windows — and keep it up to date.
+description: Install bohay on macOS, Linux, or Windows, and keep it up to date.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -15,7 +15,7 @@ Pick whichever channel you prefer:
     ```
     Downloads the right prebuilt binary for your OS/arch from GitHub releases and
     puts it on your `PATH` (`/usr/local/bin` or `~/.local/bin`). Prebuilt macOS
-    binaries are **Apple silicon**; on an Intel mac use the Cargo tab.
+    binaries are **Apple silicon**. On an Intel mac, use the Cargo tab.
   </TabItem>
   <TabItem label="Homebrew">
     ```sh
@@ -27,7 +27,7 @@ Pick whichever channel you prefer:
     ```sh
     cargo install bohay
     ```
-    Works on any platform with Rust ≥ 1.82 — pure Rust, no C toolchain needed.
+    Works on any platform with Rust ≥ 1.82: pure Rust, no C toolchain needed.
   </TabItem>
   <TabItem label="Windows">
     ```powershell
@@ -56,7 +56,7 @@ unlocks:
 | `gh` (authenticated) | PRs, issues, and PR detail in the git tab |
 | `ssh` | remote sessions (`bohay --remote host`) |
 
-None are required for the core multiplexer — panes, tabs, agents, and resume all
+None are required for the core multiplexer: panes, tabs, agents, and resume all
 work without them.
 
 ## The optional agent hook
@@ -70,7 +70,7 @@ bohay integration install claude     # or: copilot · codex · opencode
 ```
 
 Also available from **Settings → Integrations** inside bohay.
-`bohay integration uninstall <agent>` removes only bohay's hook — it never
+`bohay integration uninstall <agent>` removes only bohay's hook and never
 touches the agent itself.
 
 ## Upgrading
@@ -83,7 +83,7 @@ bohay server restart   # your session is saved and restored
 ```
 
 bohay warns you on attach if the running server is older than the binary you
-just installed — an upgrade never silently half-applies.
+just installed, so an upgrade never silently half-applies.
 
 ## Where bohay keeps its state
 

@@ -1,6 +1,6 @@
 ---
 title: Remote Sessions
-description: Run a session on another machine over plain SSH — no port forwarding, no daemon.
+description: Run a session on another machine over plain SSH, with no port forwarding and no daemon.
 ---
 
 ```sh
@@ -12,10 +12,10 @@ reattaches to) a bohay server *on the remote machine*, and attaches your local
 terminal to it. No port-forwarding, no extra daemon, no config.
 
 - **Requirements:** `ssh` access to the host, and `bohay` installed on it.
-- **Efficient by design:** only changed screen cells cross the wire — a
-  keystroke costs ~22 bytes — so it stays responsive on slow links.
+- **Efficient by design:** only changed screen cells cross the wire (a
+  keystroke costs ~22 bytes), so it stays responsive on slow links.
 - **Detach semantics** are identical to local: close your laptop, the remote
-  session keeps running; `bohay --remote my-server` again from anywhere
+  session keeps running. `bohay --remote my-server` again from anywhere
   reattaches.
 - **Clipboard works:** selecting text copies to your **local** clipboard.
 

@@ -25,8 +25,15 @@ pub struct Config {
     /// Shell keyword for new panes (`default` / `powershell` / `cmd` / literal).
     #[serde(default = "default_shell_choice")]
     pub shell: String,
+    /// Legacy single-sidebar width. Kept for back-compat + as the migration
+    /// source for `sidebars`, and mirrored from `sidebars.left.width` on save so
+    /// an older binary still finds a sensible width (docs/29).
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
+    /// Per-side sidebar layout (docs/29). `None` in a pre-DOCK config → migrated
+    /// from `sidebar_width` into the default `[workspaces, agents]` left layout.
+    #[serde(default)]
+    pub sidebars: Option<SidebarsConfig>,
     #[serde(default)]
     pub layout: LayoutConfig,
     #[serde(default)]
@@ -48,6 +55,61 @@ pub struct LayoutConfig {
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
+}
+
+/// Left + right sidebar layout (docs/29). Serialized under `sidebars`.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SidebarsConfig {
+    #[serde(default = "SideConfig::left_default")]
+    pub left: SideConfig,
+    #[serde(default = "SideConfig::right_default")]
+    pub right: SideConfig,
+}
+
+/// One sidebar's persisted state: shown/hidden, width, and its ordered dock ids.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SideConfig {
+    #[serde(default = "yes")]
+    pub visible: bool,
+    #[serde(default = "default_sidebar_width")]
+    pub width: u16,
+    #[serde(default)]
+    pub docks: Vec<String>,
+}
+
+impl SideConfig {
+    /// The default left sidebar: shown, holding workspaces then agents.
+    pub fn left_default() -> SideConfig {
+        SideConfig {
+            visible: true,
+            width: SIDEBAR_WIDTH_DEFAULT,
+            docks: vec!["workspaces".into(), "agents".into()],
+        }
+    }
+    /// The default right sidebar: off and empty.
+    pub fn right_default() -> SideConfig {
+        SideConfig {
+            visible: false,
+            width: SIDEBAR_WIDTH_DEFAULT,
+            docks: Vec::new(),
+        }
+    }
+}
+
+impl SidebarsConfig {
+    /// Today's layout: left holds workspaces + agents, right is off.
+    pub fn default_layout() -> SidebarsConfig {
+        SidebarsConfig {
+            left: SideConfig::left_default(),
+            right: SideConfig::right_default(),
+        }
+    }
+    /// Migrate a pre-DOCK config: the default layout at the stored width.
+    pub fn migrate(width: u16) -> SidebarsConfig {
+        let mut s = Self::default_layout();
+        s.left.width = width;
+        s
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -87,6 +149,7 @@ impl Default for Config {
             language: default_lang(),
             shell: default_shell_choice(),
             sidebar_width: default_sidebar_width(),
+            sidebars: None,
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
             keybindings: std::collections::HashMap::new(),
@@ -120,6 +183,14 @@ impl Config {
     pub fn sidebar_width(&self) -> u16 {
         self.sidebar_width
             .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+    }
+
+    /// Resolved sidebar layout: the stored `sidebars`, or a migration from the
+    /// legacy `sidebar_width` reproducing today's default layout (docs/29).
+    pub fn sidebars(&self) -> SidebarsConfig {
+        self.sidebars
+            .clone()
+            .unwrap_or_else(|| SidebarsConfig::migrate(self.sidebar_width()))
     }
 }
 

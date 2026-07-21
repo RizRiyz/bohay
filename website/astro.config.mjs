@@ -46,6 +46,7 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [
+            { label: 'Panes, Tabs & Workspaces', slug: 'docs/guides/layout' },
             { label: 'Working with Agents', slug: 'docs/guides/agents' },
             { label: 'Multi-Agent Orchestration', slug: 'docs/guides/orchestration' },
             { label: 'The Git Tab', slug: 'docs/guides/git' },

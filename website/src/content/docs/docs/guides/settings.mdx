@@ -1,6 +1,6 @@
 ---
 title: Settings & Theming
-description: Themes, layout, notifications, keybindings, language, and integrations — all live, all persisted.
+description: Themes, layout, notifications, keybindings, language, and integrations, all live and all persisted.
 ---
 
 Open with the **Menu** button (top right) or `Ctrl+Space ,`. Every change
@@ -8,14 +8,22 @@ applies live and persists to `~/.bohay/config.json`.
 
 | Tab | What's there |
 |---|---|
-| **Theme** | 10 built-in palettes (dark and light) |
-| **Layout** | pane gaps, titles, sidebar width, resume-into-workspace behavior |
-| **Notifications** | desktop alerts on *blocked* / *done* (always silent — no terminal bell) |
-| **Keys** | every command's binding — click one, press the new key |
-| **Modules** | installed extensions: enable/disable, actions, logs |
-| **Integrations** | install/uninstall the per-agent session hook |
-| **Language** | the UI in 8 languages (en · es · pt · fr · de · id · zh · ja) |
+| **Theme** | 10 built-in palettes (dark and light), previewed live as you move |
+| **Layout** | pane gaps, pane titles, resume-into-workspace behavior, and the **Docks** section: each sidebar's visible/width plus `[Left] [Right] [Off]` placement for every dock |
+| **Notifications** | desktop alerts on *blocked* / *done* (always silent, with no terminal bell), plus a **Test** button |
+| **Keys** | every command's binding: click one, press the new key (`⌫` resets to default) |
+| **Modules** | installed extensions: enable/disable, action counts, load warnings |
+| **Integrations** | install/uninstall the per-agent session hook (Claude · Copilot · Codex · opencode) |
+| **Language** | the UI in 8 languages (en · es · pt · fr · de · id · zh · ja), swapped live |
 
-Keybinding notes: arrows and `hjkl` both work for focus; `Tab`/`Shift+Tab`
-cycle tabs; every prefix command is remappable, and `Ctrl+Space ?` always
+## Arranging the sidebars
+
+The **Layout** tab, below its `── Docks ──` divider, is where you move the
+**Workspaces** and **Agents** docks (and any a module adds) between the left
+sidebar, the right sidebar, or off, and toggle or size each side. The full
+walkthrough is in
+[Panes, Tabs & Workspaces](/docs/guides/layout/#two-sidebars-and-docks).
+
+Keybinding notes: arrows and `hjkl` both work for focus, `Tab`/`Shift+Tab`
+cycle tabs, and every prefix command is remappable. `Ctrl+Space ?` always
 shows the current map.

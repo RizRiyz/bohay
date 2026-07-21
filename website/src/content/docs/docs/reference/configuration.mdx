@@ -8,7 +8,7 @@ owner-only (`0700`).
 
 | File | Contents |
 |---|---|
-| `config.json` | theme, language, shell, sidebar width, layout, notifications, keybindings |
+| `config.json` | theme, language, shell, layout, notifications, keybindings, and `sidebars` (each side's visible/width and its ordered docks) |
 | `session.json` | the auto-saved session snapshot (workspaces → tabs → panes) |
 | `orch.json` | the orchestration task ledger + leases |
 | `modules.json` + `modules/` | installed extensions and their state |
@@ -16,8 +16,8 @@ owner-only (`0700`).
 | `bohay.sock` / `bohay-client.sock` | the control + render sockets (owner-only) |
 
 Prefer editing config through **Settings** (it applies live and writes the
-file for you); hand-edits are picked up on restart. Old config files load
-cleanly across versions — unknown fields get defaults.
+file for you). Hand-edits are picked up on restart. Old config files load
+cleanly across versions because unknown fields get defaults.
 
 ## Environment variables
 
@@ -25,5 +25,5 @@ cleanly across versions — unknown fields get defaults.
 |---|---|
 | `BOHAY_HOME` | relocate the state directory |
 | `BOHAY_SHELL` | shell for new panes (overrides `config.shell`) |
-| `BOHAY_PANE_ID` | *injected into every pane* — the pane's own id |
-| `BOHAY_SOCKET_PATH` | *injected into every pane* — the control socket |
+| `BOHAY_PANE_ID` | *injected into every pane*, the pane's own id |
+| `BOHAY_SOCKET_PATH` | *injected into every pane*, the control socket |

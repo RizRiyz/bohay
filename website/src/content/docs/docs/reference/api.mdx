@@ -1,17 +1,17 @@
 ---
 title: Socket API
-description: The JSON control API — wire format, methods, and the event stream.
+description: The JSON control API, covering wire format, methods, and the event stream.
 ---
 
 Everything the CLI does goes over a local socket speaking newline-delimited
-JSON — `~/.bohay/bohay.sock` (the path is injected into every pane as
+JSON at `~/.bohay/bohay.sock` (the path is injected into every pane as
 `$BOHAY_SOCKET_PATH`). The CLI is a thin wrapper: **every `bohay <verb>` maps
 to one method**, so the easiest way to learn the API is to use the CLI and
 read its JSON output.
 
 ## Wire format
 
-One request per connection, newline-terminated; one JSON reply:
+One request per connection, newline-terminated, and one JSON reply:
 
 ```json
 → {"id":"1","method":"pane.split","params":{"down":true}}
@@ -41,11 +41,31 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.bohay/bohay.so
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.invoke` · `module.pane.open` · `module.log` |
-| ui / server | `ui.sidebar` · `ping` · `server.stop` · `events.subscribe` |
+| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ping` · `server.stop` · `events.subscribe` |
 
 Parameter shapes mirror the CLI flags (`bohay task add --paths x` →
 `{"paths": ["x"]}`). When a method takes a pane and none is given, it defaults
-to `$BOHAY_PANE_ID` — the calling pane.
+to `$BOHAY_PANE_ID`, the calling pane.
+
+## Sidebar docks
+
+For plugins that contribute a **sidebar dock** (a panel in the left or right
+sidebar. See [Writing a Module](/docs/extend/writing-modules/)). A module
+declares the dock in its manifest and pushes its content here, and bohay owns the
+rendering.
+
+| Method | Params | Result |
+|---|---|---|
+| `ui.sidebar` | `{side?: "left"\|"right", width?: int, visible?: bool}` | `{width, visible}` for that side |
+| `ui.dock.push` | `{id, title?, placement?: "left"\|"right", rows: Row[]}` | `{type:"ok"}` |
+| `ui.dock.list` | `{}` | `{docks: [{id, side}]}` |
+| `ui.dock.move` | `{id, side: "left"\|"right"}` | `{type:"ok"}` |
+
+A `Row` is `{"text": string, "dot"?: "idle"|"working"|"blocked"|"done",
+"action"?: string}`. The first `push` mounts the dock into `placement` (default
+left). Later pushes refresh its rows. A row's `action` is a module action id,
+run when the row is clicked. The CLI wrappers are `bohay ui dock push|list|move`
+(`push` also reads its rows from stdin).
 
 ## The event stream
 
@@ -70,10 +90,10 @@ Event names: `pane.created` · `pane.closed` · `pane.agent_status_changed` ·
 ## Practical notes
 
 - **Prefer the CLI** in scripts (`bohay --verbose`-free, stable JSON to
-  stdout); talk raw JSON only when embedding (e.g. a native companion app —
+  stdout). Talk raw JSON only when embedding (e.g. a native companion app:
   the macOS notch app is just another socket client).
-- The socket is **owner-only** (`0600`, in a `0700` dir) — access equals
+- The socket is **owner-only** (`0600`, in a `0700` dir). Access equals
   command execution as your user. See the
   [security model](/docs/explanation/security/).
-- `ping` returns the server's version — useful for health checks and
+- `ping` returns the server's version, useful for health checks and
   upgrade detection.

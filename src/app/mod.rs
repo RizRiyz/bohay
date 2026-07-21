@@ -32,7 +32,7 @@ mod settings;
 
 pub use keys::Cmd;
 pub use picker::{FolderPicker, Row};
-pub use settings::{SettingsTab, SettingsUi};
+pub use settings::{LayoutRow, SettingsTab, SettingsUi};
 
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
@@ -52,6 +52,139 @@ const QUIET_DWELL: Duration = Duration::from_millis(2500);
 pub const SIDEBAR_WIDTH_DEFAULT: u16 = 26;
 pub const SIDEBAR_WIDTH_MIN: u16 = 18;
 pub const SIDEBAR_WIDTH_MAX: u16 = 44;
+
+/// A relocatable sidebar section (docs/29). Built-ins are `Workspaces` and
+/// `Agents`; `Module` is reserved for extension-contributed docks (DOCK-4).
+/// Deliberately distinct from a *pane* (a terminal tile).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DockKind {
+    Workspaces,
+    Agents,
+    Module(String),
+}
+
+impl DockKind {
+    /// Stable id used in `config.json` and the socket API.
+    pub fn id(&self) -> &str {
+        match self {
+            DockKind::Workspaces => "workspaces",
+            DockKind::Agents => "agents",
+            DockKind::Module(id) => id,
+        }
+    }
+
+    /// Parse a config/API id back into a built-in dock. Module ids resolve to
+    /// `Module(id)`; the caller validates against installed modules.
+    pub fn from_id(id: &str) -> DockKind {
+        match id {
+            "workspaces" => DockKind::Workspaces,
+            "agents" => DockKind::Agents,
+            other => DockKind::Module(other.to_string()),
+        }
+    }
+}
+
+/// Which sidebar a dock lives in (docs/29).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// One row a module pushes into its dock (docs/29, DOCK-4). `dot` is an optional
+/// state name (`working`/`blocked`/`done`/`idle`) rendered as a coloured dot;
+/// `action` is a module action id invoked when the row is clicked.
+#[derive(Clone)]
+pub struct DockRow {
+    pub text: String,
+    pub dot: Option<String>,
+    pub action: Option<String>,
+}
+
+/// A module-contributed dock's cached content (title + rows). bohay owns the
+/// rendering; the module only pushes data via `ui.dock.push`.
+#[derive(Clone)]
+pub struct ModuleDock {
+    pub title: String,
+    pub rows: Vec<DockRow>,
+}
+
+/// One sidebar's live state: shown/hidden, width, and its ordered docks.
+#[derive(Clone)]
+pub struct SideState {
+    pub visible: bool,
+    pub width: u16,
+    pub docks: Vec<DockKind>,
+}
+
+impl SideState {
+    fn from_config(c: &crate::config::SideConfig) -> SideState {
+        SideState {
+            visible: c.visible,
+            width: c.width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX),
+            docks: c.docks.iter().map(|s| DockKind::from_id(s)).collect(),
+        }
+    }
+    fn to_config(&self) -> crate::config::SideConfig {
+        crate::config::SideConfig {
+            visible: self.visible,
+            width: self.width,
+            docks: self.docks.iter().map(|d| d.id().to_string()).collect(),
+        }
+    }
+    /// True if this sidebar should occupy screen space (shown and non-empty).
+    pub fn shown(&self) -> bool {
+        self.visible && !self.docks.is_empty()
+    }
+    /// True if `kind` is mounted in this sidebar.
+    pub fn has(&self, kind: &DockKind) -> bool {
+        self.docks.contains(kind)
+    }
+}
+
+/// The left + right sidebars and their docks (docs/29).
+#[derive(Clone)]
+pub struct Sidebars {
+    pub left: SideState,
+    pub right: SideState,
+}
+
+impl Sidebars {
+    pub fn get(&self, side: Side) -> &SideState {
+        match side {
+            Side::Left => &self.left,
+            Side::Right => &self.right,
+        }
+    }
+    pub fn get_mut(&mut self, side: Side) -> &mut SideState {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+        }
+    }
+    fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
+        Sidebars {
+            left: SideState::from_config(&cfg.left),
+            right: SideState::from_config(&cfg.right),
+        }
+    }
+    fn to_config(&self) -> crate::config::SidebarsConfig {
+        crate::config::SidebarsConfig {
+            left: self.left.to_config(),
+            right: self.right.to_config(),
+        }
+    }
+    /// Which side, if any, currently holds `kind`.
+    pub fn side_of(&self, kind: &DockKind) -> Option<Side> {
+        if self.left.has(kind) {
+            Some(Side::Left)
+        } else if self.right.has(kind) {
+            Some(Side::Right)
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -404,9 +537,14 @@ pub struct App {
     /// the prompt so a failed create isn't silent. Cleared when the user edits.
     pub worktree_error: Option<String>,
     pub mode: Mode,
-    pub sidebar_visible: bool,
-    /// Sidebar width in columns (customizable; see `set_sidebar_width`).
-    pub sidebar_width: u16,
+    /// Left + right sidebars, their widths, and their docks (docs/29). Resolved
+    /// from `config.sidebars()` at startup; runtime edits persist via `save_sidebars`.
+    pub sidebars: Sidebars,
+    /// Module-contributed dock content, keyed by dock id (docs/29, DOCK-4).
+    /// Populated by `ui.dock.push`; rendered by the sidebar.
+    pub module_docks: std::collections::HashMap<String, ModuleDock>,
+    /// Clickable rows of module docks this frame: (dock id, row index, rect).
+    pub module_dock_rects: Vec<(String, usize, Rect)>,
     pub zoomed: bool,
     pub should_quit: bool,
     pub spinner: u64,
@@ -503,8 +641,10 @@ pub struct App {
     pub tab_next_rect: Option<Rect>,
     /// The focused pane's ✕ close button, for mouse hit-testing.
     pub pane_close_rect: Option<Rect>,
-    /// The status-bar sidebar toggle button (bottom-left), for mouse hit-testing.
+    /// The left sidebar's collapse/reopen toggle button, for mouse hit-testing.
     pub sidebar_toggle_rect: Option<Rect>,
+    /// The right sidebar's collapse/reopen toggle button (docs/29).
+    pub right_sidebar_toggle_rect: Option<Rect>,
     // Settings modal hit-test geometry (populated by render when the modal is open).
     pub settings_icon_rect: Option<Rect>,
     pub settings_close_rect: Option<Rect>,
@@ -529,7 +669,7 @@ impl App {
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme = crate::ui::theme::by_name(&config.theme);
         let catalog = crate::i18n::by_code(&config.language);
-        let sidebar_width = config.sidebar_width();
+        let sidebars = Sidebars::from_config(&config.sidebars());
         let shell = crate::platform::resolve_shell(&config.shell);
         let keymap = keys::build_keymap(&config.keybindings);
 
@@ -573,8 +713,9 @@ impl App {
             worktree_repo: None,
             worktree_error: None,
             mode: Mode::Normal,
-            sidebar_visible: true,
-            sidebar_width,
+            sidebars,
+            module_docks: std::collections::HashMap::new(),
+            module_dock_rects: Vec::new(),
             zoomed: false,
             should_quit: false,
             spinner: 0,
@@ -627,6 +768,7 @@ impl App {
             tab_next_rect: None,
             pane_close_rect: None,
             sidebar_toggle_rect: None,
+            right_sidebar_toggle_rect: None,
             settings_icon_rect: None,
             settings_close_rect: None,
             settings_modal_rect: None,
@@ -792,7 +934,7 @@ impl App {
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme = crate::ui::theme::by_name(&config.theme);
         let catalog = crate::i18n::by_code(&config.language);
-        let sidebar_width = config.sidebar_width();
+        let sidebars = Sidebars::from_config(&config.sidebars());
 
         Some(App {
             panes,
@@ -818,8 +960,9 @@ impl App {
             worktree_repo: None,
             worktree_error: None,
             mode: Mode::Normal,
-            sidebar_visible: true,
-            sidebar_width,
+            sidebars,
+            module_docks: std::collections::HashMap::new(),
+            module_dock_rects: Vec::new(),
             zoomed: false,
             should_quit: false,
             spinner: 0,
@@ -872,6 +1015,7 @@ impl App {
             tab_next_rect: None,
             pane_close_rect: None,
             sidebar_toggle_rect: None,
+            right_sidebar_toggle_rect: None,
             settings_icon_rect: None,
             settings_close_rect: None,
             settings_modal_rect: None,
@@ -892,12 +1036,145 @@ impl App {
         }
     }
 
-    /// Set the sidebar width, clamped to the supported range. The entry point for
-    /// settings / a future resize control.
-    pub fn set_sidebar_width(&mut self, cols: u16) {
-        self.sidebar_width = cols.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
-        self.config.sidebar_width = self.sidebar_width;
+    /// Set a sidebar's width, clamped to the supported range, and persist.
+    pub fn set_side_width(&mut self, side: Side, cols: u16) {
+        self.sidebars.get_mut(side).width = cols.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+        self.save_sidebars();
+    }
+
+    /// Show/hide a sidebar (runtime-only, like the original `Ctrl+Space b`; not
+    /// persisted, so a session always starts from the configured layout).
+    pub fn toggle_side(&mut self, side: Side) {
+        let s = self.sidebars.get_mut(side);
+        s.visible = !s.visible;
+    }
+
+    /// Write the current sidebar layout into `config` and persist it, mirroring
+    /// the legacy `sidebar_width` from the left for safe downgrade (docs/29).
+    pub fn save_sidebars(&mut self) {
+        self.config.sidebars = Some(self.sidebars.to_config());
+        self.config.sidebar_width = self.sidebars.left.width;
         crate::config::save(&self.config);
+    }
+
+    /// Every mounted dock in display order: left sidebar top→bottom, then right.
+    pub fn docks_flat(&self) -> Vec<DockKind> {
+        let mut v = self.sidebars.left.docks.clone();
+        v.extend(self.sidebars.right.docks.clone());
+        v
+    }
+
+    /// Move a dock to `target` (removed from its current side, appended to the
+    /// target's end) and persist. A no-op if it is already the only place.
+    pub fn move_dock(&mut self, kind: &DockKind, target: Side) {
+        for side in [Side::Left, Side::Right] {
+            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+        }
+        let dst = self.sidebars.get_mut(target);
+        if !dst.docks.contains(kind) {
+            dst.docks.push(kind.clone());
+        }
+        self.save_sidebars();
+    }
+
+    /// The "off" state (docs/29): remove a dock from both sidebars so it shows
+    /// nowhere, without dropping any module content cache (it stays in the
+    /// registry and can be re-placed). Persists.
+    pub fn unmount_dock(&mut self, kind: &DockKind) {
+        for side in [Side::Left, Side::Right] {
+            self.sidebars.get_mut(side).docks.retain(|d| d != kind);
+        }
+        self.save_sidebars();
+    }
+
+    /// Human label for a dock (localized for built-ins; the module dock's title
+    /// for modules).
+    pub fn dock_label(&self, kind: &DockKind) -> String {
+        match kind {
+            DockKind::Workspaces => self.catalog.workspaces.to_string(),
+            DockKind::Agents => self.catalog.agents.to_string(),
+            DockKind::Module(id) => self.module_dock_title(id),
+        }
+    }
+
+    /// A module dock's title: its pushed/cached title, else the title declared in
+    /// an installed module's manifest, else the id (docs/29, DOCK-4).
+    pub fn module_dock_title(&self, id: &str) -> String {
+        if let Some(d) = self.module_docks.get(id) {
+            return d.title.clone();
+        }
+        for m in &self.modules.modules {
+            if let Some(d) = m.manifest.docks.iter().find(|d| d.id == id) {
+                return d.title.clone();
+            }
+        }
+        id.to_string()
+    }
+
+    /// The **dock registry** (docs/29): every dock the settings can place —
+    /// built-ins plus every dock declared by an installed, runnable module, plus
+    /// any currently-mounted dock not otherwise listed (e.g. a stale config
+    /// entry). Deduplicated, built-ins first. Its current side is
+    /// `sidebars.side_of(kind)` (`None` = not placed yet).
+    pub fn available_docks(&self) -> Vec<DockKind> {
+        let mut v = vec![DockKind::Workspaces, DockKind::Agents];
+        for m in self.modules.modules.iter().filter(|m| m.is_runnable()) {
+            for d in &m.manifest.docks {
+                let k = DockKind::Module(d.id.clone());
+                if !v.contains(&k) {
+                    v.push(k);
+                }
+            }
+        }
+        for k in self.docks_flat() {
+            if !v.contains(&k) {
+                v.push(k);
+            }
+        }
+        v
+    }
+
+    /// Cache a module dock's content (`ui.dock.push`) and, the first time, mount
+    /// it into `placement` so it appears without the user wiring it up (docs/29,
+    /// DOCK-4). Subsequent pushes only refresh the rows/title.
+    pub fn push_module_dock(
+        &mut self,
+        id: &str,
+        title: Option<String>,
+        placement: Side,
+        rows: Vec<DockRow>,
+    ) {
+        let entry = self
+            .module_docks
+            .entry(id.to_string())
+            .or_insert_with(|| ModuleDock {
+                title: id.to_string(),
+                rows: Vec::new(),
+            });
+        if let Some(tt) = title {
+            entry.title = tt;
+        }
+        entry.rows = rows;
+        let kind = DockKind::Module(id.to_string());
+        if self.sidebars.side_of(&kind).is_none() {
+            self.move_dock(&kind, placement);
+        }
+    }
+
+    /// Remove module docks (by id) from both sidebars and drop their cache — on
+    /// module disable / unlink / uninstall (docs/29, DOCK-4).
+    pub fn remove_module_docks(&mut self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            let kind = DockKind::Module(id.clone());
+            for side in [Side::Left, Side::Right] {
+                self.sidebars.get_mut(side).docks.retain(|d| d != &kind);
+            }
+            self.module_docks.remove(id);
+        }
+        self.save_sidebars();
     }
 
     // ── accessors ───────────────────────────────────────────────────────────
@@ -2998,8 +3275,9 @@ mod tests {
         std::env::set_var("BOHAY_HOME", &tmp);
 
         let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(80, 24, tx).unwrap();
-        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // Wide enough that all 8 tabs render (Language is the last one).
+        let mut app = App::new(120, 24, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
         app.open_settings();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert_eq!(app.config.language, "en");
@@ -3068,7 +3346,7 @@ mod tests {
 
         // Rebind "New tab" from `c` to `t` through Settings → Keys.
         app.open_settings();
-        app.handle_event(key('4', KeyModifiers::NONE)); // Keys tab
+        app.handle_event(key('4', KeyModifiers::NONE)); // Keys tab (Theme/Layout/Notify/Keys)
         assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Keys);
         let idx = Cmd::ALL.iter().position(|c| *c == Cmd::NewTab).unwrap();
         if let Some(ui) = app.settings.as_mut() {
@@ -3135,15 +3413,101 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }));
         };
-        let start = app.sidebar_width;
+        let start = app.sidebars.left.width;
         click(&mut app, left);
-        assert!(app.sidebar_width < start, "left arrow decreases width");
-        let low = app.sidebar_width;
+        assert!(
+            app.sidebars.left.width < start,
+            "left arrow decreases width"
+        );
+        let low = app.sidebars.left.width;
         click(&mut app, right);
-        assert!(app.sidebar_width > low, "right arrow increases width");
+        assert!(app.sidebars.left.width > low, "right arrow increases width");
 
         std::env::remove_var("BOHAY_HOME");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // docs/29: config with no `sidebars` migrates to today's default layout.
+    #[test]
+    fn sidebars_migrate_from_legacy_width() {
+        let cfg = crate::config::Config {
+            sidebars: None,
+            sidebar_width: 30,
+            ..Default::default()
+        };
+        let s = cfg.sidebars();
+        assert!(s.left.visible);
+        assert_eq!(s.left.width, 30, "migration carries the legacy width");
+        assert_eq!(s.left.docks, vec!["workspaces", "agents"]);
+        assert!(!s.right.visible);
+        assert!(s.right.docks.is_empty());
+    }
+
+    // docs/29 DOCK-3/4: move a built-in dock across sides, then push + retire a
+    // module dock — the layout and cache track it.
+    #[test]
+    fn docks_move_and_module_dock_lifecycle() {
+        let _env = crate::persist::test_env("docks");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        assert_eq!(
+            app.sidebars.left.docks,
+            vec![DockKind::Workspaces, DockKind::Agents]
+        );
+        assert!(app.sidebars.right.docks.is_empty());
+
+        // Move Agents to the right sidebar (as the settings tab does).
+        app.move_dock(&DockKind::Agents, Side::Right);
+        assert_eq!(app.sidebars.left.docks, vec![DockKind::Workspaces]);
+        assert_eq!(app.sidebars.right.docks, vec![DockKind::Agents]);
+        assert!(
+            app.config.sidebars.is_some(),
+            "the move persisted to config"
+        );
+
+        // A module pushes a dock: it caches + auto-mounts on the requested side.
+        let k = DockKind::Module("mod:status".into());
+        app.push_module_dock(
+            "mod:status",
+            Some("Status".into()),
+            Side::Right,
+            vec![DockRow {
+                text: "build ok".into(),
+                dot: Some("done".into()),
+                action: None,
+            }],
+        );
+        assert_eq!(app.sidebars.side_of(&k), Some(Side::Right));
+        assert_eq!(app.dock_label(&k), "Status");
+
+        // Retiring the module removes its dock + cache.
+        app.remove_module_docks(&["mod:status".into()]);
+        assert_eq!(app.sidebars.side_of(&k), None);
+        assert!(!app.module_docks.contains_key("mod:status"));
+    }
+
+    // docs/29 DOCK-2: with a dock on the right sidebar, it draws on the right and
+    // the panes still keep at least 24 columns.
+    #[test]
+    fn right_sidebar_draws_and_guards_panes() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("rsb");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.move_dock(&DockKind::Agents, Side::Right);
+        app.sidebars.right.visible = true;
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        assert!(
+            app.agents_area.x > 60,
+            "agents dock drawn on the right half"
+        );
+        assert!(
+            app.last_pane_area.width >= 24,
+            "panes keep at least 24 columns"
+        );
     }
 
     // The Shell picker is Windows-only (control row 5 doesn't exist elsewhere).
@@ -3399,6 +3763,47 @@ mod cwd_test {
             app.ws().name.contains("tmp"),
             "ws name not updated: '{}'",
             app.ws().name
+        );
+    }
+}
+
+#[cfg(test)]
+mod dock_fn_check {
+    use super::*;
+    #[test]
+    fn off_unmounts_and_stays_in_registry() {
+        let _env = crate::persist::test_env("offscroll");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(96, 30, tx).unwrap();
+        assert_eq!(app.sidebars.side_of(&DockKind::Agents), Some(Side::Left));
+        app.unmount_dock(&DockKind::Agents); // the [Off] action
+        assert_eq!(
+            app.sidebars.side_of(&DockKind::Agents),
+            None,
+            "Off unmounts"
+        );
+        assert!(
+            app.available_docks().contains(&DockKind::Agents),
+            "still in the registry to re-place"
+        );
+    }
+    #[test]
+    fn layout_tab_scrolls_to_cursor() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("scroll");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(96, 30, tx).unwrap();
+        app.open_settings();
+        let n = app.settings_rows(crate::app::SettingsTab::Layout);
+        if let Some(u) = app.settings.as_mut() {
+            u.tab = crate::app::SettingsTab::Layout;
+            u.cursor = n - 1; // last row
+        }
+        let mut term = Terminal::new(TestBackend::new(96, 16)).unwrap(); // short → must scroll
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            app.settings_ctl_rects.iter().any(|(i, _)| *i == n - 1),
+            "last Layout row visible after scrolling to it"
         );
     }
 }
