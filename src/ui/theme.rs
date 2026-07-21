@@ -44,8 +44,10 @@ impl Theme {
             text: rgb(0xe7, 0xe7, 0xed),
             accent: rgb(0xc6, 0xff, 0x1a), // stabilo / VR46 fluo green
             sel_bg: rgb(0x33, 0x45, 0x0e), // dark green selection — stands out from the sidebar
-            border: rgb(0x52, 0x52, 0x5c), // muted grey (unfocused) — heavy glyphs stay solid
-            border_focus: rgb(0x8c, 0x8c, 0x96), // medium grey (focused) — not white
+            // Borders are filled (background), so keep the unfocused frame subtle
+            // and let the focused one stand out by brightness alone.
+            border: rgb(0x38, 0x38, 0x40), // subtle grey (unfocused pane frame)
+            border_focus: rgb(0x8c, 0x8c, 0x96), // medium grey (focused pane frame)
             green: rgb(0x8f, 0xbc, 0x7a),  // sage (idle)
             mint: rgb(0x6f, 0xc6, 0xa3),   // mint (done)
             amber: rgb(0xe0, 0x9a, 0x4d),  // amber-orange (working)

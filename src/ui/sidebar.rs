@@ -48,8 +48,11 @@ fn list_capacity(rows: u16) -> usize {
     (rows / ROW_STRIDE) as usize
 }
 
-/// A thin scrollbar on the sidebar's right edge, shown only when the list
-/// overflows its area. Preserves the cell background (e.g. the green selection).
+/// A scrollbar on the sidebar's right edge, shown only when the list overflows
+/// its area. Drawn as a **background fill** (blank cell + coloured `bg`), so it
+/// renders as a solid line in every terminal (no box-drawing glyph to dash on
+/// macOS Terminal.app). A faint full-height track carries a small brighter
+/// thumb sized to the visible fraction of the list.
 fn draw_scrollbar(
     f: &mut RenderTarget,
     track: Rect,
@@ -71,8 +74,8 @@ fn draw_scrollbar(
     for i in 0..len {
         let on = i >= pos && i < pos + thumb;
         let cell = &mut buf[(track.x, track.y + i as u16)];
-        cell.set_symbol(if on { "┃" } else { "│" });
-        cell.set_fg(if on { t.overlay1 } else { t.surface1 });
+        cell.set_symbol(" ");
+        cell.set_bg(if on { t.overlay1 } else { t.surface1 });
     }
 }
 
@@ -96,6 +99,7 @@ pub(super) fn draw_sidebar(
     };
     f.render_widget(Block::new().style(Style::new().bg(t.base)), area);
     {
+        // Sidebar's right-edge separator (standard vertical rule).
         let buf = f.buffer_mut();
         let x = area.right().saturating_sub(1);
         for y in area.top()..area.bottom() {

@@ -21,26 +21,33 @@ pub(super) fn draw_pane_titles(
         };
         let focused = *id == focus;
         let st = pane_state(app, *id);
-        let path_fg = if focused { t.accent } else { t.overlay1 };
-        let bcolor = if focused { t.border_focus } else { t.border };
-        let inner_w = rect.width - 2; // between ┏ and ┓
+        let path_fg = if focused { t.accent } else { t.subtext0 };
+        // The top border is a thin rule now (not a filled bar), so the title
+        // sits on the dark background; only the text cells are painted, leaving
+        // the thin `▔` line visible on either side of the label.
+        let bg = t.mantle;
+        let inner_w = rect.width - 2; // inside the two corner cells
         let close_w: u16 = if focused { 3 } else { 0 };
         let title_w = inner_w.saturating_sub(close_w);
         let path = short_path(&pane.cwd, title_w.saturating_sub(4));
-        let used = 3 + path.chars().count() as u16;
-        let fill = title_w.saturating_sub(used);
+        let text_w = (3 + path.chars().count() as u16).min(title_w);
         let title = Line::from(vec![
-            Span::styled(format!(" {} ", st.dot()), Style::new().fg(st.color(t))),
-            Span::styled(path, Style::new().fg(path_fg)),
-            Span::styled("━".repeat(fill as usize), Style::new().fg(bcolor)),
+            Span::styled(
+                format!(" {} ", st.dot()),
+                Style::new().fg(st.color(t)).bg(bg),
+            ),
+            Span::styled(path, Style::new().fg(path_fg).bg(bg)),
         ]);
         f.render_widget(
             Paragraph::new(title),
-            Rect::new(rect.x + 1, rect.y, title_w, 1),
+            Rect::new(rect.x + 1, rect.y, text_w, 1),
         );
         if focused {
             f.render_widget(
-                Paragraph::new(Span::styled(" × ", Style::new().fg(t.accent).bold())),
+                Paragraph::new(Span::styled(
+                    " × ",
+                    Style::new().fg(t.subtext1).bg(bg).bold(),
+                )),
                 Rect::new(rect.x + 1 + title_w, rect.y, close_w, 1),
             );
         }

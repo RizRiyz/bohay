@@ -1819,28 +1819,32 @@ mod tests {
         use ratatui::Terminal;
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        let render_text = |app: &mut App| -> String {
+        // Borders use ratatui's native box-drawing glyphs, so count cells
+        // carrying one of them in the pane area (right of the sidebar).
+        let border_cells = |app: &mut App| -> usize {
             let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
             term.draw(|f| crate::ui::render(f, app)).unwrap();
-            term.backend()
-                .buffer()
-                .content()
+            let buf = term.backend().buffer().clone();
+            let px = app.last_pane_area.x;
+            buf.content()
                 .iter()
-                .map(|c| c.symbol())
-                .collect()
+                .enumerate()
+                .filter(|(i, c)| {
+                    let x = (*i as u16) % 100;
+                    x >= px && matches!(c.symbol(), "│" | "─" | "┌" | "┐" | "└" | "┘")
+                })
+                .count()
         };
         // A lone pane: no border.
-        assert!(
-            !render_text(&mut app).contains('┃'),
+        assert_eq!(
+            border_cells(&mut app),
+            0,
             "single pane should have no border"
         );
-        // After a split: panes are bordered.
+        // After a split: the panes are framed.
         app.handle_event(key(' ', KeyModifiers::CONTROL));
         app.handle_event(key('v', KeyModifiers::NONE));
-        assert!(
-            render_text(&mut app).contains('┃'),
-            "split panes should be bordered"
-        );
+        assert!(border_cells(&mut app) > 0, "split panes should be bordered");
     }
 
     #[test]
