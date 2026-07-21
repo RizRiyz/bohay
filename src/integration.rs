@@ -132,6 +132,20 @@ fn codex_config_dir() -> PathBuf {
     home().join(".codex")
 }
 
+/// Kimi Code CLI's data dir: `~/.kimi-code`, overridable with `KIMI_CODE_HOME`
+/// (a real Kimi env var). Its `config.toml` holds the user's API keys, so we
+/// edit it format-preserving (docs/23), never a lossy round-trip.
+fn kimi_config_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("KIMI_CODE_HOME") {
+        return PathBuf::from(d);
+    }
+    home().join(".kimi-code")
+}
+
+fn kimi_config_path() -> PathBuf {
+    kimi_config_dir().join("config.toml")
+}
+
 /// opencode's global plugin dir: `$XDG_CONFIG_HOME/opencode/plugin`, else
 /// `~/.config/opencode/plugin` (docs/23). opencode auto-loads `*.js`/`*.ts` here.
 fn opencode_plugin_dir() -> PathBuf {
@@ -237,8 +251,80 @@ pub fn install_opencode() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// The Kimi hook events we register (docs/23): `SessionStart` (matcher
+/// `startup|resume`) reports the session id for resume; `Notification` + `Stop`
+/// feed the notch companion precise lifecycle signals. Kimi's `[[hooks]]` table
+/// accepts only `event`/`matcher`/`command`/`timeout`, so we write nothing else.
+const KIMI_HOOK_EVENTS: &[(&str, Option<&str>)] = &[
+    ("SessionStart", Some("startup|resume")),
+    ("Notification", None),
+    ("Stop", None),
+];
+
+/// True if a `[[hooks]]` entry's `command` points at bohay's hook script.
+fn kimi_entry_is_bohay(t: &toml_edit::Table) -> bool {
+    t.get("command")
+        .and_then(|v| v.as_str())
+        .map(|c| c.contains("bohay-agent-hook"))
+        .unwrap_or(false)
+}
+
+/// Drop every bohay `[[hooks]]` entry in place (idempotent reinstall/uninstall),
+/// leaving the user's own hooks and the rest of the file untouched.
+fn kimi_strip_bohay(arr: &mut toml_edit::ArrayOfTables) {
+    let doomed: Vec<usize> = arr
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| kimi_entry_is_bohay(t))
+        .map(|(i, _)| i)
+        .collect();
+    for i in doomed.into_iter().rev() {
+        arr.remove(i);
+    }
+}
+
+/// Install the Kimi Code hook. Writes the shared `bohay-agent-hook.sh` and adds
+/// our `[[hooks]]` entries to `config.toml` **format-preserving** (toml_edit),
+/// so the user's API keys, comments, and layout survive. Idempotent.
+pub fn install_kimi() -> Result<PathBuf> {
+    use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
+    let dir = kimi_config_dir();
+    fs::create_dir_all(&dir)?;
+    let script = dir.join("bohay-agent-hook.sh");
+    fs::write(&script, agent_hook_script("kimi"))?;
+    set_executable(&script)?;
+    let cmd = script.to_string_lossy().into_owned();
+
+    let cfg_path = kimi_config_path();
+    let mut doc: DocumentMut = fs::read_to_string(&cfg_path)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+    // Get (or create) the `hooks` array-of-tables, coercing a wrong-typed value.
+    let hooks = doc
+        .as_table_mut()
+        .entry("hooks")
+        .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
+    if !hooks.is_array_of_tables() {
+        *hooks = Item::ArrayOfTables(ArrayOfTables::new());
+    }
+    let arr = hooks.as_array_of_tables_mut().unwrap();
+    kimi_strip_bohay(arr);
+    for (event, matcher) in KIMI_HOOK_EVENTS {
+        let mut t = Table::new();
+        t["event"] = value(*event);
+        if let Some(m) = matcher {
+            t["matcher"] = value(*m);
+        }
+        t["command"] = value(cmd.clone());
+        arr.push(t);
+    }
+    fs::write(&cfg_path, doc.to_string())?;
+    Ok(dir)
+}
+
 /// Agents the integration hook supports (for the Settings UI + CLI).
-pub const AGENTS: &[&str] = &["claude", "copilot", "codex", "opencode"];
+pub const AGENTS: &[&str] = &["claude", "copilot", "codex", "opencode", "kimi"];
 
 /// Install the integration for `agent` (used by the Settings tab + CLI).
 pub fn install(agent: &str) -> Result<()> {
@@ -247,6 +333,7 @@ pub fn install(agent: &str) -> Result<()> {
         "copilot" => install_copilot().map(|_| ()),
         "codex" => install_codex().map(|_| ()),
         "opencode" => install_opencode().map(|_| ()),
+        "kimi" => install_kimi().map(|_| ()),
         other => Err(anyhow!("no integration for {other}")),
     }
 }
@@ -258,6 +345,25 @@ pub fn install(agent: &str) -> Result<()> {
 pub fn uninstall(agent: &str) -> Result<()> {
     if agent == "opencode" {
         let _ = fs::remove_file(opencode_plugin_path());
+        return Ok(());
+    }
+    if agent == "kimi" {
+        let _ = fs::remove_file(kimi_config_dir().join("bohay-agent-hook.sh"));
+        // Strip only bohay's `[[hooks]]` entries, format-preserving; the user's
+        // API keys, comments, and own hooks stay exactly as they were.
+        let cfg_path = kimi_config_path();
+        if let Ok(s) = fs::read_to_string(&cfg_path) {
+            if let Ok(mut doc) = s.parse::<toml_edit::DocumentMut>() {
+                if let Some(arr) = doc
+                    .as_table_mut()
+                    .get_mut("hooks")
+                    .and_then(|h| h.as_array_of_tables_mut())
+                {
+                    kimi_strip_bohay(arr);
+                }
+                let _ = fs::write(&cfg_path, doc.to_string());
+            }
+        }
         return Ok(());
     }
     let spec = hook_spec(agent).ok_or_else(|| anyhow!("no integration for {agent}"))?;
@@ -293,6 +399,19 @@ pub fn uninstall(agent: &str) -> Result<()> {
 pub fn is_installed(agent: &str) -> bool {
     if agent == "opencode" {
         return opencode_plugin_path().exists();
+    }
+    if agent == "kimi" {
+        let Ok(s) = fs::read_to_string(kimi_config_path()) else {
+            return false;
+        };
+        let Ok(doc) = s.parse::<toml_edit::DocumentMut>() else {
+            return false;
+        };
+        return doc
+            .get("hooks")
+            .and_then(|h| h.as_array_of_tables())
+            .map(|arr| arr.iter().any(kimi_entry_is_bohay))
+            .unwrap_or(false);
     }
     let Some(spec) = hook_spec(agent) else {
         return false;
@@ -508,6 +627,61 @@ mod tests {
         assert!(is_installed("codex"));
 
         std::env::remove_var("CODEX_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn kimi_hook_preserves_config_and_is_reversible() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-kimi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("KIMI_CODE_HOME", &tmp);
+        // Pre-existing config with a secret + a comment + the user's own hook.
+        fs::write(
+            tmp.join("config.toml"),
+            "# my kimi config\ndefault_model = \"kimi-code/k3\"\n\n\
+             [providers.\"managed:kimi-code\"]\napi_key = \"sk-secret-123\"\n\n\
+             [[hooks]]\nevent = \"PreToolUse\"\ncommand = \"echo mine\"\n",
+        )
+        .unwrap();
+
+        install_kimi().unwrap();
+        install_kimi().unwrap(); // idempotent
+        assert!(is_installed("kimi"));
+        assert!(tmp.join("bohay-agent-hook.sh").exists());
+
+        let after = fs::read_to_string(tmp.join("config.toml")).unwrap();
+        // The secret, comment, and user's own hook all survive the edit.
+        assert!(after.contains("sk-secret-123"), "api key preserved");
+        assert!(after.contains("# my kimi config"), "comment preserved");
+        assert!(after.contains("echo mine"), "user's own hook kept");
+        // Our three events landed exactly once each despite installing twice.
+        let doc: toml_edit::DocumentMut = after.parse().unwrap();
+        let hooks = doc["hooks"].as_array_of_tables().unwrap();
+        let bohay = hooks.iter().filter(|t| kimi_entry_is_bohay(t)).count();
+        assert_eq!(bohay, 3, "SessionStart + Notification + Stop, no dupes");
+        let sess = hooks
+            .iter()
+            .find(|t| t.get("event").and_then(|v| v.as_str()) == Some("SessionStart"))
+            .unwrap();
+        assert_eq!(sess["matcher"].as_str(), Some("startup|resume"));
+
+        uninstall("kimi").unwrap();
+        assert!(!is_installed("kimi"), "bohay hooks removed");
+        assert!(!tmp.join("bohay-agent-hook.sh").exists());
+        let cleaned = fs::read_to_string(tmp.join("config.toml")).unwrap();
+        assert!(cleaned.contains("sk-secret-123"), "secret still intact");
+        assert!(cleaned.contains("echo mine"), "user's hook still intact");
+        assert!(
+            !cleaned.contains("bohay-agent-hook"),
+            "no bohay hooks remain"
+        );
+        uninstall("kimi").unwrap(); // idempotent
+
+        std::env::remove_var("KIMI_CODE_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 

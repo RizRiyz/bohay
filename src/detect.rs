@@ -107,8 +107,9 @@ enum Cond {
     All(Vec<String>),
     /// The region contains none of these substrings.
     Not(Vec<String>),
-    /// A line in the region starts with a braille glyph (U+2800..=U+28FF) — the
-    /// block agent CLIs animate as a "running" spinner.
+    /// A line in the region starts with a spinner glyph — a braille cell
+    /// (U+2800..=U+28FF, what most CLIs animate) or a moon phase (U+1F311..=
+    /// U+1F318, Kimi's background-agent spinner). A running spinner means work.
     Spinner,
 }
 
@@ -120,13 +121,15 @@ impl Cond {
             Cond::Not(subs) => !subs.iter().any(|s| low.contains(s)),
             Cond::Spinner => low
                 .lines()
-                .any(|l| l.trim_start().chars().next().is_some_and(is_braille)),
+                .any(|l| l.trim_start().chars().next().is_some_and(is_spinner_glyph)),
         }
     }
 }
 
-fn is_braille(c: char) -> bool {
-    ('\u{2800}'..='\u{28FF}').contains(&c)
+/// A spinner glyph: a braille cell (the common animated spinner) or a moon
+/// phase (Kimi animates 🌑..🌘 for background agents).
+fn is_spinner_glyph(c: char) -> bool {
+    ('\u{2800}'..='\u{28FF}').contains(&c) || ('\u{1F311}'..='\u{1F318}').contains(&c)
 }
 
 /// A detection rule: `state` is chosen when every `cond` holds in `region`.
@@ -261,6 +264,17 @@ fn builtin_rules() -> Vec<Rule> {
             105,
             Region::Screen,
             vec![any(&["ctrl+c to stop"])],
+        ),
+        // Kimi's approval panel (permission prompt) shows the footer
+        // "↑/↓ select · N choose · ↵ confirm" while it waits — a very specific
+        // three-word combination, so it can't be mistaken for the spinner that
+        // was on screen a moment earlier.
+        per(
+            "kimi",
+            State::Blocked,
+            310,
+            Region::Screen,
+            vec![all(&["select", "choose", "confirm"])],
         ),
     ]
 }
@@ -549,6 +563,35 @@ mod tests {
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Working);
+    }
+
+    #[test]
+    fn kimi_moon_spinner_is_working() {
+        // Kimi animates a moon phase for background agents; a line starting with
+        // one reads as working just like a braille spinner.
+        let d = classify(
+            Some("kimi"),
+            "🌖 running task…",
+            true,
+            false,
+            "kimi",
+            &Manifests::builtin(),
+        );
+        assert_eq!(d.state, State::Working);
+    }
+
+    #[test]
+    fn kimi_approval_panel_is_blocked() {
+        // The approval footer outranks a lingering spinner reading.
+        let d = classify(
+            Some("kimi"),
+            "Run this command?\n rm -rf build\n ↑/↓ select · 1/2 choose · ↵ confirm",
+            true,
+            false,
+            "kimi",
+            &Manifests::builtin(),
+        );
+        assert_eq!(d.state, State::Blocked);
     }
 
     #[test]

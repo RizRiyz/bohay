@@ -45,6 +45,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Module manifests (`bohay-module.toml`).
 toml = "0.8"
+# Format-preserving TOML edits (Kimi's `~/.kimi-code/config.toml` holds the
+# user's API keys + comments, so we edit it in place without a lossy round-trip).
+toml_edit = "0.22"
 bincode = { version = "2", features = ["serde"] }
 # Cross-platform local IPC: Unix-domain sockets on Unix, named pipes on Windows.
 interprocess = "2"

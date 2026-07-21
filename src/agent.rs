@@ -75,6 +75,15 @@ static SOURCES: &[SessionSource] = &[
         }),
         resume: |q| format!("codex resume {q}\r"),
     },
+    SessionSource {
+        name: "kimi",
+        discover: Some(Discovery {
+            base: kimi_base,
+            recent: kimi_recent,
+            latest: kimi_latest,
+        }),
+        resume: |q| format!("kimi --resume {q}\r"),
+    },
     // Resume-only (no readable session store): usable when a hook reports the id.
     SessionSource {
         name: "cursor",
@@ -556,6 +565,90 @@ fn codex_latest(base: &Path, cwd: &Path) -> Option<String> {
     None
 }
 
+// ── Kimi Code CLI ───────────────────────────────────────────────────────────
+// Session data lives at `<base>/sessions/<workDirKey>/<sessionId>/`, and a
+// top-level `session_index.jsonl` records one JSON object per line carrying
+// `sessionId`, `sessionDir`, and `workDir` (docs/23). We read that index —
+// cheap, one file — and match by `workDir`. Newest wins by the index's append
+// order (a session is appended when it starts), and we stat `sessionDir` only
+// for the entries we return, so the every-4s scan stays bounded.
+
+fn kimi_base() -> PathBuf {
+    if let Some(d) = std::env::var_os("KIMI_CODE_HOME") {
+        return PathBuf::from(d);
+    }
+    home().join(".kimi-code")
+}
+
+/// One record from `session_index.jsonl`: `(session_id, work_dir, session_dir)`.
+struct KimiEntry {
+    id: String,
+    work_dir: PathBuf,
+    session_dir: PathBuf,
+}
+
+/// Parse the session index, newest first (the file is append-ordered, so we
+/// reverse it). Tolerates malformed lines and schema drift (missing fields).
+fn kimi_index(base: &Path) -> Vec<KimiEntry> {
+    let Ok(text) = std::fs::read_to_string(base.join("session_index.jsonl")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<KimiEntry> = text
+        .lines()
+        .filter_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            let id = v.get("sessionId").and_then(|x| x.as_str())?;
+            let work = v.get("workDir").and_then(|x| x.as_str())?;
+            // `sessionDir` may be absolute or relative to the data root.
+            let sdir = v
+                .get("sessionDir")
+                .and_then(|x| x.as_str())
+                .map(PathBuf::from)
+                .map(|p| if p.is_absolute() { p } else { base.join(p) })
+                .unwrap_or_default();
+            Some(KimiEntry {
+                id: id.to_string(),
+                work_dir: PathBuf::from(work),
+                session_dir: sdir,
+            })
+        })
+        .collect();
+    out.reverse(); // last line appended = most recent session
+    out
+}
+
+fn kimi_latest(base: &Path, cwd: &Path) -> Option<String> {
+    kimi_index(base)
+        .into_iter()
+        .find(|e| e.work_dir == cwd)
+        .map(|e| e.id)
+}
+
+fn kimi_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for e in kimi_index(base) {
+        if out.len() >= limit {
+            break; // newest-first; stat only the distinct projects we return
+        }
+        if !seen.insert(e.work_dir.clone()) {
+            continue;
+        }
+        // Recency for cross-agent sorting comes from the session dir's mtime;
+        // fall back to epoch if it's gone (still lists, just sorts last).
+        let updated = std::fs::metadata(&e.session_dir)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        out.push(SessionInfo {
+            agent: "kimi".to_string(),
+            session_id: e.id,
+            cwd: e.work_dir,
+            updated,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +677,10 @@ mod tests {
         assert!(resume_command("codex", "c1")
             .unwrap()
             .contains("codex resume"));
+        assert!(resume_command("kimi", "k1")
+            .unwrap()
+            .contains("kimi --resume"));
+        assert!(is_resumable("kimi"));
         assert!(resume_command("cursor-agent", "z")
             .unwrap()
             .contains("cursor-agent --resume"));
@@ -664,6 +761,54 @@ mod tests {
         let recent = codex_recent(&base, 10);
         assert_eq!(recent.len(), 2);
         assert!(recent.iter().all(|s| s.agent == "codex"));
+    }
+
+    #[test]
+    fn kimi_discovers_session_by_workdir_from_index() {
+        // The index is append-ordered (one JSON line per session); discovery
+        // reverses it so the newest per project wins, matches by `workDir`, and
+        // skips a malformed line.
+        let base = tmp("kimi");
+        let sdir = |id: &str| {
+            let d = base.join("sessions").join("wd_app_abc").join(id);
+            fs::create_dir_all(&d).unwrap();
+            d
+        };
+        sdir("s_old");
+        sdir("s_new");
+        sdir("s_api");
+        fs::write(
+            base.join("session_index.jsonl"),
+            "{\"sessionId\":\"s_old\",\"workDir\":\"/work/app\",\"sessionDir\":\"sessions/wd_app_abc/s_old\"}\n\
+             { not json\n\
+             {\"sessionId\":\"s_api\",\"workDir\":\"/work/api\",\"sessionDir\":\"sessions/wd_api_def/s_api\"}\n\
+             {\"sessionId\":\"s_new\",\"workDir\":\"/work/app\",\"sessionDir\":\"sessions/wd_app_abc/s_new\"}\n",
+        )
+        .unwrap();
+
+        // Newest entry for /work/app is s_new (appended last).
+        assert_eq!(
+            kimi_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("s_new")
+        );
+        assert_eq!(
+            kimi_latest(&base, Path::new("/work/api")).as_deref(),
+            Some("s_api")
+        );
+        assert!(kimi_latest(&base, Path::new("/no/such")).is_none());
+
+        let recent = kimi_recent(&base, 10);
+        assert_eq!(recent.len(), 2, "one per project, malformed line skipped");
+        assert!(recent.iter().all(|s| s.agent == "kimi"));
+        // The /work/app entry resolves to the newest session id.
+        assert_eq!(
+            recent
+                .iter()
+                .find(|s| s.cwd == Path::new("/work/app"))
+                .unwrap()
+                .session_id,
+            "s_new"
+        );
     }
 
     #[test]

@@ -139,7 +139,7 @@ server:
   server start               start the background server if it isn't up
   server stop                stop the server (and all panes)
   server restart             stop + start (load a newly-installed binary)
-  integration install|uninstall <claude|copilot|codex|opencode>
+  integration install|uninstall <claude|copilot|codex|opencode|kimi>
                              add/remove bohay's session-resume hook (uninstall
                              removes only bohay's hook, never the agent)
 ";

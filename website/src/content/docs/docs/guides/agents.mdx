@@ -10,7 +10,8 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a live state:
+Kimi, Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a live
+state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -61,6 +62,7 @@ command for you:
 | GitHub Copilot CLI | its session-state store |
 | Codex | its rollout files |
 | opencode | its session storage |
+| Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Cursor | resume command (when the session id is known) |
 
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
@@ -75,7 +77,7 @@ Screen-based detection needs no setup and works for everything. The optional
 lifecycle events (permission prompt raised, turn ended) into bohay:
 
 ```sh
-bohay integration install claude    # or: copilot · codex · opencode
+bohay integration install claude    # or: copilot · codex · opencode · kimi
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
@@ -83,6 +85,8 @@ or toggle it in **Settings → Integrations**. What it does per agent:
 - **claude / copilot / codex**: registers a small session-start hook script in
   the agent's own settings file.
 - **opencode**: installs a tiny plugin file.
+- **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
+  place so your API keys, comments, and own hooks are left untouched.
 
 Uninstalling (`bohay integration uninstall <agent>`, or the same Settings
 toggle) surgically removes **only bohay's hook entry**. Your other settings

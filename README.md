@@ -80,6 +80,7 @@ start your agents — bohay recognizes them automatically.
 | GitHub Copilot CLI | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ |
 | opencode | ✓ | ✓ | ✓ |
+| Kimi | ✓ | ✓ | ✓ |
 | Cursor | ✓ | resume command | — |
 | Gemini · Aider · Amp · Droid | ✓ | — | — |
 
