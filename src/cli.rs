@@ -34,7 +34,7 @@ pub fn is_cli(args: &[String]) -> bool {
 }
 
 const USAGE: &str = "\
-bohay — terminal workspace manager for AI coding agents
+bohay: Mission controlfor your AI agents
 
 usage: bohay <command> [args]
 
@@ -79,7 +79,7 @@ appearance:
   ui dock move --id <id> --side left|right       place a dock on a side
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
-                             or piped on stdin) — see docs/29 + the website
+                             or piped on stdin). See docs/29 + the website
 
 modules (extensions):
   module search [<query>]    find modules published to the `bohay-module` GitHub topic
@@ -109,20 +109,20 @@ worktrees:
   worktree open <path>       open an existing worktree as a workspace
   worktree remove <path>     remove a worktree (its branch is kept)
 
-orchestration (multiple agents, one project — docs/22):
+orchestration (multiple agents on one project, docs/22):
   task add \"<title>\" [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
   task next [--start] [--agent <cmd>]   claim the next ready task (--start spawns
-                             an isolated worker); for an agent loop draining the queue
+                             an isolated worker), for an agent loop draining the queue
   task start <id> [--branch <b>] [--agent <cmd>]   spawn an isolated worker:
                              a git worktree + pane, auto-claimed and path-leased
   task heartbeat <id> --context <0..1>   report context usage (blocks done at >85%)
   task update <id> [--status <s>] [--output <o>] [--note <n>]
   task done <id>             mark done + release its leases
   task merge <id>            integrate the task's branch into bohay/integration
-                             (isolated worktree; conflicts block the task)
+                             (isolated worktree, conflicts block the task)
   task release <id>          return a claimed task to the queue
   lease acquire <glob>... --task <id>   reserve file paths (denied if they overlap)
   lease release <id>         release a lease

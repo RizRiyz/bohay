@@ -1,0 +1,115 @@
+---
+title: Panes, Tabs & Workspaces
+description: Arrange and navigate bohay by splitting, resizing, and zooming panes, renaming and cycling tabs, managing workspaces, and customizing the sidebars.
+---
+
+bohay is **mouse-native**: everything here works by click and drag, and every
+action also has a key behind the [`Ctrl+Space` prefix](/docs/getting-started/concepts/#3-the-prefix-key).
+Nothing is modal, so what you type always goes to the focused pane.
+
+## Panes
+
+A pane is a real terminal. Inside a tab you can split it as many ways as you
+like, and bohay tiles them automatically.
+
+| Do this | Mouse | Key |
+|---|---|---|
+| Split side by side | right-click a pane → **Split** | `Ctrl+Space v` |
+| Split top / bottom | right-click a pane → **Split down** | `Ctrl+Space s` |
+| Focus a pane | click it | arrows or `hjkl` |
+| Zoom (fullscreen) a pane | n/a | `Ctrl+Space z` |
+| Close a pane | the `×` on its title, or right-click → **Close** | `Ctrl+Space x` |
+
+Each split pane shows a title bar with a **status dot** and its working
+directory. The focused pane's frame is brighter.
+
+### Resizing
+
+Three ways, whichever fits your hands:
+
+- **Drag a divider.** Hover the border between two panes (it brightens) and drag.
+- **Ctrl+drag** anywhere inside a pane to nudge its edges.
+- **Keyboard resize mode:** `Ctrl+Space r`, then the arrow keys grow/shrink the
+  focused pane. `Esc` or `Enter` leaves the mode.
+
+## Tabs
+
+Each workspace has a strip of tabs at the top. A tab holds one pane layout (or a
+special dashboard, such as the `⎇ git` tab or the `◇ orch` board).
+
+| Do this | Mouse | Key |
+|---|---|---|
+| New tab | the `+` on the tab bar | `Ctrl+Space c` |
+| Next / previous tab | click a tab | `Ctrl+Space n` / `p` / `⇥` |
+| Close a tab | the `×` on the tab | `Ctrl+Space x` (on a dashboard) |
+| **Rename a tab** | **right-click the tab**, type a name, `⏎` | n/a |
+
+A renamed tab shows your label instead of its number (empty reverts to the
+number). The `⎇ git` and `◇ orch` tabs keep their fixed labels.
+
+## Workspaces
+
+A **workspace** is one project folder, fixed at its `cwd` (see
+[Core Concepts](/docs/getting-started/concepts/#2-workspace--tab--pane)). They
+live in the sidebar's top list.
+
+- **Open one:** the `+` button above the list, or `Ctrl+Space N`, opens a
+  **folder picker**. Browse with the arrows / wheel, `⏎` to open the highlighted
+  folder, `n` to create-and-open a new folder, or `w` to open a repo **as a new
+  worktree**. Running `bohay` inside a folder also adds it automatically.
+- **Switch:** click a row, or `Ctrl+Space w` / `W` to cycle.
+- **Jump to its git tab:** click the branch name next to a workspace.
+
+### Right-click a workspace
+
+Right-click any workspace row for its menu:
+
+- **Close** the workspace
+- **Rename** its label (this changes the sidebar name only, never the folder on
+  disk)
+- **New worktree** / **Open worktree** (for git repos)
+- **Open git tab** · **Open task board**
+
+## The sidebar
+
+The sidebar shows your workspaces and your live agents. Collapse it to give the
+panes the full width:
+
+- Click the **`«`** chevron in the sidebar header (or `Ctrl+Space b`).
+- When hidden, a **`»`** appears at the tab bar's left edge to bring it back.
+
+## Two sidebars and docks
+
+The sidebar's sections are **docks**, relocatable panels. The built-ins are
+**Workspaces** and **Agents**, and bohay has *two* sidebars (left and right), so
+you can split reference content from live content across both edges. Modules can
+add their own docks too (see [Writing a Module](/docs/extend/writing-modules/)).
+
+Arrange them in **Settings → Layout**, under the `── Docks ──` divider:
+
+- Each side has a **visible** toggle and a **width**.
+- Every dock has **`[Left] [Right] [Off]`** buttons. Click to put it on the left
+  sidebar, the right sidebar, or hide it. The current placement is highlighted.
+- Toggle the right sidebar any time with `Ctrl+Space B` (and the left with
+  `Ctrl+Space b`).
+
+For example, move **Agents** to the right so your agent statuses sit on one edge
+and your project list on the other. If you hide the left sidebar entirely, the
+**Menu** button moves to the right sidebar so Settings is always reachable.
+
+:::tip
+The **Agents** dock header has an **All / Active** toggle: *Active* shows only
+running agents, while *All* also lists the resumable sessions bohay found on disk (click
+one to reopen it). See [Working with Agents](/docs/guides/agents/).
+:::
+
+## Selecting text
+
+Drag across any pane to select, and releasing **auto-copies** to your clipboard. Full
+details, plus scrollback, are in [Scrollback & Copy](/docs/guides/scrollback/).
+
+## Detaching
+
+Closing your terminal never loses work, because the server keeps every pane alive. Run
+`bohay` again to reattach, or `Ctrl+Space d` to detach on purpose. See
+[Your First Session](/docs/getting-started/first-session/#4-detach--this-is-the-magic).

@@ -1,4 +1,4 @@
-//! bohay — terminal workspace manager for AI coding agents.
+//! bohay — Mission controlfor your AI agents.
 //! A client/server terminal multiplexer with live agent detection.
 //! See docs/12-execution-plan.md.
 

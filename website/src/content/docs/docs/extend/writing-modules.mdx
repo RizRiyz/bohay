@@ -1,15 +1,15 @@
 ---
 title: Writing a Module
-description: The complete guide — manifest reference, environment, context, callbacks, and distribution.
+description: The complete guide to the manifest reference, environment, context, callbacks, and distribution.
 ---
 
 A **module** is the way you extend bohay. It's a plain directory with one
-manifest file (`bohay-module.toml`) that declares **commands** — argv arrays
+manifest file (`bohay-module.toml`) that declares **commands**, the argv arrays
 bohay runs as subprocesses. There's no SDK, no scripting runtime, and no
 language requirement: if it can be executed and read environment variables, it
 can be a bohay module. A command does its work by reading the injected
 `BOHAY_*` context and, when it needs to change the workspace, by calling the
-same `bohay` CLI you use by hand — **the bohay CLI is the module API**.
+same `bohay` CLI you use by hand. **The bohay CLI is the module API**.
 
 ## A module in five minutes
 
@@ -29,7 +29,7 @@ min_bohay_version = "0.1.0"      # required
 [[actions]]
 id = "refresh"                   # local id (no dots)
 title = "Say hello"
-command = ["sh", "refresh.sh"]   # argv — run without a shell
+command = ["sh", "refresh.sh"]   # argv, run without a shell
 ```
 
 ```sh
@@ -48,7 +48,7 @@ bohay module log                     # status + captured output
 ```
 
 `module run` is fire-and-forget: it returns a `log_id` immediately and the
-command runs in the background; read stdout/stderr and the exit status back
+command runs in the background. Read stdout/stderr and the exit status back
 with `module log`.
 
 ## The manifest
@@ -61,10 +61,10 @@ with `module log`.
 | `name` | ✓ | Human-readable, non-empty. |
 | `version` | ✓ | Your module's version. |
 | `min_bohay_version` | ✓ | Install is refused if newer than the host. |
-| `description` | — | One-line summary. |
-| `platforms` | — | e.g. `["macos", "linux"]`; omit for all. `[]` is an error. |
+| `description` |  | One-line summary. |
+| `platforms` |  | e.g. `["macos", "linux"]`. Omit for all. `[]` is an error. |
 
-### `[[actions]]` — on-demand commands
+### `[[actions]]`: on-demand commands
 
 ```toml
 [[actions]]
@@ -76,7 +76,7 @@ command = ["bun", "run", "commit.ts"]
 Invoke with `bohay module run <module-id> <action-id>`. The qualified id is
 `{module-id}.{action-id}`.
 
-### `[[events]]` — react to lifecycle events
+### `[[events]]`: react to lifecycle events
 
 ```toml
 [[events]]
@@ -87,10 +87,10 @@ command = ["sh", "notify.sh"]
 Your command runs with `BOHAY_MODULE_EVENT` (the name) and
 `BOHAY_MODULE_EVENT_JSON` (the payload). Hookable events: `node.created` ·
 `node.closed` · `tab.created` · `tab.closed` · `pane.created` · `pane.closed`
-· `pane.agent_status_changed` (payload `{pane, status, agent}` — the
+· `pane.agent_status_changed` (payload `{pane, status, agent}`, the
 highest-value hook: notify when `status` becomes `blocked` or `done`).
 
-### `[[panes]]` — long-lived UI in a real pane
+### `[[panes]]`: long-lived UI in a real pane
 
 ```toml
 [[panes]]
@@ -105,12 +105,12 @@ pane (a TUI, a log tail, anything), runs in the module root with the full
 `BOHAY_*` environment, and is auto-untracked on close. A module pane that's
 open when you detach is re-opened on the next launch.
 
-### `[[docks]]` — a panel in the sidebar
+### `[[docks]]`: a panel in the sidebar
 
 A **dock** is a section that lives in one of bohay's two sidebars (left or
 right), alongside the built-in Workspaces and Agents lists. It's the way a
-plugin puts an always-visible panel — a git status, a CI feed, a notifications
-list — into the chrome.
+plugin puts an always-visible panel (a git status, a CI feed, a notifications
+list) into the chrome.
 
 ```toml
 [[docks]]
@@ -119,7 +119,7 @@ title = "CI"                     # the dock header
 placement = "sidebar.right"      # default side: sidebar.left | sidebar.right
 ```
 
-Unlike a pane, **your module doesn't draw a dock** — bohay owns the rendering
+Unlike a pane, **your module doesn't draw a dock**. Bohay owns the rendering
 and your module just **pushes rows**. That keeps docks fast (nothing runs per
 frame), visually consistent with the rest of the UI, and freely relocatable:
 from **Settings → Layout**, the user can move any dock between the left sidebar,
@@ -145,14 +145,14 @@ Each **row** is an object:
 | Field | Required | Meaning |
 |---|:---:|---|
 | `text` | ✓ | The row label. |
-| `dot` | — | A status dot: `idle` / `working` / `blocked` / `done` (colored like the Agents list). |
-| `action` | — | A module **action id** run when the row is clicked. |
+| `dot` |  | A status dot: `idle` / `working` / `blocked` / `done` (colored like the Agents list). |
+| `action` |  | A module **action id** run when the row is clicked. |
 
 The **first push mounts** the dock into its `placement` side automatically (or
-wherever the user has since moved it); later pushes just refresh the rows. Clear
+wherever the user has since moved it). Later pushes just refresh the rows. Clear
 a dock with an empty array: `--rows '[]'`.
 
-A row with an `action` is **clickable** — clicking it runs that action (exactly
+A row with an `action` is **clickable**: clicking it runs that action (exactly
 like `bohay module run <your-id> <action>`), so a dock can be interactive: click
 a failing check to open its page, click a branch to check it out.
 
@@ -162,7 +162,7 @@ your module removes its docks.
 
 #### A dock that stays fresh
 
-Docks are **event-driven and cached** — bohay never polls your module. Push when
+Docks are **event-driven and cached**, so bohay never polls your module. Push when
 your data changes: from an `[[events]]` hook, a timer, or a long-lived
 `[[panes]]` process. A live git panel refreshed whenever an agent's status
 changes:
@@ -180,7 +180,7 @@ command = ["sh", "push-git.sh"]
 
 ```sh
 #!/bin/sh
-# push-git.sh — build the rows with jq and push them
+# push-git.sh: build the rows with jq and push them
 cwd=$(printf '%s' "$BOHAY_MODULE_CONTEXT_JSON" | jq -r .node.cwd)
 branch=$(git -C "$cwd" branch --show-current)
 dirty=$(git -C "$cwd" status --porcelain | wc -l | tr -d ' ')
@@ -195,10 +195,10 @@ That's a live git dock in the sidebar, kept current with zero per-frame cost.
 
 :::tip
 Namespace your dock id (e.g. `you.ci`, `acme:builds`) so it can't collide with
-another plugin's dock. Colons are allowed in a dock id; dots are not.
+another plugin's dock. Colons are allowed in a dock id, but dots are not.
 :::
 
-### `[[build]]` — install-time setup
+### `[[build]]`: install-time setup
 
 ```toml
 [[build]]
@@ -216,7 +216,7 @@ outside its set, or a local id contains a dot · two actions/panes/docks share
 an id · `platforms = []`.
 
 :::note
-Commands run **without a shell** — `["git", "status"]`, not `"git status"`.
+Commands run **without a shell**: `["git", "status"]`, not `"git status"`.
 For pipes or `$VAR`, invoke a shell explicitly:
 `["sh", "-c", "git status | head"]`.
 :::
@@ -229,25 +229,25 @@ For pipes or `$VAR`, invoke a shell explicitly:
 3. stdout and stderr are captured (64 KiB each), the exit is recorded:
    `running` → `succeeded` / `failed`.
 
-Caps: at most **32** module commands in flight; the **200** most recent log
-entries are kept. Commands are isolated processes — a crash or hang never
+Caps: at most **32** module commands in flight, and the **200** most recent log
+entries are kept. Commands are isolated processes, so a crash or hang never
 takes down bohay.
 
 ## Environment variables
 
 | Variable | Meaning |
 |---|---|
-| `BOHAY_ENV` | Always `1` — you're running under bohay. |
+| `BOHAY_ENV` | Always `1`, meaning you're running under bohay. |
 | `BOHAY_MODULE_ID` | Your module's id. |
 | `BOHAY_MODULE_ROOT` | The module directory (also the cwd). Read-only by convention. |
 | `BOHAY_MODULE_CONFIG_DIR` | Durable, user-owned config/secrets dir (created for you). |
 | `BOHAY_MODULE_STATE_DIR` | Durable state/cache dir (created for you). |
 | `BOHAY_MODULE_CONTEXT_JSON` | JSON snapshot of the focused workspace/tab/pane. |
 | `BOHAY_SOCKET_PATH` | The control socket (the CLI finds it automatically). |
-| `BOHAY_BIN_PATH` | Absolute path to the `bohay` binary — use this to call back. |
+| `BOHAY_BIN_PATH` | Absolute path to the `bohay` binary. Use this to call back. |
 | `BOHAY_MODULE_ACTION_ID` | The action id, for action commands. |
 
-Persist data in the **state/config dirs**, never in the module root — for
+Persist data in the **state/config dirs**, never in the module root, because for
 git-installed modules it's a managed checkout.
 
 ## The context blob
@@ -298,14 +298,14 @@ Install does a shallow clone, **shows every command the module declares and
 asks to proceed** (`--yes` for CI), runs `[[build]]` in a scrubbed
 environment, verifies the manifest didn't change during the build, and pins
 the checkout to the installed commit. There's intentionally **no central
-registry** — publishing is pushing a public repo.
+registry**: publishing is pushing a public repo.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `link` → *invalid manifest* | Check TOML syntax; every `command` must be a non-empty array of non-empty strings. |
+| `link` → *invalid manifest* | Check TOML syntax. Every `command` must be a non-empty array of non-empty strings. |
 | Listed but `runnable: false` | Disabled, platform-gated, or a manifest load warning (see `module list`). |
-| Action *is ambiguous* | Two modules expose the id — qualify it: `module run <module-id> <action>`. |
-| No output in the log | The entry stays `running` until the command exits; output is capped at 64 KiB. |
+| Action *is ambiguous* | Two modules expose the id, so qualify it: `module run <module-id> <action>`. |
+| No output in the log | The entry stays `running` until the command exits. Output is capped at 64 KiB. |
 | Callbacks do nothing | `$BOHAY_BIN_PATH` needs the bohay server for your session to be running. |
