@@ -30,12 +30,10 @@ fn rollup(app: &App, ws_index: usize) -> State {
 
 // ── sidebar ───────────────────────────────────────────────────────────────
 
-/// (workspace rows, live-agent rows, resumable-session rows, session ✕ buttons,
-/// new-workspace button).
+/// (workspace rows, live-agent rows, resumable-session rows, new-workspace button).
 pub(super) type SidebarHits = (
     Vec<(usize, Rect)>,
     Vec<(PaneId, Rect)>,
-    Vec<(usize, Rect)>,
     Vec<(usize, Rect)>,
     Option<Rect>,
 );
@@ -48,8 +46,11 @@ fn list_capacity(rows: u16) -> usize {
     (rows / ROW_STRIDE) as usize
 }
 
-/// A thin scrollbar on the sidebar's right edge, shown only when the list
-/// overflows its area. Preserves the cell background (e.g. the green selection).
+/// A scrollbar on the sidebar's right edge, shown only when the list overflows
+/// its area. Drawn as a **background fill** (blank cell + coloured `bg`), so it
+/// renders as a solid line in every terminal (no box-drawing glyph to dash on
+/// macOS Terminal.app). A faint full-height track carries a small brighter
+/// thumb sized to the visible fraction of the list.
 fn draw_scrollbar(
     f: &mut RenderTarget,
     track: Rect,
@@ -71,8 +72,8 @@ fn draw_scrollbar(
     for i in 0..len {
         let on = i >= pos && i < pos + thumb;
         let cell = &mut buf[(track.x, track.y + i as u16)];
-        cell.set_symbol(if on { "┃" } else { "│" });
-        cell.set_fg(if on { t.overlay1 } else { t.surface1 });
+        cell.set_symbol(" ");
+        cell.set_bg(if on { t.overlay1 } else { t.surface1 });
     }
 }
 
@@ -88,7 +89,6 @@ pub(super) fn draw_sidebar(
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
     let mut session_rects = Vec::new();
-    let mut session_del_rects = Vec::new();
     let hover = app.hover;
     let over = |rc: Rect| {
         hover
@@ -96,6 +96,7 @@ pub(super) fn draw_sidebar(
     };
     f.render_widget(Block::new().style(Style::new().bg(t.base)), area);
     {
+        // Sidebar's right-edge separator (standard vertical rule).
         let buf = f.buffer_mut();
         let x = area.right().saturating_sub(1);
         for y in area.top()..area.bottom() {
@@ -428,15 +429,8 @@ pub(super) fn draw_sidebar(
                         Style::new().fg(t.overlay0),
                     )),
                 );
-                // Hovering the row reveals a ✕ to remove it from the list.
-                if over(row) {
-                    let xr = Rect::new(area.right().saturating_sub(5), y, 3, 1);
-                    f.render_widget(
-                        Paragraph::new(Span::styled(" ✕ ", Style::new().fg(t.coral).bold())),
-                        xr,
-                    );
-                    session_del_rects.push((si, xr));
-                }
+                // Removing / reopening a session is on the row's right-click menu
+                // (docs/28) — no per-row ✕ button.
             }
         }
         draw_scrollbar(
@@ -449,13 +443,7 @@ pub(super) fn draw_sidebar(
         );
     }
 
-    (
-        ws_rects,
-        agent_rects,
-        session_rects,
-        session_del_rects,
-        new_ws_rect,
-    )
+    (ws_rects, agent_rects, session_rects, new_ws_rect)
 }
 
 fn header(text: &str, t: &Theme) -> Line<'static> {

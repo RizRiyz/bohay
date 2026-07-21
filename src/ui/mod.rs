@@ -148,19 +148,18 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         }
     }
 
-    let (ws_rects, agent_rects, session_rects, session_del_rects, new_ws_rect) =
-        if let Some(s) = sidebar {
-            sidebar::draw_sidebar(f, s, app, &t)
-        } else {
-            // Sidebar hidden: clear the click/scroll geometry it owns so stale
-            // rects sitting under the now-expanded pane area can't trigger the
-            // Menu, the All/Active filter, or list wheel-scrolling.
-            app.settings_icon_rect = None;
-            app.workspaces_area = Rect::ZERO;
-            app.agents_area = Rect::ZERO;
-            app.agents_filter_rects.clear();
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None)
-        };
+    let (ws_rects, agent_rects, session_rects, new_ws_rect) = if let Some(s) = sidebar {
+        sidebar::draw_sidebar(f, s, app, &t)
+    } else {
+        // Sidebar hidden: clear the click/scroll geometry it owns so stale
+        // rects sitting under the now-expanded pane area can't trigger the
+        // Menu, the All/Active filter, or list wheel-scrolling.
+        app.settings_icon_rect = None;
+        app.workspaces_area = Rect::ZERO;
+        app.agents_area = Rect::ZERO;
+        app.agents_filter_rects.clear();
+        (Vec::new(), Vec::new(), Vec::new(), None)
+    };
     let (tab_rects, tab_close_rects, tab_prev, tab_next) = tabbar::draw_tabbar(f, tabbar, app, &t);
     // Behind the panes, use the (dark) pane background.
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), pane_area);
@@ -273,6 +272,12 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
+    if app.pane_menu.is_some() {
+        menu::draw_pane_menu(f, area, app, cat, &t);
+    }
+    if app.agent_menu.is_some() {
+        menu::draw_agent_menu(f, area, app, cat, &t);
+    }
     if app.ws_menu.is_some() {
         menu::draw_ws_menu(f, area, app, cat, &t);
     }
@@ -292,6 +297,8 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         || app.tab_rename.is_some()
         || app.ws_rename.is_some()
         || app.ws_menu.is_some()
+        || app.pane_menu.is_some()
+        || app.agent_menu.is_some()
         || app.orch_form.is_some()
     {
         None
@@ -310,7 +317,6 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     app.ws_rects = ws_rects;
     app.agent_rects = agent_rects;
     app.session_rects = session_rects;
-    app.session_del_rects = session_del_rects;
     app.new_ws_rect = new_ws_rect;
 }
 
