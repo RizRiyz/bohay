@@ -199,6 +199,94 @@ pub(super) fn draw_worktree_prompt(
     }
 }
 
+/// The tab-rename modal (docs/28): a single text field pre-filled with the tab's
+/// current name. Mirrors `draw_worktree_prompt` (no error line).
+pub(super) fn draw_tab_rename(
+    f: &mut RenderTarget,
+    area: Rect,
+    buf: &str,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
+    let modal = centered_rect(area, w, 6);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {}", cat.rename_tab),
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(buf.to_string(), Style::new().fg(t.accent).bold()),
+            Span::styled("▏", Style::new().fg(t.accent)),
+        ])),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
+    let bottom = inner.bottom().saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint_line(
+            &[("⏎", cat.act_save), ("esc", cat.act_cancel)],
+            t,
+        )),
+        Rect::new(inner.x, bottom, inner.width, 1),
+    );
+}
+
+/// The workspace-rename modal: same shape as [`draw_tab_rename`], titled for a
+/// node. The on-disk folder is never touched; this edits the label only.
+pub(super) fn draw_ws_rename(
+    f: &mut RenderTarget,
+    area: Rect,
+    buf: &str,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
+    let modal = centered_rect(area, w, 6);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {}", cat.menu_rename),
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(buf.to_string(), Style::new().fg(t.accent).bold()),
+            Span::styled("▏", Style::new().fg(t.accent)),
+        ])),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
+    let bottom = inner.bottom().saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint_line(
+            &[("⏎", cat.act_save), ("esc", cat.act_cancel)],
+            t,
+        )),
+        Rect::new(inner.x, bottom, inner.width, 1),
+    );
+}
+
 // ── local render helpers (each modal module keeps its own, as elsewhere) ──
 
 fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {

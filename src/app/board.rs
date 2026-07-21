@@ -22,6 +22,7 @@ impl App {
             layout: TileLayout::new(placeholder),
             git: None,
             orch: true,
+            name: None,
         });
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;

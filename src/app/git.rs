@@ -34,6 +34,7 @@ impl App {
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
+            name: None,
         });
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;
@@ -620,6 +621,7 @@ mod tests {
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
+            name: None,
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -650,6 +652,7 @@ mod tests {
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
+            name: None,
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -697,6 +700,7 @@ mod tests {
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
+            name: None,
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
@@ -854,6 +858,7 @@ mod tests {
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
+            name: None,
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
         assert!(app.active_is_git());
@@ -900,6 +905,7 @@ mod tests {
             layout: TileLayout::new(placeholder),
             git: Some(Box::new(view)),
             orch: false,
+            name: None,
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 

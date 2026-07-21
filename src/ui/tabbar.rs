@@ -87,8 +87,21 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         // icon centers identically (a longer label left-aligns in the cell).
         let is_git = ws.tabs.get(i).is_some_and(|tb| tb.is_git());
         let is_orch = ws.tabs.get(i).is_some_and(|tb| tb.is_orch());
+        // A user-named pane tab (docs/28) shows its name; git/orch tabs are never
+        // named, so they keep their fixed label.
+        let name = ws.tabs.get(i).and_then(|tb| tb.name.as_deref());
         let title = |w: usize| {
-            if is_git {
+            if let Some(nm) = name {
+                // Truncate with an ellipsis to fit the cell, then center it (like
+                // the number) so the name has even padding instead of hugging the
+                // left edge.
+                let label: String = if nm.chars().count() > w {
+                    nm.chars().take(w.saturating_sub(1)).chain(['…']).collect()
+                } else {
+                    nm.to_string()
+                };
+                format!("{label:^w$}")
+            } else if is_git {
                 format!("{:^w$}", "⎇ git", w = w)
             } else if is_orch {
                 format!("{:^w$}", "◇ orch", w = w)
