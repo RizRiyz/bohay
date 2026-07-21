@@ -12,9 +12,30 @@ pub(super) type TabHits = (
     Option<Rect>,
 );
 
-pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) -> TabHits {
+pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) -> TabHits {
     // Tab bar background = pane background (the sidebar is the lighter one).
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
+
+    // When the sidebar is hidden its brand `«` toggle is gone, so surface a
+    // `»` (expand) at the tab-bar's left edge to bring the sidebar back. Tabs
+    // start after it. (When the sidebar is shown, its header owns the toggle.)
+    let tog_w = if app.sidebar_visible {
+        0
+    } else {
+        let r = Rect::new(area.x, area.y, 3, 1);
+        let hov = app
+            .hover
+            .is_some_and(|(c, rr)| c >= r.x && c < r.right() && rr == r.y);
+        let style = if hov {
+            Style::new().fg(t.crust).bg(t.accent).bold()
+        } else {
+            Style::new().fg(t.accent).bg(t.surface0).bold()
+        };
+        f.render_widget(Paragraph::new(Span::styled(" » ", style)), r);
+        app.sidebar_toggle_rect = Some(r);
+        3u16
+    };
+
     let ws = app.ws();
     let n = ws.tabs.len();
     let active = ws.active_tab;
@@ -28,7 +49,7 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
     const ARROW: u16 = 2;
     let plus_w: u16 = 3;
     let unit = CELL + GAP;
-    let left = area.x + 1;
+    let left = area.x + 1 + tog_w;
     let right = area.right();
     let total = right.saturating_sub(left);
 

@@ -125,11 +125,14 @@ pub(super) fn draw_sidebar(
         menu_w,
         1,
     );
-    // Brand (drop the version when it would collide with the wider Menu pill).
-    let mut brand = vec![
-        Span::styled("❯ ", Style::new().fg(t.accent).bold()),
-        Span::styled("bohay", Style::new().fg(t.text).bold()),
-    ];
+    // The `«` collapse button mirrors the tab-bar's `»` reopen button: a 3-cell
+    // pill at the sidebar's left edge (always visible, inverts on hover), set a
+    // column clear of the "bohay" wordmark so it never crowds the text. Click it
+    // (or ⌃Space b) to hide the sidebar; the `»` brings it back.
+    let toggle = Rect::new(area.x, area.y + 1, 3.min(area.width), 1);
+    app.sidebar_toggle_rect = Some(toggle);
+    // Wordmark first (2 leading spaces clear the pill), then the pill drawn on top.
+    let mut brand = vec![Span::styled("  bohay", Style::new().fg(t.text).bold())];
     if cx + 7 + 6 < menu.x {
         // `concat!`+`env!` bakes the crate version in at compile time (no per-frame
         // alloc), so the sidebar always matches the released version.
@@ -139,6 +142,12 @@ pub(super) fn draw_sidebar(
         ));
     }
     line_at(f, area.y + 1, Line::from(brand));
+    let chev_style = if over(toggle) {
+        Style::new().fg(t.crust).bg(t.accent).bold()
+    } else {
+        Style::new().fg(t.accent).bg(t.surface0).bold()
+    };
+    f.render_widget(Paragraph::new(Span::styled(" « ", chev_style)), toggle);
     let menu_hover = app
         .hover
         .is_some_and(|(c, r)| c >= menu.x && c < menu.right() && r == menu.y);

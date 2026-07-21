@@ -770,6 +770,70 @@ mod tests {
         assert!(text.contains("NORMAL"), "status mode missing");
     }
 
+    /// The bottom-left status button shows/hides the sidebar; hiding it also
+    /// clears the sidebar's stale click geometry so the old Menu spot can't fire.
+    #[test]
+    fn sidebar_toggle_button_shows_and_hides() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        thread::sleep(Duration::from_millis(100));
+
+        let (w, h) = (110u16, 32u16);
+        let render = |app: &mut App| -> String {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| ui::render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            buf.content().iter().map(|c| c.symbol()).collect()
+        };
+        let click = |app: &mut App, c: u16, r: u16| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: c,
+                row: r,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+
+        // Starts visible: header shows, and the brand `«` chevron (top-left of
+        // the sidebar) is the collapse toggle.
+        let text = render(&mut app);
+        assert!(text.contains("WORKSPACES"), "sidebar should start visible");
+        assert!(text.contains('«'), "brand collapse chevron shows");
+        let btn = app.sidebar_toggle_rect.expect("toggle placed");
+        assert_eq!(btn.y, 1, "toggle sits on the brand row");
+        assert!(btn.x < 4, "toggle near the top-left");
+        assert!(app.settings_icon_rect.is_some(), "menu present while shown");
+
+        // Click the chevron → sidebar hides and its stale click geometry clears.
+        click(&mut app, btn.x, btn.y);
+        assert!(!app.sidebar_visible, "click hides the sidebar");
+        let text = render(&mut app);
+        assert!(!text.contains("WORKSPACES"), "sidebar hidden after toggle");
+        assert!(
+            text.contains('»'),
+            "reopen expand chevron shows when hidden"
+        );
+        assert!(app.settings_icon_rect.is_none(), "stale menu rect cleared");
+        assert!(
+            app.agents_filter_rects.is_empty(),
+            "stale filter rects cleared"
+        );
+
+        // A reopen `»` now sits at the tab-bar's top-left corner.
+        let btn = app
+            .sidebar_toggle_rect
+            .expect("reopen toggle placed while hidden");
+        assert_eq!(
+            (btn.x, btn.y),
+            (0, 0),
+            "reopen toggle at the top-left corner"
+        );
+        click(&mut app, btn.x, btn.y);
+        assert!(app.sidebar_visible, "click shows the sidebar again");
+        assert!(render(&mut app).contains("WORKSPACES"), "sidebar restored");
+    }
+
     /// An absurdly small terminal renders the "enlarge" notice instead of
     /// degraded chrome — and no size, however tiny, panics a draw path.
     #[test]
