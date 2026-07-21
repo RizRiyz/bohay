@@ -1,0 +1,346 @@
+---
+// The /changelog page: every GitHub release rendered as a timeline. Release
+// notes are fetched from the GitHub API at build time and their Markdown bodies
+// are rendered with Astro's own pipeline, so this stays in sync with the repo's
+// Releases page with zero manual upkeep. Standalone dark page matching the
+// landing / compare look.
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
+import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource/ibm-plex-mono/600.css';
+import '@fontsource/ibm-plex-mono/700.css';
+import { createMarkdownProcessor } from '@astrojs/markdown-remark';
+import Logo from '../assets/logo.svg';
+
+const GITHUB = 'https://github.com/RizRiyz/bohay';
+const RELEASES = `${GITHUB}/releases`;
+const title = 'Changelog — bohay';
+const description =
+  'Every bohay release: new features, fixes, and changes, straight from the GitHub Releases page.';
+const ogImage = 'https://bohay.dev/og.png';
+
+// Fetch releases at build time; degrade gracefully to a link if the API is
+// unreachable or rate-limited (unauthenticated GitHub API allows 60 req/hr).
+let releases = [];
+try {
+  const res = await fetch('https://api.github.com/repos/RizRiyz/bohay/releases?per_page=100', {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'bohay-site' },
+  });
+  if (res.ok) releases = await res.json();
+} catch {
+  releases = [];
+}
+releases = (Array.isArray(releases) ? releases : []).filter((r) => !r.draft);
+
+// Render each release body's Markdown → HTML with Astro's markdown processor
+// (GFM), so it's styled and consistent with the rest of the site.
+const md = await createMarkdownProcessor({ gfm: true });
+const fmtDate = (s) =>
+  new Date(s).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+const entries = await Promise.all(
+  releases.map(async (r) => ({
+    tag: r.tag_name,
+    date: r.published_at ? fmtDate(r.published_at) : '',
+    url: r.html_url,
+    prerelease: !!r.prerelease,
+    html: (await md.render((r.body || '').trim() || '_No release notes._')).code,
+  }))
+);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="canonical" href="https://bohay.dev/changelog/" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://bohay.dev/changelog/" />
+    <meta property="og:site_name" content="bohay" />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+  </head>
+  <body>
+    <nav>
+      <div class="nav-inner">
+        <a class="brand" href="/">
+          <Logo width={28} height={28} class="mark" aria-hidden="true" />
+          <span>bohay</span>
+        </a>
+        <div class="nav-links">
+          <a href="/docs/">Docs</a>
+          <a href="/compare/">Compare</a>
+          <a href="/changelog/" aria-current="page">Changelog</a>
+          <a href={GITHUB} class="gh">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+              ><path
+                fill="currentColor"
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              ></path></svg
+            >
+            <span id="stars">GitHub</span>
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="page-hero">
+      <div class="glow" aria-hidden="true"></div>
+      <span class="eyebrow">Changelog</span>
+      <h1>What's new in bohay</h1>
+      <p>
+        Every release from new features, fixes, and changes pulled straight from GitHub, newest
+        first.
+      </p>
+      <div class="hero-cta">
+        <a class="btn" href={RELEASES}>All releases on GitHub →</a>
+      </div>
+    </header>
+
+    <section class="log">
+      {
+        entries.length === 0 ? (
+          <div class="empty">
+            <p>The full release history lives on GitHub.</p>
+            <a class="btn primary" href={RELEASES}>
+              View releases →
+            </a>
+          </div>
+        ) : (
+          <ol class="timeline">
+            {entries.map((e, i) => (
+              <li class="entry">
+                <div class="rail">
+                  <span class={i === 0 && !e.prerelease ? 'dot latest' : 'dot'} />
+                </div>
+                <article class="card">
+                  <div class="chead">
+                    <a class="version" href={e.url}>
+                      {e.tag}
+                    </a>
+                    {i === 0 && !e.prerelease && <span class="badge latest">Latest</span>}
+                    {e.prerelease && <span class="badge pre">Pre-release</span>}
+                    <time class="date">{e.date}</time>
+                  </div>
+                  <div class="notes" set:html={e.html} />
+                </article>
+              </li>
+            ))}
+          </ol>
+        )
+      }
+    </section>
+
+    <footer>
+      <div class="foot-inner">
+        <div class="foot-brand">
+          <Logo width={22} height={22} class="mark" aria-hidden="true" />
+          <span>bohay</span>
+          <span class="dim">by Riz</span>
+        </div>
+        <div class="foot-links">
+          <a href="/docs/">Docs</a>
+          <a href="/compare/">Compare</a>
+          <a href="/changelog/">Changelog</a>
+          <a href={GITHUB}>GitHub</a>
+          <a href="https://crates.io/crates/bohay">crates.io</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // Live star count (graceful: stays "GitHub" on failure).
+      fetch('https://api.github.com/repos/RizRiyz/bohay')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const el = document.getElementById('stars');
+          if (el && d?.stargazers_count != null) el.textContent = `★ ${d.stargazers_count}`;
+        })
+        .catch(() => {});
+    </script>
+
+    <style is:global>
+      :root {
+        --bg: #070709;
+        --bg2: #111116;
+        --line: #25252d;
+        --text: #e7e7ed;
+        --sub: #93939f;
+        --accent: #c6ff1a;
+        --amber: #e09a4d;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html { scroll-behavior: smooth; }
+      body {
+        background: var(--bg); color: var(--text);
+        font: 16px/1.65 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      a { color: inherit; text-decoration: none; }
+      h1, h2, h3, .brand, .foot-brand {
+        font-family: 'IBM Plex Mono', ui-monospace, 'JetBrains Mono Variable', monospace;
+        line-height: 1.14; letter-spacing: -0.045em;
+      }
+      section, header.page-hero { max-width: 1060px; margin: 0 auto; padding: 4rem 1.5rem; }
+      .dim { color: var(--sub); }
+      ::selection { background: #33450e; color: #e7e7ed; }
+
+      /* nav */
+      nav {
+        position: sticky; top: 0; z-index: 10; background: rgb(7 7 9 / 0.75);
+        backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+        border-bottom: 1px solid rgb(37 37 45 / 0.6);
+      }
+      .nav-inner {
+        display: flex; justify-content: space-between; align-items: center;
+        max-width: 1060px; margin: 0 auto; padding: 0.85rem 1.5rem;
+      }
+      .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.15rem; }
+      .mark { display: block; flex-shrink: 0; }
+      .nav-links {
+        display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.88rem;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -0.01em;
+      }
+      .nav-links a:hover { color: var(--text); }
+      .nav-links a[aria-current='page'] { color: var(--accent); }
+      .gh { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid var(--line); padding: 0.35rem 0.75rem; border-radius: 999px; }
+      .gh:hover { border-color: var(--accent); color: var(--accent); }
+
+      /* hero */
+      .page-hero { text-align: center; position: relative; padding-top: 4.5rem; padding-bottom: 1.5rem; }
+      .page-hero .glow {
+        position: absolute; inset: -20% 0 auto 0; height: 460px; pointer-events: none;
+        background: radial-gradient(ellipse 60% 55% at 50% 0%, rgb(198 255 26 / 0.09), transparent 70%);
+      }
+      .eyebrow { font-family: 'IBM Plex Mono', monospace; color: var(--accent); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase; position: relative; }
+      .page-hero h1 { font-size: clamp(2rem, 5.4vw, 3.1rem); font-weight: 700; margin-top: 0.6rem; position: relative; }
+      .page-hero p { color: var(--sub); max-width: 40rem; margin: 1.2rem auto 0; font-size: 1.08rem; position: relative; }
+      .hero-cta { margin-top: 1.6rem; position: relative; }
+
+      .btn {
+        display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1.35rem;
+        border-radius: 0.6rem; border: 1px solid var(--line); font-weight: 600; font-size: 0.92rem;
+        font-family: 'IBM Plex Mono', monospace; transition: border-color 0.15s, transform 0.15s, filter 0.15s;
+      }
+      .btn:hover { transform: translateY(-2px); border-color: var(--accent); color: var(--accent); }
+      .btn.primary { background: var(--accent); color: #0b0b0f; border-color: var(--accent); }
+      .btn.primary:hover { filter: brightness(1.08); color: #0b0b0f; }
+
+      /* timeline */
+      .log { max-width: 800px; padding-top: 1rem; }
+      .empty { text-align: center; color: var(--sub); display: grid; gap: 1.2rem; justify-items: center; padding: 3rem 0; }
+      .timeline { list-style: none; padding: 0; margin: 0; }
+      .entry { display: grid; grid-template-columns: 26px 1fr; gap: 1rem; }
+      .rail { position: relative; }
+      /* the vertical thread, drawn between dots */
+      .rail::before {
+        content: ''; position: absolute; left: 12px; top: 8px; bottom: -0.8rem; width: 2px;
+        background: var(--line);
+      }
+      .entry:last-child .rail::before {
+        bottom: auto; height: 26px;
+        background: linear-gradient(var(--line), transparent);
+      }
+      .dot {
+        position: absolute; left: 5px; top: 24px; width: 12px; height: 12px; border-radius: 50%;
+        background: var(--bg2); border: 2px solid #34343e;
+      }
+      .dot.latest {
+        background: var(--accent); border-color: var(--accent);
+        box-shadow: 0 0 0 4px rgb(198 255 26 / 0.16);
+      }
+      .card {
+        border: 1px solid var(--line); border-radius: 1rem;
+        background: linear-gradient(180deg, #131318, #0d0d12);
+        padding: 1.35rem 1.6rem 1.15rem; margin-bottom: 1.7rem;
+        transition: border-color 0.18s, transform 0.18s;
+      }
+      .card:hover { border-color: rgb(198 255 26 / 0.28); transform: translateY(-2px); }
+      .chead { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
+      .version {
+        font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 1.12rem;
+        color: var(--accent); letter-spacing: -0.02em;
+      }
+      .version:hover { text-decoration: underline; }
+      .badge {
+        font-family: 'IBM Plex Mono', monospace; font-size: 0.6rem; text-transform: uppercase;
+        letter-spacing: 0.09em; padding: 0.18rem 0.5rem; border-radius: 999px; line-height: 1;
+      }
+      .badge.latest { background: var(--accent); color: #0b0b0f; font-weight: 700; }
+      .badge.pre { border: 1px solid var(--amber); color: var(--amber); }
+      .date {
+        margin-left: auto; color: var(--sub); font-size: 0.8rem;
+        font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+      }
+
+      /* rendered release notes */
+      .notes { color: var(--text); font-size: 0.95rem; }
+      .notes > :first-child { margin-top: 0.35rem; }
+      .notes > :last-child { margin-bottom: 0; }
+      .notes h1, .notes h2, .notes h3, .notes h4, .notes h5 {
+        font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.76rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.09em; color: var(--sub);
+        margin: 1.35rem 0 0.6rem;
+      }
+      .notes p { color: var(--sub); margin: 0.5rem 0; line-height: 1.6; }
+      .notes strong { color: var(--text); font-weight: 600; }
+      .notes ul, .notes ol { list-style: none; padding: 0; margin: 0.35rem 0; }
+      .notes li {
+        position: relative; padding-left: 1.3rem; margin: 0.42rem 0; color: var(--sub);
+        line-height: 1.58;
+      }
+      .notes li::before {
+        content: ''; position: absolute; left: 0.2rem; top: 0.62em; width: 5px; height: 5px;
+        border-radius: 50%; background: var(--accent); opacity: 0.85;
+      }
+      .notes li strong { color: var(--text); }
+      .notes a {
+        color: var(--accent); border-bottom: 1px solid rgb(198 255 26 / 0.28);
+        transition: border-color 0.15s;
+      }
+      .notes a:hover { border-bottom-color: var(--accent); }
+      .notes code {
+        font-family: 'JetBrains Mono Variable', ui-monospace, monospace; font-size: 0.86em;
+        color: #d7ffb0; background: rgb(198 255 26 / 0.07);
+        border: 1px solid rgb(198 255 26 / 0.14); padding: 0.05rem 0.35rem; border-radius: 0.35rem;
+      }
+      .notes pre {
+        background: #0a0a0d; border: 1px solid var(--line); border-radius: 0.6rem;
+        padding: 0.9rem 1rem; overflow-x: auto; margin: 0.7rem 0;
+      }
+      .notes pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 0.85em; }
+      .notes hr { border: none; border-top: 1px solid var(--line); margin: 1.1rem 0; }
+      .notes blockquote {
+        border-left: 2px solid var(--line); padding-left: 0.9rem; margin: 0.6rem 0; color: var(--sub);
+      }
+
+      /* footer */
+      footer { border-top: 1px solid var(--line); margin-top: 2rem; }
+      .foot-inner {
+        max-width: 1060px; margin: 0 auto; padding: 2rem 1.5rem;
+        display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;
+      }
+      .foot-brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; }
+      .foot-brand .dim { font-weight: 400; font-size: 0.85rem; }
+      .foot-links { display: flex; gap: 1.3rem; color: var(--sub); font-size: 0.92rem; flex-wrap: wrap; }
+      .foot-links a:hover { color: var(--accent); }
+
+      @media (max-width: 760px) {
+        section, header.page-hero { padding: 3rem 1.25rem; }
+        .card { padding: 1.15rem 1.2rem 1rem; }
+        .nav-links { gap: 1rem; }
+      }
+    </style>
+  </body>
+</html>
