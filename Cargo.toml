@@ -1,6 +1,6 @@
 [package]
 name = "bohay"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 rust-version = "1.82"
 description = "Next-Gen Agents multiplexer"
