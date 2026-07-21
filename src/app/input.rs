@@ -141,6 +141,13 @@ impl App {
             }
             return;
         }
+        // The pane context menu (docs/28) likewise owns the mouse while open.
+        if self.pane_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.pane_menu_click(m.column, m.row); // an item, or dismiss
+            }
+            return;
+        }
         // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
         // any other click is swallowed (the centered modal owns the screen).
         if self.worktree_prompt.is_some() {
@@ -164,8 +171,9 @@ impl App {
         // Track which divider (if any) the cursor is over, for the hover
         // highlight (docs/27, RESIZE-4).
         self.update_hover_divider(m.column, m.row);
-        // Right-click a pane tab to rename it (docs/28), or a WORKSPACES row to
-        // open its context menu (rename / worktree / close).
+        // Right-click a pane tab to rename it (docs/28), a WORKSPACES row for its
+        // context menu (rename / worktree / close), or inside a pane for the pane
+        // menu (split / close).
         if let MouseEventKind::Down(MouseButton::Right) = m.kind {
             let (c, r) = (m.column, m.row);
             let hit =
@@ -174,6 +182,8 @@ impl App {
                 self.open_tab_rename(*i);
             } else if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_ws_menu(*i, c, r);
+            } else if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_pane_menu(*id, c, r); // no-op on a git/orch dashboard tab
             }
             return;
         }
@@ -686,6 +696,11 @@ impl App {
         // The workspace context menu / rename modal capture all input while open.
         if self.ws_menu.is_some() {
             self.handle_ws_menu_key(key);
+            return true;
+        }
+        // The pane context menu (docs/28) captures all input while open.
+        if self.pane_menu.is_some() {
+            self.handle_pane_menu_key(key);
             return true;
         }
         if self.ws_rename.is_some() {

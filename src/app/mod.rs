@@ -136,6 +136,37 @@ pub enum WsMenuItem {
     OpenOrch,
 }
 
+/// A right-click context menu **inside a pane**: split or close it. Opened by
+/// right-clicking anywhere in a pane's area.
+pub struct PaneMenu {
+    /// The right-clicked pane the actions target.
+    pub pane: PaneId,
+    /// Top-left corner of the popup (the click point, clamped on-screen).
+    pub anchor: (u16, u16),
+    /// Each visible item + its clickable rect, filled in by the renderer.
+    pub items: Vec<(PaneMenuItem, Rect)>,
+}
+
+/// An action offered by the pane context menu. `SplitVertical` puts the new pane
+/// side by side (a vertical divider, like `v`); `SplitHorizontal` stacks it (a
+/// horizontal divider, like `s`). `Divider` is a non-interactive separator.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PaneMenuItem {
+    SplitVertical,
+    SplitHorizontal,
+    Divider,
+    Close,
+}
+
+impl PaneMenuItem {
+    pub const ALL: &'static [PaneMenuItem] = &[
+        PaneMenuItem::SplitVertical,
+        PaneMenuItem::SplitHorizontal,
+        PaneMenuItem::Divider,
+        PaneMenuItem::Close,
+    ];
+}
+
 /// The workspace-rename modal: like [`TabRename`] but for a node's **label** (the
 /// folder on disk is never touched). Pre-filled with the current name.
 pub struct WsRename {
@@ -323,6 +354,8 @@ pub struct App {
     pub tab_rename: Option<TabRename>,
     /// The workspace right-click context menu, and the workspace-rename modal.
     pub ws_menu: Option<WsMenu>,
+    /// Active pane context menu (right-click inside a pane); `None` when closed.
+    pub pane_menu: Option<PaneMenu>,
     pub ws_rename: Option<WsRename>,
     /// Clickable ⏎-commit / esc-cancel footer buttons of whichever text-input
     /// modal is open (worktree prompt / tab rename / workspace rename), set each
@@ -498,6 +531,7 @@ impl App {
             worktree_prompt: None,
             tab_rename: None,
             ws_menu: None,
+            pane_menu: None,
             ws_rename: None,
             modal_commit_rect: None,
             modal_cancel_rect: None,
@@ -742,6 +776,7 @@ impl App {
             worktree_prompt: None,
             tab_rename: None,
             ws_menu: None,
+            pane_menu: None,
             ws_rename: None,
             modal_commit_rect: None,
             modal_cancel_rect: None,
@@ -1152,6 +1187,57 @@ impl App {
     pub fn handle_ws_menu_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.ws_menu = None;
+        }
+    }
+
+    /// Open the pane context menu (split / close) for `pane`, anchored at the
+    /// click. No-op on a git/orch dashboard tab (no real panes to act on).
+    pub fn open_pane_menu(&mut self, pane: PaneId, col: u16, row: u16) {
+        if self.active_is_git() || self.active_is_orch() {
+            return;
+        }
+        self.pane_menu = Some(PaneMenu {
+            pane,
+            anchor: (col, row),
+            items: Vec::new(),
+        });
+    }
+
+    /// A click inside the open pane menu: run the hit item, else dismiss.
+    pub fn pane_menu_click(&mut self, col: u16, row: u16) {
+        let hit = self.pane_menu.as_ref().and_then(|m| {
+            m.items
+                .iter()
+                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .map(|(it, _)| *it)
+        });
+        match hit {
+            Some(PaneMenuItem::Divider) => {} // non-interactive; keep the menu open
+            Some(it) => self.pane_menu_action(it),
+            None => self.pane_menu = None, // click outside dismisses
+        }
+    }
+
+    /// Run a pane context-menu action on its target pane, then close the menu.
+    pub fn pane_menu_action(&mut self, item: PaneMenuItem) {
+        let Some(pane) = self.pane_menu.as_ref().map(|m| m.pane) else {
+            return;
+        };
+        self.pane_menu = None;
+        // Act on the right-clicked pane, not whatever was focused before.
+        self.layout_mut().focus = pane;
+        match item {
+            PaneMenuItem::Divider => {}
+            PaneMenuItem::SplitVertical => self.split(Axis::Col), // side by side
+            PaneMenuItem::SplitHorizontal => self.split(Axis::Row), // stacked
+            PaneMenuItem::Close => self.close_pane(pane),
+        }
+    }
+
+    /// Key handling while the pane context menu is open: `Esc` closes it.
+    pub fn handle_pane_menu_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.pane_menu = None;
         }
     }
 
@@ -2239,6 +2325,52 @@ mod tests {
         app.handle_event(down);
         assert!(app.resize_drag.is_none(), "✕ click did not grab a divider");
         assert_eq!(app.layout().len(), 1, "✕ click closed the pane");
+    }
+
+    #[test]
+    fn pane_menu_splits_closes_and_skips_dashboards() {
+        let _env = crate::persist::test_env("pane-menu");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        // Right-click opens the menu; a render fills its clickable item rects.
+        let pane = app.layout().focus;
+        app.open_pane_menu(pane, 6, 6);
+        assert!(app.pane_menu.is_some(), "menu opened");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Clicking "Split vertical" adds a pane and closes the menu.
+        let (item, rect) = app.pane_menu.as_ref().unwrap().items[0];
+        assert_eq!(item, PaneMenuItem::SplitVertical);
+        let before = app.layout().len();
+        app.pane_menu_click(rect.x + 1, rect.y);
+        assert!(app.pane_menu.is_none(), "menu closed after a click");
+        assert_eq!(
+            app.layout().len(),
+            before + 1,
+            "split vertical added a pane"
+        );
+
+        // Split horizontal and close, via the action path.
+        app.open_pane_menu(app.layout().focus, 6, 6);
+        app.pane_menu_action(PaneMenuItem::SplitHorizontal);
+        assert_eq!(
+            app.layout().len(),
+            before + 2,
+            "split horizontal added a pane"
+        );
+        app.open_pane_menu(app.layout().focus, 6, 6);
+        app.pane_menu_action(PaneMenuItem::Close);
+        assert_eq!(app.layout().len(), before + 1, "close removed a pane");
+
+        // A dashboard tab has no panes to act on — the menu never opens there.
+        app.run_cmd(crate::app::keys::Cmd::OpenBoard);
+        app.open_pane_menu(app.layout().focus, 6, 6);
+        assert!(app.pane_menu.is_none(), "no pane menu on the orch board");
     }
 
     #[test]
