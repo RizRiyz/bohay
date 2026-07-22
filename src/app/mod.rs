@@ -3998,6 +3998,49 @@ mod tests {
         );
     }
 
+    // docs/07 regression: switching tabs / clicking into an agent pane makes the
+    // agent repaint, and that repaint rarely contains the agent's own name. The
+    // pane's identity has to stay sticky, or it gets re-classified as a plain
+    // shell and the repaint's output reads as "working".
+    #[test]
+    fn repaint_without_the_agent_name_stays_idle() {
+        use crate::ui::theme::State;
+        let _env = crate::persist::test_env("repaint-identity");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+
+        // The pane is a known agent (as a hook or disk discovery would bind it)…
+        {
+            let s = app.status.get_mut(&id).unwrap();
+            s.agent = "claude".into();
+            s.state = State::Idle;
+        }
+        // …and it repaints a prompt box that never says "claude" and has no
+        // working marker — exactly what a tab switch produces.
+        if let Some(p) = app.panes.get(&id) {
+            if let Ok(mut e) = p.engine.lock() {
+                let mut buf = vec![b'\n'; 20];
+                buf.extend_from_slice(b"> \r\n  ? for shortcuts\r\n");
+                e.advance(&buf);
+            }
+        }
+        let now = std::time::Instant::now();
+        app.status.get_mut(&id).unwrap().last_activity = now; // the repaint is output
+
+        app.detect_tick(now);
+        assert_eq!(
+            app.status.get(&id).unwrap().state,
+            State::Idle,
+            "a repaint must not read as the agent working"
+        );
+        assert_eq!(
+            app.status.get(&id).unwrap().agent,
+            "claude",
+            "and the pane keeps its identity"
+        );
+    }
+
     // docs/07: the same recent output reads Idle while the user is typing (echo)
     // but Working when the agent is generating (no recent input).
     #[test]
@@ -4230,8 +4273,28 @@ mod tests {
         app.layout_mut().focus = bogus;
 
         let t0 = std::time::Instant::now();
-        // Make the pane read raw-Idle (stale output) relative to `base`.
+        // Drive the state through the *real* detection path. An agent is Working
+        // only while a marker is on screen — raw output does not imply work (see
+        // `repaint_without_the_agent_name_stays_idle`) — so paint and clear a
+        // spinner rather than just poking `last_activity`.
+        // Newlines scroll the previous marker away and land the new text in the
+        // bottom rows, which is the region detection actually scans.
+        let paint = |app: &App, text: &str| {
+            if let Some(p) = app.panes.get(&id) {
+                if let Ok(mut e) = p.engine.lock() {
+                    let mut buf = vec![b'\n'; 30];
+                    buf.extend_from_slice(text.as_bytes());
+                    e.advance(&buf);
+                }
+            }
+        };
+        let go_working = |app: &mut App, base: std::time::Instant| {
+            paint(app, "⠋ Thinking… (esc to interrupt)\r\n");
+            app.status.get_mut(&id).unwrap().last_activity = base;
+        };
+        // Marker gone + stale output → the pane reads raw-Idle.
         let go_quiet = |app: &mut App, base: std::time::Instant| {
+            paint(app, "> \r\n");
             app.status.get_mut(&id).unwrap().last_activity =
                 base - ACTIVITY_WINDOW - Duration::from_millis(50);
         };
@@ -4262,7 +4325,7 @@ mod tests {
         // pauses from ringing).
         app.pending_sound = false;
         let t1 = t0 + QUIET_DWELL + Duration::from_millis(300);
-        app.status.get_mut(&id).unwrap().last_activity = t1; // fresh → Working
+        go_working(&mut app, t1); // spinner back on screen → Working
         app.detect_tick(t1); // commits Working instantly
         assert_eq!(
             state(&app),

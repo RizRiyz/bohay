@@ -77,12 +77,30 @@ impl App {
                 .get(&id)
                 .map(|s| now.duration_since(s.last_input) < ACTIVITY_WINDOW)
                 .unwrap_or(false);
+            // What this pane is already known to be: the last resolved agent, or
+            // the one a hook/disk-discovery bound to it. Keeps identity stable
+            // across frames where the agent's UI doesn't show its own name.
+            let known = self
+                .status
+                .get(&id)
+                .map(|s| {
+                    if detect::is_agent(&s.agent) {
+                        s.agent.clone()
+                    } else {
+                        s.agent_session
+                            .as_ref()
+                            .map(|a| a.agent.clone())
+                            .unwrap_or_default()
+                    }
+                })
+                .unwrap_or_default();
             let det = detect::classify(
                 title.as_deref(),
                 &bottom,
                 recent,
                 recent_input,
                 &base,
+                &known,
                 &self.manifests,
             );
 

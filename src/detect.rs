@@ -425,19 +425,32 @@ impl Regions {
 /// Classify a pane from its title, bottom-buffer text, whether it produced
 /// output recently, whether the user typed into it recently, and the active
 /// rule set. `base_command` is the spawned program, used as a fallback label.
+#[allow(clippy::too_many_arguments)]
 pub fn classify(
     title: Option<&str>,
     bottom: &str,
     recent_activity: bool,
     recent_input: bool,
     base_command: &str,
+    known_agent: &str,
     manifests: &Manifests,
 ) -> Detection {
     let regions = Regions {
         screen: bottom.to_lowercase(),
         title: title.map(|t| t.to_lowercase()).unwrap_or_default(),
     };
-    let agent = detect_agent(title, &regions.screen).unwrap_or_else(|| base_command.to_string());
+    // Identity, most reliable first: the name on screen right now, else what this
+    // pane is *already known* to be, else the spawned command.
+    //
+    // The middle case matters: an agent's UI does not print its own name on every
+    // frame — Claude Code's bottom rows are a prompt box and a model label. So a
+    // repaint (switching tabs, clicking into the pane, resizing) would otherwise
+    // resolve to the bare shell, fall into the plain-shell branch below, and read
+    // the repaint's output as work. `known_agent` keeps the pane's identity
+    // sticky across those frames.
+    let agent = detect_agent(title, &regions.screen)
+        .or_else(|| is_agent(known_agent).then(|| known_agent.to_string()))
+        .unwrap_or_else(|| base_command.to_string());
 
     // A recognised agent is *working* only on positive evidence — a spinner or
     // an on-screen generating hint matched by a rule. Its output alone proves
@@ -485,6 +498,7 @@ mod tests {
             bottom,
             activity,
             input,
+            "claude",
             "claude",
             &Manifests::builtin(),
         )
@@ -560,6 +574,7 @@ mod tests {
             true,
             false,
             "zsh",
+            "",
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Working);
@@ -575,6 +590,7 @@ mod tests {
             true,
             false,
             "kimi",
+            "kimi",
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Working);
@@ -589,14 +605,36 @@ mod tests {
             true,
             false,
             "kimi",
+            "kimi",
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Blocked);
     }
 
+    // An agent's UI does not print its own name on every frame. Switching tabs or
+    // clicking into the pane makes it repaint, and that repaint must not
+    // re-classify a known agent as a plain shell.
+    #[test]
+    fn known_agent_stays_idle_when_its_name_is_off_screen() {
+        let d = classify(
+            None,                    // no OSC title
+            "> \n  ? for shortcuts", // repaint: no agent name, no markers
+            true,                    // the repaint produced output
+            false,                   // and the user did not type
+            "zsh",                   // launched through a shell
+            "claude",                // but the pane is KNOWN to be claude
+            &Manifests::builtin(),
+        );
+        assert_eq!(
+            d.state,
+            State::Idle,
+            "a repaint with no marker must not read as working"
+        );
+    }
+
     #[test]
     fn quiet_is_idle() {
-        let d = classify(None, "$ ", false, false, "zsh", &Manifests::builtin());
+        let d = classify(None, "$ ", false, false, "zsh", "", &Manifests::builtin());
         assert_eq!(d.state, State::Idle);
         assert_eq!(d.agent, "zsh");
     }
@@ -621,6 +659,7 @@ mod tests {
             true,
             false,
             "claude",
+            "claude",
             &m,
         );
         assert_eq!(d.state, State::Blocked, "user rule applies");
@@ -630,6 +669,7 @@ mod tests {
             "here is my custom prompt >",
             true,
             false,
+            "codex",
             "codex",
             &m,
         );
