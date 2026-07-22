@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use ratatui::crossterm::event::{
     read as read_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-    EnableMouseCapture, Event,
+    EnableMouseCapture, Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::DefaultTerminal;
@@ -85,10 +86,36 @@ pub(crate) fn install_tui_panic_hook() {
         let _ = execute!(
             std::io::stdout(),
             DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            PopKeyboardEnhancementFlags
         );
         prev(info);
     }));
+}
+
+/// Ask the host terminal to report **modified keys unambiguously** (the Kitty
+/// keyboard protocol, via crossterm's `DISAMBIGUATE_ESCAPE_CODES`).
+///
+/// Legacy terminal encoding has no room for modifiers on `Enter`: the terminal
+/// sends a bare `CR` for Enter *and* Shift+Enter, so bohay literally cannot tell
+/// them apart and an agent's "new line, don't submit" key never works. With this
+/// pushed, a capable terminal (Ghostty, Kitty, WezTerm, foot, rio, recent
+/// iTerm2) reports `Shift+Enter` as its own key, which `encode_key` forwards to
+/// the pane as `ESC CR`.
+///
+/// Only `DISAMBIGUATE_ESCAPE_CODES` is requested — deliberately *not*
+/// `REPORT_EVENT_TYPES` (key-release events) or `REPORT_ALL_KEYS_AS_ESCAPE_CODES`
+/// (which would stop plain text arriving as `Char`). Pushed only when the
+/// terminal advertises support, so nothing is emitted into a terminal that would
+/// print it as garbage, and popped on teardown (including the panic hook).
+pub(crate) fn push_key_protocol() {
+    use ratatui::crossterm::terminal::supports_keyboard_enhancement;
+    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
 }
 
 /// Raise a desktop notification for terminals that show one (iTerm2, etc.).
@@ -309,10 +336,12 @@ fn run_local() -> Result<()> {
         EnableMouseCapture,
         crossterm::terminal::SetTitle(window_title())
     );
+    push_key_protocol();
     install_tui_panic_hook();
     let result = run(&mut terminal);
     let _ = execute!(
         std::io::stdout(),
+        PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         DisableBracketedPaste
     );

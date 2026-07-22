@@ -236,6 +236,20 @@ impl Tab {
     }
 }
 
+/// The "what's running here?" overlay for one pane (click its title bar).
+///
+/// An agent's own UI elides long commands (`Bash(cargo test …)`) and those
+/// characters never reach bohay, so the *screen* can't be expanded. The OS still
+/// knows the real argv, and bohay owns the pane's child pid — so this reads the
+/// process tree instead, and shows the command in full.
+pub struct CmdInspect {
+    pub pane: PaneId,
+    pub cwd: PathBuf,
+    /// Snapshot taken when the overlay opened (and on `r`), never per frame.
+    pub procs: Vec<crate::platform::ProcInfo>,
+    pub scroll: usize,
+}
+
 /// The tab-rename modal (docs/28): the tab being renamed + its editable buffer,
 /// pre-filled with the current name. Opened by right-clicking a pane tab.
 pub struct TabRename {
@@ -288,6 +302,8 @@ pub struct PaneMenu {
 pub enum PaneMenuItem {
     SplitVertical,
     SplitHorizontal,
+    /// "What's running here?" — the OS process tree for this pane (docs/07).
+    RunningCmd,
     Divider,
     Close,
 }
@@ -296,6 +312,7 @@ impl PaneMenuItem {
     pub const ALL: &'static [PaneMenuItem] = &[
         PaneMenuItem::SplitVertical,
         PaneMenuItem::SplitHorizontal,
+        PaneMenuItem::RunningCmd,
         PaneMenuItem::Divider,
         PaneMenuItem::Close,
     ];
@@ -536,6 +553,12 @@ pub struct App {
     pub picker_rects: Vec<(usize, Rect)>,
     /// Whether the keyboard-shortcut cheat-sheet overlay is open (`Ctrl+Space ?`).
     pub help_open: bool,
+    /// The "what is actually running in this pane?" overlay (docs/07): a
+    /// snapshot of the pane's process tree, taken once when it opens. Click a
+    /// pane's title to open it. `None` = closed.
+    pub cmd_inspect: Option<CmdInspect>,
+    /// Clickable pane-title strips, set by the renderer each frame.
+    pub pane_title_rects: Vec<(PaneId, Rect)>,
     /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
     /// open, holding the branch being typed.
     pub worktree_prompt: Option<String>,
@@ -741,6 +764,8 @@ impl App {
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
+            cmd_inspect: None,
+            pane_title_rects: Vec::new(),
             worktree_prompt: None,
             tab_rename: None,
             ws_menu: None,
@@ -1026,6 +1051,8 @@ impl App {
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
+            cmd_inspect: None,
+            pane_title_rects: Vec::new(),
             worktree_prompt: None,
             tab_rename: None,
             ws_menu: None,
@@ -1670,6 +1697,7 @@ impl App {
             PaneMenuItem::Divider => {}
             PaneMenuItem::SplitVertical => self.split(Axis::Col), // side by side
             PaneMenuItem::SplitHorizontal => self.split(Axis::Row), // stacked
+            PaneMenuItem::RunningCmd => self.open_cmd_inspect(pane),
             PaneMenuItem::Close => self.close_pane(pane),
         }
     }
@@ -3598,6 +3626,51 @@ mod tests {
 
     // A working agent shows an animated rotating-circle spinner in the AGENTS
     // list dot slot (not the static `●`), advancing with `App.spinner`.
+    // Clicking a pane's title opens the running-command overlay. The point is
+    // that the command comes from the OS, not the screen: an agent's own UI
+    // elides long commands and those characters never reach bohay at all.
+    #[test]
+    fn clicking_a_pane_title_shows_the_real_command() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("cmd-inspect");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        // Titles (and borders) only render on split panes, so split first — the
+        // single-pane case is covered by the pane context menu instead.
+        app.split(Axis::Col);
+        let id = app.layout().focus;
+        // Render once so the title strips are registered as click targets.
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let (_, title) = *app
+            .pane_title_rects
+            .iter()
+            .find(|(pid, _)| *pid == id)
+            .expect("the focused pane has a clickable title");
+
+        assert!(app.cmd_inspect.is_none());
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: title.x + 1,
+            row: title.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let c = app.cmd_inspect.as_ref().expect("the overlay opened");
+        assert_eq!(c.pane, id);
+        // The pane's own shell is the root of the tree, with its real argv.
+        assert!(
+            c.procs.first().is_some_and(|p| p.depth == 0),
+            "the pane's shell is the root: {:?}",
+            c.procs
+        );
+        // It renders, and any key dismisses it.
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        app.handle_event(key('q', KeyModifiers::NONE));
+        assert!(app.cmd_inspect.is_none(), "any key closes the overlay");
+    }
+
     #[test]
     fn working_agent_shows_spinner() {
         use ratatui::{backend::TestBackend, Terminal};

@@ -11,7 +11,8 @@ pub(super) fn draw_pane_titles(
     focus: PaneId,
     app: &App,
     t: &Theme,
-) {
+) -> Vec<(PaneId, Rect)> {
+    let mut title_rects = Vec::new();
     for (id, rect) in rects {
         if rect.width < 8 || rect.height < 2 {
             continue;
@@ -38,10 +39,10 @@ pub(super) fn draw_pane_titles(
             ),
             Span::styled(path, Style::new().fg(path_fg).bg(bg)),
         ]);
-        f.render_widget(
-            Paragraph::new(title),
-            Rect::new(rect.x + 1, rect.y, text_w, 1),
-        );
+        let title_rect = Rect::new(rect.x + 1, rect.y, text_w, 1);
+        f.render_widget(Paragraph::new(title), title_rect);
+        // Clicking the title opens the running-command overlay.
+        title_rects.push((*id, title_rect));
         if focused {
             f.render_widget(
                 Paragraph::new(Span::styled(
@@ -52,6 +53,7 @@ pub(super) fn draw_pane_titles(
             );
         }
     }
+    title_rects
 }
 
 // ── panes ─────────────────────────────────────────────────────────────────

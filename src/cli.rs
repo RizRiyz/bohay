@@ -329,6 +329,24 @@ fn doctor() -> i32 {
         }
     }
 
+    // Whether this terminal can tell Shift+Enter from Enter. Legacy encoding
+    // sends a bare CR for both, so an agent's "new line, don't submit" key only
+    // works where the terminal speaks the progressive keyboard protocol.
+    println!();
+    match keyboard_protocol_status() {
+        KeyProto::InsidePane => {
+            println!("  · keys    run `bohay doctor` outside a bohay pane to test your terminal");
+        }
+        KeyProto::Supported => {
+            println!("  ✓ keys    Shift+Enter works (terminal reports modified keys)");
+        }
+        KeyProto::Unsupported => {
+            println!("  ✗ keys    Shift+Enter can't be distinguished from Enter here");
+            println!("           ↳ use Option+Enter instead, or switch to a terminal with");
+            println!("             the keyboard protocol (Ghostty · Kitty · WezTerm · iTerm2)");
+        }
+    }
+
     println!();
     if missing_git {
         println!("Tip: install `git` to use the git tab & worktrees. Everything else works now.");
@@ -336,6 +354,34 @@ fn doctor() -> i32 {
         println!("All set — you're good to go. ✓");
     }
     0
+}
+
+enum KeyProto {
+    Supported,
+    Unsupported,
+    /// Queried from inside a bohay pane, which answers for *bohay's* PTY rather
+    /// than the real terminal — so the result would be misleading.
+    InsidePane,
+}
+
+/// Ask the terminal whether it supports progressive keyboard enhancement. The
+/// query needs raw mode (crossterm writes a request and reads the reply), so it
+/// is enabled just for the probe and always restored.
+fn keyboard_protocol_status() -> KeyProto {
+    use ratatui::crossterm::terminal;
+    if std::env::var_os("BOHAY_ENV").is_some() {
+        return KeyProto::InsidePane;
+    }
+    let raw = terminal::enable_raw_mode().is_ok();
+    let supported = matches!(terminal::supports_keyboard_enhancement(), Ok(true));
+    if raw {
+        let _ = terminal::disable_raw_mode();
+    }
+    if supported {
+        KeyProto::Supported
+    } else {
+        KeyProto::Unsupported
+    }
 }
 
 /// `bohay module search [<query>]` — list modules published to the

@@ -154,6 +154,89 @@ pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+/// One process running under a pane, for the "what is actually running?" overlay.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcInfo {
+    pub pid: u32,
+    /// Nesting under the pane's own shell (0 = the shell itself).
+    pub depth: u16,
+    /// The full command line, exactly as the OS has it — never truncated.
+    pub command: String,
+}
+
+/// Every process running under `root` (inclusive), depth-first, newest branch
+/// last. This is the honest answer to "what command is this agent running?":
+/// an agent's own UI usually *elides* long commands (`Bash(cargo test …)`), and
+/// those characters never reach bohay, so the screen simply cannot be expanded.
+/// The OS still knows the real argv, and bohay owns the pane's child pid.
+///
+/// **Call on demand only** (opening the overlay), never per frame: it shells out
+/// to `ps` once and walks the result. Empty on unsupported platforms, and on any
+/// failure — the caller degrades to showing just the pane's own command.
+#[cfg(unix)]
+pub fn process_tree(root: u32) -> Vec<ProcInfo> {
+    use std::collections::HashMap;
+    let out = match std::process::Command::new("ps")
+        .args(["-Ao", "pid=,ppid=,args="])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out);
+    // pid → (ppid, command), plus a child index so we can walk the tree.
+    let mut cmd: HashMap<u32, String> = HashMap::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
+            continue;
+        };
+        // Everything after the two numeric columns is the command, spaces intact.
+        let rest = line
+            .splitn(3, |c: char| c.is_whitespace())
+            .nth(2)
+            .unwrap_or("")
+            .trim_start();
+        if rest.is_empty() {
+            continue;
+        }
+        cmd.insert(pid, rest.to_string());
+        children.entry(ppid).or_default().push(pid);
+    }
+    let mut out = Vec::new();
+    // Iterative DFS so a pathological tree can't blow the stack; the visited set
+    // makes a cyclic/reparented table (pid reuse) terminate.
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![(root, 0u16)];
+    while let Some((pid, depth)) = stack.pop() {
+        if !seen.insert(pid) || out.len() >= 64 {
+            continue;
+        }
+        if let Some(c) = cmd.get(&pid) {
+            out.push(ProcInfo {
+                pid,
+                depth,
+                command: c.clone(),
+            });
+        }
+        if let Some(kids) = children.get(&pid) {
+            for &k in kids.iter().rev() {
+                stack.push((k, depth.saturating_add(1)));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+pub fn process_tree(_root: u32) -> Vec<ProcInfo> {
+    Vec::new()
+}
+
 /// Raise the OS timer resolution so the event loop's timed waits (`recv_timeout`,
 /// `thread::sleep`) actually run at their intended cadence. Windows' default
 /// scheduler tick is ~15.6 ms, which quantizes those waits and makes the render
@@ -191,6 +274,39 @@ extern "system" {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn process_tree_finds_this_process_and_its_children() {
+        // Our own pid must resolve, with its full command line intact.
+        let me = std::process::id();
+        let tree = super::process_tree(me);
+        assert!(!tree.is_empty(), "the root process itself is listed");
+        let root = &tree[0];
+        assert_eq!(root.pid, me);
+        assert_eq!(root.depth, 0);
+        assert!(!root.command.is_empty(), "the command line is captured");
+
+        // A child shows up nested under it, with its arguments unabridged —
+        // the whole point of reading this from the OS instead of the screen.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let tree = super::process_tree(me);
+        let found = tree
+            .iter()
+            .find(|p| p.pid == child.id())
+            .expect("the child is in the tree");
+        assert!(found.depth >= 1, "the child nests under us");
+        assert!(
+            found.command.contains("sleep") && found.command.contains("30"),
+            "full argv, not truncated: {:?}",
+            found.command
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[test]
     fn run_then_interactive_covers_shell_families() {
         // POSIX family: -c "cmd; exec 'shell'".

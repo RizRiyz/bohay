@@ -552,12 +552,16 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         Span::styled(agent, name_style),
                     ]),
                 );
+                // Row 2: project · tab, styled exactly like a workspace's path
+                // row. It was pinned to `overlay0`, which lands on `sel_bg` for
+                // the focused row and is then all but unreadable — the same
+                // reason the workspaces dock brightens its path when active.
                 line_at(
                     f,
                     y + 1,
                     Line::from(Span::styled(
                         format!("  {} · tab {}", wsname, ti + 1),
-                        Style::new().fg(t.overlay0),
+                        Style::new().fg(if focused { t.subtext0 } else { t.overlay0 }),
                     )),
                 );
                 if focused {
@@ -699,6 +703,45 @@ mod tests {
     // start at the same column no matter which state is shown — and, for a
     // working agent, at every frame of the spinner. Otherwise the row visibly
     // shifts as the icon animates.
+    /// The fg colour of the first cell of the row containing `needle`.
+    fn fg_of_row(term: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
+        let buf = term.backend().buffer();
+        for r in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" "))
+                .collect();
+            if let Some(i) = row.find(needle) {
+                return buf.cell((i as u16, r)).map(|c| c.style().fg.unwrap());
+            }
+        }
+        None
+    }
+
+    // The focused agent's "project · tab N" line sits on the selection
+    // background, so it must use the same readable colour the workspaces dock
+    // gives its path row. Pinned to `overlay0` it was almost invisible on green.
+    #[test]
+    fn focused_agent_meta_line_is_readable() {
+        let _env = crate::persist::test_env("agent-meta-colour");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let id = app.layout().focus;
+        app.status.get_mut(&id).unwrap().agent = "claude".into();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let t = crate::ui::theme::by_name(&app.config.theme);
+        let meta = fg_of_row(&term, "· tab 1").expect("the agent meta row is drawn");
+        assert_eq!(
+            meta, t.subtext0,
+            "the focused agent's meta line must match the workspace path colour"
+        );
+        assert_ne!(
+            meta, t.overlay0,
+            "overlay0 is unreadable on the selection bg"
+        );
+    }
+
     #[test]
     fn agent_state_icons_keep_the_label_aligned() {
         use crate::ui::theme::State;

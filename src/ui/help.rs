@@ -80,7 +80,7 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) 
 
 // ── local render helpers (each modal module keeps its own, as elsewhere) ──
 
-fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
+pub(super) fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect::new(
@@ -91,7 +91,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
+pub(super) fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -102,7 +102,7 @@ fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
     }
 }
 
-fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
+pub(super) fn hline(f: &mut RenderTarget, x: u16, y: u16, w: u16, t: &Theme) {
     let buf = f.buffer_mut();
     for i in 0..w {
         buf[(x + i, y)]

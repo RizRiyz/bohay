@@ -183,6 +183,7 @@ fn pane_label(it: PaneMenuItem, cat: &Catalog) -> String {
     match it {
         PaneMenuItem::SplitVertical => cat.menu_split_vertical.to_string(),
         PaneMenuItem::SplitHorizontal => cat.menu_split_horizontal.to_string(),
+        PaneMenuItem::RunningCmd => cat.menu_running_cmd.to_string(),
         PaneMenuItem::Divider => String::new(),
         PaneMenuItem::Close => cap_first(cat.act_close),
     }

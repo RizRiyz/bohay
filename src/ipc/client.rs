@@ -43,10 +43,14 @@ where
         EnableMouseCapture,
         crossterm::terminal::SetTitle(crate::window_title())
     );
+    // Let the terminal report Shift+Enter et al. as distinct keys, so agents get
+    // a real "new line" key instead of a bare CR (see `push_key_protocol`).
+    crate::push_key_protocol();
     crate::install_tui_panic_hook();
     let result = run_inner(reader, writer, &mut terminal);
     let _ = execute!(
         std::io::stdout(),
+        crossterm::event::PopKeyboardEnhancementFlags,
         DisableMouseCapture,
         DisableBracketedPaste
     );

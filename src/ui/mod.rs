@@ -54,6 +54,7 @@ impl<'a> RenderTarget<'a> {
 
 mod board;
 mod borders;
+mod cmdinfo;
 mod git;
 mod help;
 mod menu;
@@ -205,6 +206,7 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     // A git tab / orchestration board fills the pane area with a dashboard
     // instead of terminals.
     let mut git_section_rects = Vec::new();
+    let mut title_rects: Vec<(PaneId, Rect)> = Vec::new();
     let cursor = if app.active_is_orch() {
         app.orch_area = pane_area;
         // Each task's live worker state (detection) rides along on its row.
@@ -243,12 +245,13 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         if bordered {
             borders::render_pane_borders(f, &rects, focus, app.hover_divider.as_ref(), &t);
             if app.config.layout.show_titles {
-                panes::draw_pane_titles(f, &rects, focus, app, &t);
+                title_rects = panes::draw_pane_titles(f, &rects, focus, app, &t);
             }
         }
         cursor
     };
     app.git_section_rects = git_section_rects;
+    app.pane_title_rects = title_rects;
     // Per-pane content rects so mouse drags map to grid cells for text selection
     // (a git tab has no selectable terminal panes).
     app.pane_content_rects = if app.active_is_git() || app.active_is_orch() {
@@ -291,6 +294,10 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     // The keyboard cheat-sheet overlay draws on top of everything.
     if app.help_open {
         help::draw_help(f, area, app, &t);
+    }
+    // The running-command overlay (click a pane title) draws above that.
+    if let Some(c) = app.cmd_inspect.as_ref() {
+        cmdinfo::draw(f, area, c, &t);
     }
     // Text-input modals: each returns the rects of its clickable ⏎/esc footer
     // hints (or `None` while an error occupies the line), stashed so the mouse

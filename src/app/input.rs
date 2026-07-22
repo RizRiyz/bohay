@@ -102,6 +102,24 @@ impl App {
             }
             return;
         }
+        // The running-command overlay owns the mouse while open.
+        if self.cmd_inspect.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => self.close_cmd_inspect(),
+                MouseEventKind::ScrollUp => {
+                    if let Some(c) = self.cmd_inspect.as_mut() {
+                        c.scroll = c.scroll.saturating_sub(2);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(c) = self.cmd_inspect.as_mut() {
+                        c.scroll += 2;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         // While the Settings modal is open it owns the mouse: clicks hit the
         // modal (or dismiss it); everything else is swallowed.
         if self.settings.is_some() {
@@ -396,6 +414,18 @@ impl App {
         // The focused pane's ✕ button closes the active pane.
         if self.pane_close_rect.is_some_and(hit) {
             self.close_pane(self.layout().focus);
+            return;
+        }
+        // Clicking a pane's title strip opens the running-command overlay — the
+        // full argv from the OS, since an agent's on-screen `Bash(… …)` is
+        // elided before it ever reaches us.
+        if let Some((id, _)) = self
+            .pane_title_rects
+            .iter()
+            .find(|(_, rect)| hit(*rect))
+            .map(|(id, r)| (*id, *r))
+        {
+            self.open_cmd_inspect(id);
             return;
         }
         // Tab-bar scroll arrows: step to the previous / next tab.
@@ -698,6 +728,43 @@ impl App {
     }
 
     /// Show a transient toast (e.g. "Copied") bottom-center for ~1.4s.
+    /// Open the "what's running here?" overlay for `id`, snapshotting the pane's
+    /// process tree from the OS. Shelling out to `ps` is why this happens on the
+    /// click and not per frame.
+    pub fn open_cmd_inspect(&mut self, id: PaneId) {
+        let Some(pane) = self.panes.get(&id) else {
+            return;
+        };
+        let cwd = pane.cwd.clone();
+        let procs = pane
+            .child_pid
+            .map(crate::platform::process_tree)
+            .unwrap_or_default();
+        self.cmd_inspect = Some(CmdInspect {
+            pane: id,
+            cwd,
+            procs,
+            scroll: 0,
+        });
+    }
+
+    /// Re-read the process tree for the open overlay (`r`), so a long-running
+    /// command's progress is visible without reopening.
+    pub fn refresh_cmd_inspect(&mut self) {
+        if let Some(c) = self.cmd_inspect.as_ref() {
+            let id = c.pane;
+            let scroll = c.scroll;
+            self.open_cmd_inspect(id);
+            if let Some(c) = self.cmd_inspect.as_mut() {
+                c.scroll = scroll;
+            }
+        }
+    }
+
+    pub fn close_cmd_inspect(&mut self) {
+        self.cmd_inspect = None;
+    }
+
     pub fn show_toast(&mut self, text: impl Into<String>) {
         self.toast = Some((text.into(), Instant::now() + Duration::from_millis(1400)));
     }
@@ -736,6 +803,24 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
+        }
+        // The running-command overlay: scroll it, refresh it, or dismiss.
+        if self.cmd_inspect.is_some() {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(c) = self.cmd_inspect.as_mut() {
+                        c.scroll += 1;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(c) = self.cmd_inspect.as_mut() {
+                        c.scroll = c.scroll.saturating_sub(1);
+                    }
+                }
+                KeyCode::Char('r') => self.refresh_cmd_inspect(),
+                _ => self.close_cmd_inspect(),
+            }
+            return true;
         }
         // The help cheat-sheet overlay swallows the next key press and closes.
         if self.help_open {
@@ -930,6 +1015,7 @@ fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
 fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
     let bytes: Vec<u8> = match key.code {
         KeyCode::Char(c) => {
@@ -956,6 +1042,12 @@ fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
                 }
             }
         }
+        // Shift/Alt+Enter means "new line, don't submit" in every agent CLI.
+        // A terminal sends a bare `CR` for both Enter and Shift+Enter, so this
+        // only ever fires when the host terminal disambiguates modified keys
+        // (`main::push_key_protocol`). `ESC CR` is the sequence agents already
+        // understand — it's what Claude Code's own `/terminal-setup` installs.
+        KeyCode::Enter if shift || alt => vec![0x1b, b'\r'],
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
@@ -983,6 +1075,32 @@ fn csi(final_byte: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Agents treat Enter as "submit" and Shift+Enter as "new line". A terminal
+    // sends a bare CR for both, so bohay asks for the disambiguating keyboard
+    // protocol and forwards the modified form as `ESC CR` — the sequence agent
+    // CLIs already understand.
+    #[test]
+    fn shift_enter_sends_a_newline_not_a_submit() {
+        let enter = |m: KeyModifiers| encode_key(&KeyEvent::new(KeyCode::Enter, m));
+        assert_eq!(
+            enter(KeyModifiers::NONE),
+            Some(b"\r".to_vec()),
+            "plain Enter still submits"
+        );
+        assert_eq!(
+            enter(KeyModifiers::SHIFT),
+            Some(b"\x1b\r".to_vec()),
+            "Shift+Enter must be distinguishable from Enter"
+        );
+        assert_eq!(
+            enter(KeyModifiers::ALT),
+            Some(b"\x1b\r".to_vec()),
+            "Alt/Option+Enter is the other common newline binding"
+        );
+        // Ctrl+Enter keeps the legacy submit byte — agents bind it to submit.
+        assert_eq!(enter(KeyModifiers::CONTROL), Some(b"\r".to_vec()));
+    }
 
     #[test]
     fn sgr_wheel_encodes_button_and_coords() {
