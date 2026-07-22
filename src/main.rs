@@ -684,7 +684,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             emit_sound();
         }
         // Advance the working spinner ~10x/s (the loop redraws every frame).
-        if app.any_working() && last_spin.elapsed() >= Duration::from_millis(100) {
+        if last_spin.elapsed() >= Duration::from_millis(100) && app.any_working() {
             app.spinner = app.spinner.wrapping_add(1);
             last_spin = Instant::now();
         }
@@ -696,6 +696,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         // draw. A per-frame `Hide` flickered it on any activity.
         terminal.draw(|f| ui::render(f, &mut app))?;
         last_draw = Instant::now();
+        // Re-arm PTY wake coalescing each frame (`--local` renders every loop
+        // iteration, so the frame cadence is the re-arm cadence here).
+        app.rearm_pty_notify();
     }
 
     persist::save(&app);

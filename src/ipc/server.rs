@@ -69,6 +69,11 @@ pub fn run() -> Result<()> {
     // loop every IDLE_INTERVAL, so this just gates the frame + a repaint).
     let mut last_spin = Instant::now();
     const SPIN_INTERVAL: Duration = Duration::from_millis(100);
+    // Fallback re-arm cadence for PTY wake coalescing when frames aren't being
+    // rendered (no client attached / nothing dirty): readers may announce new
+    // output ~10x/s. While rendering, the render path re-arms at the frame rate.
+    let mut last_rearm = Instant::now();
+    const REARM_INTERVAL: Duration = Duration::from_millis(100);
 
     loop {
         // Pending + clients attached → wait only until the cap frees up (flush
@@ -167,12 +172,18 @@ pub fn run() -> Result<()> {
         }
         // Animate the sidebar spinner while any agent is working: advance the
         // frame and mark dirty so the diff sends only the changed dot cell.
-        if app.any_working() && last_spin.elapsed() >= SPIN_INTERVAL {
+        if last_spin.elapsed() >= SPIN_INTERVAL && app.any_working() {
             app.spinner = app.spinner.wrapping_add(1);
             last_spin = Instant::now();
             dirty = true;
         }
         dirty |= activity;
+        // Fallback re-arm (the render path below re-arms at the frame rate): a
+        // flag still set here means un-rendered output → schedule a frame.
+        if last_rearm.elapsed() >= REARM_INTERVAL {
+            last_rearm = Instant::now();
+            dirty |= app.rearm_pty_notify();
+        }
 
         if dirty && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
             let area = Rect::new(0, 0, size.0, size.1);
@@ -222,7 +233,10 @@ pub fn run() -> Result<()> {
                 full_for_all,
             );
             last_draw = Instant::now();
-            dirty = false;
+            // Re-arm the PTY readers now that their output is on screen. A flag
+            // set during this frame = more output already waiting → stay dirty
+            // so the burst keeps rendering at the frame cap, tail included.
+            dirty = app.rearm_pty_notify();
         }
     }
 
