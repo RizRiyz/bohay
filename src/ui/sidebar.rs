@@ -682,6 +682,60 @@ mod tests {
         })
     }
 
+    /// The column each agent row's state label starts at, for every row drawn.
+    fn label_columns(term: &Terminal<TestBackend>, label: &str) -> Vec<u16> {
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .filter_map(|r| {
+                let row: String = (0..buf.area.width)
+                    .map(|c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" "))
+                    .collect();
+                row.find(label).map(|i| i as u16)
+            })
+            .collect()
+    }
+
+    // The state icon sits in a fixed one-column slot, so the text after it must
+    // start at the same column no matter which state is shown — and, for a
+    // working agent, at every frame of the spinner. Otherwise the row visibly
+    // shifts as the icon animates.
+    #[test]
+    fn agent_state_icons_keep_the_label_aligned() {
+        use crate::ui::theme::State;
+        let _env = crate::persist::test_env("agent-icon-align");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let id = app.layout().focus;
+        app.status.get_mut(&id).unwrap().agent = "claude".into();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        // Where the label lands for each static state.
+        let mut columns = Vec::new();
+        for st in [State::Idle, State::Blocked, State::Done] {
+            app.status.get_mut(&id).unwrap().state = st;
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let cols = label_columns(&term, st.label());
+            assert!(!cols.is_empty(), "the {st:?} row should be drawn");
+            columns.extend(cols);
+        }
+        // …and for every frame of the working spinner.
+        app.status.get_mut(&id).unwrap().state = State::Working;
+        for frame in 0..crate::ui::theme::SPINNER_FRAMES {
+            app.spinner = frame;
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let cols = label_columns(&term, State::Working.label());
+            assert!(!cols.is_empty(), "the working row should be drawn");
+            columns.extend(cols);
+        }
+
+        let distinct: std::collections::HashSet<u16> = columns.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "every state icon must leave the label in the same column, got {distinct:?}"
+        );
+    }
+
     #[test]
     fn agents_all_active_toggle_filters_history() {
         // Isolate config so a concurrent test's saved sidebar layout can't leak in
