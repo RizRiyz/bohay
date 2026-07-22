@@ -78,6 +78,7 @@ pub enum LayoutRow {
     SidebarWidth,
     ColGap,
     RowGap,
+    Scrollback,
     PaneTitles,
     ResumeWs,
     #[cfg(windows)]
@@ -96,6 +97,7 @@ impl App {
             LayoutRow::SidebarWidth,
             LayoutRow::ColGap,
             LayoutRow::RowGap,
+            LayoutRow::Scrollback,
             LayoutRow::PaneTitles,
             LayoutRow::ResumeWs,
         ];
@@ -112,13 +114,15 @@ impl App {
 
     /// Index of the first dock-section row (where the `── Docks ──` divider goes).
     pub fn dock_section_start(&self) -> usize {
+        // Keep in step with `layout_rows`: the pane-layout rows before the docks
+        // section (sidebar width, gaps, scrollback, titles, resume, +shell).
         #[cfg(windows)]
         {
-            6
+            7
         }
         #[cfg(not(windows))]
         {
-            5
+            6
         }
     }
 
@@ -390,6 +394,15 @@ impl App {
                 self.config.layout.row_gap ^= 1;
                 self.apply_gaps();
             }
+            LayoutRow::Scrollback => {
+                let step = config::SCROLLBACK_STEP as i64;
+                let next = (self.config.layout.scrollback as i64 + step * delta as i64)
+                    .clamp(config::SCROLLBACK_MIN as i64, config::SCROLLBACK_MAX as i64)
+                    as usize;
+                self.config.layout.scrollback = next;
+                self.apply_scrollback();
+                config::save(&self.config);
+            }
             LayoutRow::PaneTitles => {
                 self.config.layout.show_titles = !self.config.layout.show_titles;
                 config::save(&self.config);
@@ -453,6 +466,16 @@ impl App {
     fn apply_gaps(&mut self) {
         crate::layout::set_gaps(self.config.layout.col_gap, self.config.layout.row_gap);
         config::save(&self.config);
+    }
+
+    /// Push the scrollback limit to every live pane. Alacritty's
+    /// `Grid::update_history` shrinks retained history when the limit drops, so
+    /// lowering this frees memory now rather than only for new panes.
+    fn apply_scrollback(&mut self) {
+        let lines = self.config.scrollback();
+        for pane in self.panes.values() {
+            pane.set_scrollback(lines);
+        }
     }
 
     fn toggle_notify(&mut self, cursor: usize) {

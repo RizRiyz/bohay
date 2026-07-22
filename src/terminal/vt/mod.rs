@@ -52,6 +52,10 @@ pub trait VtEngine: Send {
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
     /// retained history. No-op while on the alternate screen.
+    /// Change how many lines of scrollback this pane retains (Settings →
+    /// Layout). Lowering it drops the excess history immediately.
+    fn set_scrollback(&mut self, lines: usize);
+
     fn scroll(&mut self, delta: i32);
 
     /// Jump the viewport to the very top of retained scrollback.
@@ -78,6 +82,15 @@ pub trait VtEngine: Send {
     /// wheel/click events to it as escape sequences (e.g. a TUI agent scrolling
     /// its own transcript) rather than scrolling bohay's scrollback.
     fn mouse_report(&self) -> bool;
+
+    /// Whether the child also requested **drag/motion tracking** (1002/1003) —
+    /// press-and-move events are forwarded only then, so a click-only (1000)
+    /// app isn't spammed with motion it never asked for.
+    fn mouse_drag(&self) -> bool;
+
+    /// Whether the child requested **any-motion tracking** (1003) — hover
+    /// movement with no button held is reported only then.
+    fn mouse_motion(&self) -> bool;
 
     /// Whether mouse reports should use the modern **SGR** (1006) encoding
     /// rather than the legacy X10 byte encoding.

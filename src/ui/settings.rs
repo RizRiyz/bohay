@@ -269,7 +269,7 @@ fn draw_content(
                             y,
                             i,
                             cursor == i,
-                            cat.set_sidebar_width,
+                            cat.set_left_sidebar_width,
                             app.sidebars.left.width.to_string(),
                             t,
                             &mut arrows,
@@ -299,6 +299,20 @@ fn draw_content(
                             toggle(l.row_gap == 1, t),
                             t,
                         ));
+                    }
+                    LayoutRow::Scrollback => {
+                        let r = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_scrollback,
+                            format!("{} lines", app.config.scrollback()),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, r));
                     }
                     LayoutRow::PaneTitles => {
                         ctls.push(ctl_row(
@@ -360,7 +374,7 @@ fn draw_content(
                             y,
                             i,
                             cursor == i,
-                            cat.set_sidebar_width,
+                            cat.set_right_sidebar_width,
                             app.sidebars.right.width.to_string(),
                             t,
                             &mut arrows,

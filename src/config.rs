@@ -55,6 +55,13 @@ pub struct LayoutConfig {
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
+    /// Lines of scrollback kept per pane. **The main memory dial**: scrollback
+    /// dominates per-pane cost (measured ~10 MB per pane at 5 000 lines / 120
+    /// columns), and it is the only thing that scales with session age. The
+    /// default matches tmux; raise it if you scroll back a lot, lower it if you
+    /// keep many panes open.
+    #[serde(default = "default_scrollback")]
+    pub scrollback: usize,
 }
 
 /// Left + right sidebar layout (docs/29). Serialized under `sidebars`.
@@ -142,6 +149,9 @@ fn one() -> u16 {
 fn yes() -> bool {
     true
 }
+fn default_scrollback() -> usize {
+    SCROLLBACK_DEFAULT
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -166,11 +176,25 @@ impl Default for LayoutConfig {
             row_gap: 0,
             show_titles: true,
             resume_in_new_workspace: true,
+            scrollback: default_scrollback(),
         }
     }
 }
 
+/// Scrollback bounds. The default matches tmux (2 000); the ceiling keeps a
+/// pathological config from turning into gigabytes of grid.
+pub const SCROLLBACK_DEFAULT: usize = 2_000;
+pub const SCROLLBACK_MIN: usize = 200;
+pub const SCROLLBACK_MAX: usize = 20_000;
+/// Slider step in Settings — lines-per-keypress (1 would be useless here).
+pub const SCROLLBACK_STEP: usize = 200;
+
 impl Config {
+    /// Lines of scrollback per pane, clamped to the supported range.
+    pub fn scrollback(&self) -> usize {
+        self.layout.scrollback.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX)
+    }
+
     /// Clamp the persisted sidebar width into the supported range.
     pub fn sidebar_width(&self) -> u16 {
         self.sidebar_width
@@ -231,6 +255,22 @@ mod tests {
         assert_eq!(from_empty.theme, "noir");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         // Round-trip preserves values.
+        // Scrollback defaults to tmux's 2 000 and is clamped to sane bounds.
+        assert_eq!(c.layout.scrollback, 2_000);
+        assert_eq!(c.scrollback(), 2_000);
+        let mut wild = Config::default();
+        wild.layout.scrollback = 99_999_999;
+        assert_eq!(
+            wild.scrollback(),
+            SCROLLBACK_MAX,
+            "absurd values clamp down"
+        );
+        wild.layout.scrollback = 1;
+        assert_eq!(wild.scrollback(), SCROLLBACK_MIN, "tiny values clamp up");
+        // An old config written before this field still loads, at the new default.
+        let old: Config = serde_json::from_str(r#"{"layout":{"col_gap":1}}"#).unwrap();
+        assert_eq!(old.scrollback(), 2_000);
+
         // Sounds are optional and must default to off.
         assert!(!c.notifications.sound_on_done);
         assert!(!c.notifications.sound_on_blocked);
