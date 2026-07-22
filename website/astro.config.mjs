@@ -62,6 +62,8 @@ export default defineConfig({
           items: [
             { label: 'Using Modules', slug: 'docs/extend/using-modules' },
             { label: 'Writing a Module', slug: 'docs/extend/writing-modules' },
+            // The community index is a standalone page, not a docs entry.
+            { label: 'Module Index', link: '/modules/', attrs: { target: '_self' } },
           ],
         },
         {

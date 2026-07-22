@@ -1,0 +1,785 @@
+---
+// The /modules page: the community module index.
+//
+// There is deliberately **no registry and no backend**. A module is just a
+// public GitHub repo carrying the `bohay-module` topic, exactly what
+// `bohay module search` queries from the terminal. This page runs the same
+// search so the site and the CLI can never disagree about what exists.
+//
+// The list is fetched at build time (so it renders with JS off and is
+// indexable) and refreshed client-side on load (so it stays current between
+// deploys, since Cloudflare Pages only rebuilds on push). A failed build-time
+// fetch is not fatal: the page ships an honest empty state and the browser
+// refresh fills it in.
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
+import '@fontsource/ibm-plex-mono/500.css';
+import '@fontsource/ibm-plex-mono/600.css';
+import '@fontsource/ibm-plex-mono/700.css';
+import Logo from '../assets/logo.svg';
+
+const GITHUB = 'https://github.com/RizRiyz/bohay';
+const TOPIC = 'bohay-module';
+const TOPIC_URL = `https://github.com/topics/${TOPIC}`;
+const SEARCH_API = `https://api.github.com/search/repositories?q=topic:${TOPIC}&sort=stars&order=desc&per_page=60`;
+
+const title = 'Modules — bohay';
+const description =
+  'Community modules for bohay: sidebar docks, panes, right-click actions and automations, published as ordinary GitHub repos.';
+const ogImage = 'https://bohay.dev/og.png';
+
+// Build-time fetch. Never throw: a rate-limited or offline build must still
+// produce a page.
+let repos = [];
+let fetchFailed = false;
+try {
+  const res = await fetch(SEARCH_API, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'bohay.dev' },
+  });
+  if (!res.ok) throw new Error(`GitHub returned ${res.status}`);
+  const data = await res.json();
+  repos = (data.items ?? [])
+    .filter((r) => !r.archived)
+    .map((r) => ({
+      name: r.name,
+      full_name: r.full_name,
+      owner: r.owner?.login ?? '',
+      avatar: r.owner?.avatar_url ?? '',
+      description: r.description ?? '',
+      stars: r.stargazers_count ?? 0,
+      forks: r.forks_count ?? 0,
+      language: r.language ?? '',
+      topics: (r.topics ?? []).filter((t) => t !== TOPIC).slice(0, 3),
+      url: r.html_url,
+      pushed: r.pushed_at ?? '',
+      created: r.created_at ?? '',
+    }));
+} catch {
+  fetchFailed = true;
+}
+
+// "3 days ago" — short, so it fits the one-line meta row.
+const rel = (iso) => {
+  if (!iso) return '';
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  const d = Math.floor(s / 86400);
+  if (d < 30) return `${d}d ago`;
+  if (d < 365) return `${Math.floor(d / 30)}mo ago`;
+  return `${Math.floor(d / 365)}y ago`;
+};
+
+// GitHub's language dot colours, for the handful a module is likely to be in.
+const LANG_COLOR = {
+  Shell: '#89e051',
+  Python: '#3572A5',
+  JavaScript: '#f1e05a',
+  TypeScript: '#3178c6',
+  Rust: '#dea584',
+  Go: '#00ADD8',
+  Lua: '#000080',
+  Ruby: '#701516',
+  Perl: '#0298c3',
+  C: '#555555',
+  'C++': '#f34b7d',
+};
+
+// Read the example modules off disk at build time so their stats are measured,
+// never guessed: a card claiming "3 files" has to stay true as the examples are
+// edited. Same trick the changelog page uses for `changelog/*.md`.
+const exampleFiles = import.meta.glob('../../../examples/modules/*/*', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+});
+
+// → { 'branch-dock': { files: 3, lines: 129 }, … }
+const exampleStats = {};
+for (const [path, text] of Object.entries(exampleFiles)) {
+  const dir = path.split('/').at(-2);
+  if (!dir) continue;
+  const s = (exampleStats[dir] ??= { files: 0, lines: 0 });
+  s.files += 1;
+  s.lines += String(text).split('\n').length;
+}
+
+// The three examples that ship in the repo. Same card shape as a community
+// module, so the two grids read as one system.
+const examples = [
+  {
+    name: 'branch-dock',
+    owner: 'bohay/examples',
+    lang: 'Shell',
+    description:
+      "A sidebar dock listing the active node's git branches. Click one to check it out.",
+    topics: ['dock', 'startup', 'settings'],
+    install: 'bohay module link ./examples/modules/branch-dock',
+    path: 'examples/modules/branch-dock',
+  },
+  {
+    name: 'agent-ping',
+    owner: 'bohay/examples',
+    lang: 'Python',
+    description:
+      'Posts a webhook when an agent goes blocked, so you know without watching it.',
+    topics: ['events', 'secrets', 'right-click'],
+    install: 'bohay module link ./examples/modules/agent-ping',
+    path: 'examples/modules/agent-ping',
+  },
+  {
+    name: 'scratch-pane',
+    owner: 'bohay/examples',
+    lang: 'JavaScript',
+    description:
+      'Right-click a pane to open a scratch notepad beside it, and stash the selected text into it.',
+    topics: ['panes', 'selection', 'tabs'],
+    install: 'bohay module link ./examples/modules/scratch-pane',
+    path: 'examples/modules/scratch-pane',
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="canonical" href="https://bohay.dev/modules/" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://bohay.dev/modules/" />
+    <meta property="og:site_name" content="bohay" />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+  </head>
+  <body>
+    <nav>
+      <div class="nav-inner">
+        <a class="brand" href="/">
+          <Logo width={28} height={28} class="mark" aria-hidden="true" />
+          <span>bohay</span>
+        </a>
+        <div class="nav-links">
+          <a href="/docs/">Docs</a>
+          <a href="/modules/" aria-current="page">Modules</a>
+          <a href="/compare/">Compare</a>
+          <a href="/changelog/">Changelog</a>
+          <a href={GITHUB} class="gh">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+              ><path
+                fill="currentColor"
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              ></path></svg
+            >
+            <span id="stars">GitHub</span>
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <header class="page-hero">
+      <div class="glow" aria-hidden="true"></div>
+      <span class="eyebrow">Modules</span>
+      <h1>Extend bohay in any language</h1>
+      <p>
+        A module is a plain GitHub repo with a manifest and some commands. Bash, Python, Lua,
+        Rust, Node, anything your machine can run. No SDK, no plugin runtime, no registry to
+        sign up for.
+      </p>
+      <div class="hero-cta">
+        <a class="btn primary" href="/docs/extend/writing-modules/">Write a module →</a>
+        <a class="btn" href="/docs/extend/using-modules/">How installing works</a>
+      </div>
+    </header>
+
+    <!-- three steps, so the mental model lands before the list -->
+    <section class="how">
+      <ol class="steps">
+        <li>
+          <span class="num">1</span>
+          <h3>Find one</h3>
+          <p>
+            Browse below, or search from the terminal. Both read the same
+            <a href={TOPIC_URL}><code>{TOPIC}</code></a> GitHub topic.
+          </p>
+          <pre class="cmd"><code>bohay module search</code></pre>
+        </li>
+        <li>
+          <span class="num">2</span>
+          <h3>Review, then install</h3>
+          <p>
+            Install prints <strong>every command the module declares</strong> and waits for your
+            confirmation before anything runs.
+          </p>
+          <pre class="cmd"><code>bohay module install owner/repo</code></pre>
+        </li>
+        <li>
+          <span class="num">3</span>
+          <h3>Use it</h3>
+          <p>
+            It shows up in <strong>Settings → Modules</strong> with its own settings, and wherever
+            it declared itself: a dock, a pane, a right-click.
+          </p>
+          <pre class="cmd"><code>bohay module list</code></pre>
+        </li>
+      </ol>
+    </section>
+
+    <section class="index">
+      <div class="shead">
+        <h2>Community modules</h2>
+        <div class="shead-right">
+          <label class="sort" hidden={repos.length < 2}>
+            <span>sort</span>
+            <select id="sort">
+              <option value="stars">Most stars</option>
+              <option value="pushed">Recently updated</option>
+              <option value="created">Newest</option>
+              <option value="name">Name</option>
+            </select>
+          </label>
+          <a class="topic-link" href={TOPIC_URL}>Browse the topic →</a>
+        </div>
+      </div>
+
+      <div id="grid" class="grid">
+        {
+          repos.map((r) => (
+            <a class="mod" href={r.url}>
+              <div class="mhead">
+                {r.avatar && (
+                  <img class="avatar" src={r.avatar} alt="" width="26" height="26" loading="lazy" />
+                )}
+                <span class="mname">{r.name}</span>
+                <span class="stars" title={`${r.stars} stars`}>
+                  ★ {r.stars}
+                </span>
+              </div>
+              <span class="mowner">{r.owner}</span>
+              <p class="mdesc">{r.description || 'No description provided.'}</p>
+              <div class="meta">
+                {r.language && (
+                  <span class="mi">
+                    <i class="dot" style={`background:${LANG_COLOR[r.language] ?? '#c6ff1a'}`} />
+                    {r.language}
+                  </span>
+                )}
+                {r.forks > 0 && <span class="mi">{r.forks} forks</span>}
+                {r.pushed && <span class="mi">updated {rel(r.pushed)}</span>}
+              </div>
+              {r.topics.length > 0 && (
+                <div class="mfoot">
+                  {r.topics.map((t) => (
+                    <span class="chip">{t}</span>
+                  ))}
+                </div>
+              )}
+              <code class="install">bohay module install {r.full_name}</code>
+            </a>
+          ))
+        }
+      </div>
+
+      <!-- Shown when the index is empty. Treat it as an invitation, not an error. -->
+      <div id="empty" class="empty" hidden={repos.length > 0}>
+        <div class="empty-mark" aria-hidden="true">◇</div>
+        <h3>{fetchFailed ? 'Could not reach GitHub' : 'No modules published yet'}</h3>
+        <p>
+          {
+            fetchFailed
+              ? 'The live index is fetched from the GitHub search API, which rate-limits anonymous requests. Browse the topic directly, or try again in a minute.'
+              : 'The topic is brand new, so this list is empty. That also means the first module published here is going to be very easy to find.'
+          }
+        </p>
+        <div class="empty-cta">
+          <a class="btn primary" href="/docs/extend/writing-modules/">Write the first one →</a>
+          <a class="btn" href={TOPIC_URL}>Check the topic</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="samples">
+      <div class="shead">
+        <h2>Start from a working example</h2>
+        <a class="topic-link" href={`${GITHUB}/tree/main/examples/modules`}>See all three →</a>
+      </div>
+      <p class="lede">
+        Three complete modules ship in the repo, one per language, each covering a different part
+        of the surface. Copy one, change its id, and you have a module.
+      </p>
+      <div class="grid">
+        {
+          examples.map((e) => (
+            <a class="mod" href={`${GITHUB}/tree/main/${e.path}`}>
+              <div class="mhead">
+                <span class="avatar ex" aria-hidden="true">
+                  ◇
+                </span>
+                <span class="mname">{e.name}</span>
+                <span class="tag">example</span>
+              </div>
+              <span class="mowner">{e.owner}</span>
+              <p class="mdesc">{e.description}</p>
+              <div class="meta">
+                <span class="mi">
+                  <i class="dot" style={`background:${LANG_COLOR[e.lang] ?? '#c6ff1a'}`} />
+                  {e.lang}
+                </span>
+                <span class="mi">{exampleStats[e.name]?.files ?? 0} files</span>
+                <span class="mi">{exampleStats[e.name]?.lines ?? 0} lines</span>
+              </div>
+              <div class="mfoot">
+                {e.topics.map((t) => (
+                  <span class="chip">{t}</span>
+                ))}
+              </div>
+              <code class="install">{e.install}</code>
+            </a>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="publish">
+      <div class="pub-card">
+        <div class="pub-copy">
+          <span class="eyebrow">Publishing</span>
+          <h2>Getting listed takes one click</h2>
+          <p>
+            There is no submission, no review queue, and no account. Push a public repo with a
+            <code>bohay-module.toml</code> at its root, then add the
+            <strong>{TOPIC}</strong> topic to it on GitHub. This page and
+            <code>bohay module search</code> both pick it up on their next run.
+          </p>
+          <ol class="pub-steps">
+            <li>Put <code>bohay-module.toml</code> in the repo root (or a subdirectory).</li>
+            <li>
+              On GitHub: <strong>About → ⚙︎ → Topics</strong>, add <code>{TOPIC}</code>.
+            </li>
+            <li>
+              Tell people to run <code>bohay module install you/your-module</code>.
+            </li>
+          </ol>
+        </div>
+        <div class="pub-side">
+          <div class="tip">
+            <h4>What makes a good listing</h4>
+            <ul>
+              <li>A one-line repo description: it is the card text here.</li>
+              <li>A README showing what it adds, with a screenshot.</li>
+              <li>Any tools it needs (<code>jq</code>, <code>node</code>, …) stated up front.</li>
+              <li>A <code>min_bohay_version</code> you have actually tested.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="trust">
+      <h2>A note on trust</h2>
+      <p>
+        A module is ordinary code that runs on your machine as you, with your environment and
+        your full bohay CLI. That openness is the point, and a little judgment keeps it safe.
+        Install from people you trust, and skim the manifest first:
+        <code>bohay module install</code> shows you every command a module declares and asks
+        before running anything. Builds run with a scrubbed environment, and a manifest cannot
+        change between the preview and the install. bohay validates and isolates, but it does not
+        sandbox: third-party modules come from their authors, not from bohay.
+      </p>
+      <a class="btn" href="/docs/extend/using-modules/">Read the full trust model →</a>
+    </section>
+
+    <footer>
+      <div class="foot-inner">
+        <div class="foot-brand">
+          <Logo width={22} height={22} class="mark" aria-hidden="true" />
+          <span>bohay</span>
+          <span class="dim">by Riz</span>
+        </div>
+        <div class="foot-links">
+          <a href={GITHUB}>GitHub</a>
+          <a href="https://crates.io/crates/bohay">crates.io</a>
+        </div>
+      </div>
+    </footer>
+
+    <script define:vars={{ SEARCH_API, TOPIC, LANG_COLOR }}>
+      // Live star count (graceful: stays "GitHub" on failure).
+      fetch('https://api.github.com/repos/RizRiyz/bohay')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const el = document.getElementById('stars');
+          if (el && d?.stargazers_count != null) el.textContent = `★ ${d.stargazers_count}`;
+        })
+        .catch(() => {});
+
+      const esc = (s) =>
+        String(s ?? '').replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+        );
+      const rel = (iso) => {
+        if (!iso) return '';
+        const s = (Date.now() - new Date(iso).getTime()) / 1000;
+        if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m ago`;
+        if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+        const d = Math.floor(s / 86400);
+        if (d < 30) return `${d}d ago`;
+        if (d < 365) return `${Math.floor(d / 30)}mo ago`;
+        return `${Math.floor(d / 365)}y ago`;
+      };
+
+      let items = [];
+      const card = (r) => {
+        const topics = (r.topics || [])
+          .filter((t) => t !== TOPIC)
+          .slice(0, 3)
+          .map((t) => `<span class="chip">${esc(t)}</span>`)
+          .join('');
+        const lang = r.language
+          ? `<span class="mi"><i class="dot" style="background:${LANG_COLOR[r.language] ?? '#c6ff1a'}"></i>${esc(r.language)}</span>`
+          : '';
+        const forks = r.forks_count > 0 ? `<span class="mi">${r.forks_count} forks</span>` : '';
+        const upd = r.pushed_at ? `<span class="mi">updated ${rel(r.pushed_at)}</span>` : '';
+        const avatar = r.owner?.avatar_url
+          ? `<img class="avatar" src="${esc(r.owner.avatar_url)}" alt="" width="26" height="26" loading="lazy">`
+          : '';
+        return `<a class="mod" href="${esc(r.html_url)}">
+          <div class="mhead">${avatar}<span class="mname">${esc(r.name)}</span>
+            <span class="stars" title="${r.stargazers_count ?? 0} stars">★ ${r.stargazers_count ?? 0}</span>
+          </div>
+          <span class="mowner">${esc(r.owner?.login ?? '')}</span>
+          <p class="mdesc">${esc(r.description || 'No description provided.')}</p>
+          <div class="meta">${lang}${forks}${upd}</div>
+          ${topics ? `<div class="mfoot">${topics}</div>` : ''}
+          <code class="install">bohay module install ${esc(r.full_name)}</code>
+        </a>`;
+      };
+
+      const paint = () => {
+        const grid = document.getElementById('grid');
+        const empty = document.getElementById('empty');
+        const sortWrap = document.querySelector('.sort');
+        if (!grid || !empty) return;
+        if (items.length === 0) {
+          grid.innerHTML = '';
+          empty.hidden = false;
+          if (sortWrap) sortWrap.hidden = true;
+          return;
+        }
+        const by = document.getElementById('sort')?.value ?? 'stars';
+        const sorted = [...items].sort((a, b) => {
+          if (by === 'name') return a.name.localeCompare(b.name);
+          if (by === 'pushed') return new Date(b.pushed_at) - new Date(a.pushed_at);
+          if (by === 'created') return new Date(b.created_at) - new Date(a.created_at);
+          return (b.stargazers_count ?? 0) - (a.stargazers_count ?? 0);
+        });
+        grid.innerHTML = sorted.map(card).join('');
+        empty.hidden = true;
+        if (sortWrap) sortWrap.hidden = items.length < 2;
+      };
+
+      document.getElementById('sort')?.addEventListener('change', paint);
+
+      // Refresh the index in the browser so it stays current between deploys.
+      // Purely additive: if this fails, the build-time markup stands.
+      fetch(SEARCH_API, { headers: { Accept: 'application/vnd.github+json' } })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d || !Array.isArray(d.items)) return;
+          items = d.items.filter((r) => !r.archived);
+          paint();
+        })
+        .catch(() => {});
+    </script>
+
+    <style is:global>
+      :root {
+        --bg: #070709;
+        --bg2: #111116;
+        --line: #25252d;
+        --text: #e7e7ed;
+        --sub: #93939f;
+        --accent: #c6ff1a;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      html { scroll-behavior: smooth; }
+      body {
+        background: var(--bg); color: var(--text);
+        font: 16px/1.65 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      a { color: inherit; text-decoration: none; }
+      h1, h2, h3, h4, .brand, .foot-brand {
+        font-family: 'IBM Plex Mono', ui-monospace, 'JetBrains Mono Variable', monospace;
+        line-height: 1.14; letter-spacing: -0.045em;
+      }
+      section, header.page-hero { max-width: 1060px; margin: 0 auto; padding: 4rem 1.5rem; }
+      .dim { color: var(--sub); }
+      ::selection { background: #33450e; color: #e7e7ed; }
+      code { font-family: 'JetBrains Mono Variable', ui-monospace, monospace; }
+
+      /* nav */
+      nav {
+        position: sticky; top: 0; z-index: 10; background: rgb(7 7 9 / 0.75);
+        backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+        border-bottom: 1px solid rgb(37 37 45 / 0.6);
+      }
+      .nav-inner {
+        display: flex; justify-content: space-between; align-items: center;
+        max-width: 1060px; margin: 0 auto; padding: 0.85rem 1.5rem;
+      }
+      .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.15rem; }
+      .mark { display: block; flex-shrink: 0; }
+      .nav-links {
+        display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.88rem;
+        font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -0.01em;
+      }
+      .nav-links a:hover { color: var(--text); }
+      .nav-links a[aria-current='page'] { color: var(--accent); }
+      .gh { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid var(--line); padding: 0.35rem 0.75rem; border-radius: 999px; }
+      .gh:hover { border-color: var(--accent); color: var(--accent); }
+
+      /* hero */
+      .page-hero { text-align: center; position: relative; padding-top: 4.5rem; padding-bottom: 1.5rem; }
+      .page-hero .glow {
+        position: absolute; inset: -20% 0 auto 0; height: 460px; pointer-events: none;
+        background: radial-gradient(ellipse 60% 55% at 50% 0%, rgb(198 255 26 / 0.09), transparent 70%);
+      }
+      .eyebrow { font-family: 'IBM Plex Mono', monospace; color: var(--accent); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase; position: relative; }
+      .page-hero h1 { font-size: clamp(2rem, 5.4vw, 3.1rem); font-weight: 700; margin-top: 0.6rem; position: relative; }
+      .page-hero p { color: var(--sub); max-width: 42rem; margin: 1.2rem auto 0; font-size: 1.08rem; position: relative; }
+      .hero-cta { margin-top: 1.7rem; position: relative; display: flex; gap: 0.7rem; justify-content: center; flex-wrap: wrap; }
+
+      .btn {
+        display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1.35rem;
+        border-radius: 0.6rem; border: 1px solid var(--line); font-weight: 600; font-size: 0.92rem;
+        font-family: 'IBM Plex Mono', monospace; transition: border-color 0.15s, transform 0.15s, filter 0.15s;
+      }
+      .btn:hover { transform: translateY(-2px); border-color: var(--accent); color: var(--accent); }
+      .btn.primary { background: var(--accent); color: #0b0b0f; border-color: var(--accent); }
+      .btn.primary:hover { filter: brightness(1.08); color: #0b0b0f; }
+
+      /* the three steps */
+      .how { padding-top: 2rem; padding-bottom: 1rem; }
+      .steps {
+        list-style: none; padding: 0; margin: 0;
+        display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem;
+      }
+      .steps li {
+        min-width: 0;
+        border: 1px solid var(--line); border-radius: 1rem; padding: 1.4rem 1.5rem 1.5rem;
+        background: linear-gradient(180deg, #131318, #0d0d12); position: relative;
+      }
+      .num {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; border-radius: 50%; background: rgb(198 255 26 / 0.12);
+        border: 1px solid rgb(198 255 26 / 0.3); color: var(--accent);
+        font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem; font-weight: 700;
+      }
+      .steps h3 { font-size: 1.02rem; margin: 0.8rem 0 0.4rem; }
+      .steps p { color: var(--sub); font-size: 0.9rem; }
+      .steps a { color: var(--accent); border-bottom: 1px solid rgb(198 255 26 / 0.3); }
+      .cmd {
+        margin-top: 0.9rem; background: #0a0a0d; border: 1px solid var(--line);
+        border-radius: 0.5rem; padding: 0.55rem 0.7rem; overflow-x: auto;
+      }
+      .cmd code { color: #d7ffb0; font-size: 0.8rem; white-space: pre; }
+
+      /* section headers */
+      .shead {
+        display: flex; align-items: baseline; justify-content: space-between;
+        gap: 1rem; flex-wrap: wrap; margin-bottom: 1.3rem;
+      }
+      .shead h2 { font-size: clamp(1.4rem, 3vw, 1.85rem); font-weight: 700; }
+      .shead-right { display: flex; align-items: center; gap: 1.1rem; }
+      .topic-link { color: var(--accent); font-size: 0.86rem; font-family: 'IBM Plex Mono', monospace; }
+      .topic-link:hover { text-decoration: underline; }
+      .lede { color: var(--sub); max-width: 46rem; margin: -0.6rem 0 1.4rem; }
+
+      /* sort control */
+      .sort {
+        display: inline-flex; align-items: center; gap: 0.45rem;
+        font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; color: var(--sub);
+      }
+      .sort[hidden] { display: none; }
+      .sort select {
+        background: #0f0f14; color: var(--text); border: 1px solid var(--line);
+        border-radius: 0.45rem; padding: 0.3rem 0.5rem;
+        font-family: inherit; font-size: 0.78rem; cursor: pointer;
+      }
+      .sort select:hover { border-color: rgb(198 255 26 / 0.35); }
+
+      /* ── module card ─────────────────────────────────────────────────
+         Compact and fixed-rhythm: the description is clamped to two lines
+         and pushed by `flex: 1`, so every card in a row ends with its meta
+         row and install line at the same height. Both grids use this. */
+      .grid {
+        display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.85rem;
+        align-items: stretch;
+      }
+      /* `min-width: 0` is load-bearing: without it a grid item refuses to
+         shrink below its content's intrinsic width, and the nowrap install
+         line drags every column past the section's max-width. */
+      .mod {
+        display: flex; flex-direction: column; min-width: 0;
+        border: 1px solid var(--line); border-radius: 0.85rem;
+        padding: 0.95rem 1rem 0.85rem;
+        background: linear-gradient(180deg, #131318, #0d0d12);
+        transition: border-color 0.18s, transform 0.18s, box-shadow 0.18s;
+      }
+      .mod:hover {
+        border-color: rgb(198 255 26 / 0.34); transform: translateY(-2px);
+        box-shadow: 0 6px 22px -12px rgb(198 255 26 / 0.25);
+      }
+      .mhead { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+      .mhead > * { min-width: 0; }
+      .avatar { border-radius: 50%; border: 1px solid var(--line); flex-shrink: 0; }
+      .avatar.ex {
+        width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+        color: var(--accent); font-size: 0.85rem; background: rgb(198 255 26 / 0.1);
+        border-color: rgb(198 255 26 / 0.28);
+      }
+      .mname {
+        font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 0.95rem;
+        color: var(--accent); letter-spacing: -0.02em;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+      }
+      .stars, .tag {
+        margin-left: auto; flex-shrink: 0; color: var(--sub); font-size: 0.76rem;
+        font-family: 'JetBrains Mono Variable', monospace;
+      }
+      .tag {
+        font-family: 'IBM Plex Mono', monospace; font-size: 0.58rem; text-transform: uppercase;
+        letter-spacing: 0.09em; padding: 0.18rem 0.45rem; border-radius: 999px;
+        border: 1px solid var(--line); line-height: 1;
+      }
+      .mowner {
+        color: var(--sub); font-size: 0.74rem; margin: 0.25rem 0 0 2.1rem;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .mdesc {
+        color: var(--sub); font-size: 0.855rem; line-height: 1.5;
+        margin: 0.55rem 0 0; flex: 1;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+        line-clamp: 2; overflow: hidden;
+      }
+      /* one-line stat strip: language dot, forks, last push */
+      .meta {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem;
+        margin-top: 0.7rem; color: var(--sub); font-size: 0.72rem;
+        font-family: 'IBM Plex Mono', monospace;
+      }
+      .mi { display: inline-flex; align-items: center; gap: 0.32rem; white-space: nowrap; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+      .mfoot { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.55rem; }
+      .chip {
+        font-size: 0.66rem; padding: 0.12rem 0.44rem; border-radius: 999px;
+        border: 1px solid var(--line); color: var(--sub);
+        font-family: 'IBM Plex Mono', monospace; line-height: 1.5;
+      }
+      .install {
+        display: block; margin-top: 0.75rem; background: #0a0a0d;
+        border: 1px solid var(--line); border-radius: 0.45rem;
+        padding: 0.4rem 0.5rem; font-size: 0.68rem; color: #d7ffb0;
+        line-height: 1.5; min-width: 0;
+        /* Wrap rather than ellipsis: this is the line people copy, so losing
+           the tail of it defeats the point. Breaking at the spaces keeps the
+           command readable, and the card's `flex: 1` description absorbs the
+           extra row so every card in the row still ends level. */
+        white-space: normal; overflow-wrap: break-word;
+      }
+      .mod:hover .install { border-color: rgb(198 255 26 / 0.22); }
+
+      /* the two grids are one block: pull them together */
+      .index { padding-bottom: 1.5rem; }
+      .samples { padding-top: 2.5rem; }
+
+      /* empty state */
+      .empty {
+        text-align: center; border: 1px dashed var(--line); border-radius: 1.2rem;
+        padding: 3.2rem 1.5rem; background: radial-gradient(ellipse 70% 90% at 50% 0%, rgb(198 255 26 / 0.045), transparent 70%);
+      }
+      .empty[hidden] { display: none; }
+      .empty-mark { font-size: 2.2rem; color: var(--accent); opacity: 0.55; line-height: 1; }
+      .empty h3 { font-size: 1.25rem; margin: 0.9rem 0 0.5rem; }
+      .empty p { color: var(--sub); max-width: 34rem; margin: 0 auto; font-size: 0.95rem; }
+      .empty-cta { margin-top: 1.5rem; display: flex; gap: 0.7rem; justify-content: center; flex-wrap: wrap; }
+
+      /* publishing */
+      .pub-card {
+        border: 1px solid var(--line); border-radius: 1.2rem; overflow: hidden;
+        background: linear-gradient(180deg, #131318, #0d0d12);
+        display: grid; grid-template-columns: 1.35fr 1fr;
+      }
+      .pub-copy { padding: 2rem 2.1rem; }
+      .pub-copy h2 { font-size: clamp(1.35rem, 3vw, 1.7rem); margin: 0.55rem 0 0.7rem; }
+      .pub-copy p { color: var(--sub); font-size: 0.95rem; }
+      .pub-copy code, .tip code, .trust code {
+        font-size: 0.85em; color: #d7ffb0; background: rgb(198 255 26 / 0.07);
+        border: 1px solid rgb(198 255 26 / 0.14); padding: 0.05rem 0.35rem; border-radius: 0.35rem;
+      }
+      .pub-copy strong { color: var(--text); }
+      .pub-steps { margin: 1.2rem 0 0; padding-left: 1.1rem; color: var(--sub); font-size: 0.92rem; }
+      .pub-steps li { margin: 0.5rem 0; }
+      .pub-side { border-left: 1px solid var(--line); padding: 2rem 1.8rem; background: rgb(255 255 255 / 0.015); }
+      .tip h4 {
+        font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em;
+        color: var(--sub); margin-bottom: 0.9rem;
+      }
+      .tip ul { list-style: none; padding: 0; margin: 0; }
+      .tip li {
+        position: relative; padding-left: 1.15rem; margin: 0.6rem 0;
+        color: var(--sub); font-size: 0.88rem; line-height: 1.5;
+      }
+      .tip li::before {
+        content: ''; position: absolute; left: 0.15rem; top: 0.62em; width: 5px; height: 5px;
+        border-radius: 50%; background: var(--accent); opacity: 0.85;
+      }
+
+      /* trust */
+      .trust { max-width: 800px; text-align: center; padding-top: 2rem; }
+      .trust h2 { font-size: 1.5rem; margin-bottom: 0.9rem; }
+      .trust p { color: var(--sub); font-size: 0.97rem; margin-bottom: 1.4rem; }
+
+      /* footer */
+      footer { border-top: 1px solid var(--line); margin-top: 2rem; }
+      .foot-inner {
+        max-width: 1060px; margin: 0 auto; padding: 2rem 1.5rem;
+        display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;
+      }
+      .foot-brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; }
+      .foot-brand .dim { font-weight: 400; font-size: 0.85rem; }
+      .foot-links { display: flex; gap: 1.3rem; color: var(--sub); font-size: 0.92rem; flex-wrap: wrap; }
+      .foot-links a:hover { color: var(--accent); }
+
+      @media (max-width: 900px) {
+        .steps, .grid { grid-template-columns: repeat(2, 1fr); }
+        .pub-card { grid-template-columns: 1fr; }
+        .pub-side { border-left: none; border-top: 1px solid var(--line); }
+      }
+      @media (max-width: 640px) {
+        section, header.page-hero { padding: 3rem 1.25rem; }
+        .steps, .grid { grid-template-columns: 1fr; }
+        .nav-links { gap: 1rem; font-size: 0.82rem; }
+        .pub-copy, .pub-side { padding: 1.5rem 1.4rem; }
+      }
+
+      /* Four nav links + the GitHub pill no longer fit a phone in one row:
+         let them wrap rather than widen the page. */
+      @media (max-width: 560px) {
+        .nav-inner { flex-wrap: wrap; row-gap: 0.45rem; padding-top: 0.7rem; padding-bottom: 0.7rem; }
+        .nav-links { gap: 0.9rem; font-size: 0.78rem; flex-wrap: wrap; justify-content: flex-end; }
+      }
+    </style>
+  </body>
+</html>

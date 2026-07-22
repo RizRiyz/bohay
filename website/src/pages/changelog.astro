@@ -100,6 +100,7 @@ const entries = await Promise.all(
         </a>
         <div class="nav-links">
           <a href="/docs/">Docs</a>
+          <a href="/modules/">Modules</a>
           <a href="/compare/">Compare</a>
           <a href="/changelog/" aria-current="page">Changelog</a>
           <a href={GITHUB} class="gh">
@@ -170,9 +171,6 @@ const entries = await Promise.all(
           <span class="dim">by Riz</span>
         </div>
         <div class="foot-links">
-          <a href="/docs/">Docs</a>
-          <a href="/compare/">Compare</a>
-          <a href="/changelog/">Changelog</a>
           <a href={GITHUB}>GitHub</a>
           <a href="https://crates.io/crates/bohay">crates.io</a>
         </div>
@@ -280,6 +278,7 @@ const entries = await Promise.all(
         box-shadow: 0 0 0 4px rgb(198 255 26 / 0.16);
       }
       .card {
+        min-width: 0;
         border: 1px solid var(--line); border-radius: 1rem;
         background: linear-gradient(180deg, #131318, #0d0d12);
         padding: 1.35rem 1.6rem 1.15rem; margin-bottom: 1.7rem;
@@ -304,7 +303,11 @@ const entries = await Promise.all(
       }
 
       /* rendered release notes */
-      .notes { color: var(--text); font-size: 0.95rem; }
+      .notes { color: var(--text); font-size: 0.95rem; min-width: 0; }
+      /* Long code lines scroll inside their block instead of widening the page. */
+      .notes pre { max-width: 100%; }
+      .notes code { overflow-wrap: break-word; }
+      .notes a { overflow-wrap: break-word; }
       .notes > :first-child { margin-top: 0.35rem; }
       .notes > :last-child { margin-bottom: 0; }
       .notes h1, .notes h2, .notes h3, .notes h4, .notes h5 {
@@ -359,6 +362,13 @@ const entries = await Promise.all(
         section, header.page-hero { padding: 3rem 1.25rem; }
         .card { padding: 1.15rem 1.2rem 1rem; }
         .nav-links { gap: 1rem; }
+      }
+
+      /* Four nav links + the GitHub pill no longer fit a phone in one row:
+         let them wrap rather than widen the page. */
+      @media (max-width: 560px) {
+        .nav-inner { flex-wrap: wrap; row-gap: 0.45rem; padding-top: 0.7rem; padding-bottom: 0.7rem; }
+        .nav-links { gap: 0.9rem; font-size: 0.78rem; flex-wrap: wrap; justify-content: flex-end; }
       }
     </style>
   </body>

@@ -1,24 +1,188 @@
 ---
 title: Using Modules
-description: Discover, install, and manage bohay extensions, safely.
+description: Find, install, configure, and manage bohay modules, and the trust model behind them.
 ---
 
-A **module** extends bohay with new commands, panels, and automations. Modules
-are ordinary programs (any language) declared in a small manifest, with no SDK
-and no plugin runtime.
+A **module** extends bohay with sidebar panels, panes, right-click actions, and
+automations. Modules are ordinary programs in any language, declared in a small
+manifest. There's no SDK and no plugin runtime, so a module is just a repo with
+some scripts in it.
+
+If you want to *build* one, see [Writing a Module](/docs/extend/writing-modules/).
+This page is about running other people's.
+
+## Finding modules
+
+There is no registry and no marketplace account. A module is a public GitHub
+repo tagged with the **`bohay-module`** topic, and both the terminal and the
+website read that same topic:
 
 ```sh
-bohay module search            # community modules (GitHub topic: bohay-module)
-bohay module install owner/repo
-bohay module list · info <id> · run <id> <action> · log <id>
-bohay module enable <id> · disable <id> · uninstall <id>
+bohay module search              # most-starred first
+bohay module search git status   # narrow it with keywords
 ```
 
-**Trust model:** installing shows you **every command the module declares and
-asks for confirmation before anything runs**. Builds run with a scrubbed
-environment, and a module's declared manifest can't silently change after install.
-Modules you're just developing locally can be registered with
-`bohay module link <path>`.
+Or browse the [module index](/modules/) on the site.
 
-Modules can also open their own panes (split, overlay, or tab placement) and
-react to bohay events. Manage everything from **Settings → Modules** too.
+`module search` needs `curl` or `wget` and talks only to GitHub's search API. It
+is read-only and never touches your running session, so it's safe to run any
+time.
+
+## Installing
+
+```sh
+bohay module install owner/repo              # the whole repo is the module
+bohay module install owner/repo/path/to      # a module in a subdirectory
+bohay module install owner/repo --ref v1.2   # pin a branch, tag, or commit
+```
+
+Install is deliberately a conversation, not a one-shot. It:
+
+1. Shallow-clones the repo to a staging directory.
+2. **Prints every command the module declares** and asks you to confirm.
+3. Runs any `[[build]]` steps with a **scrubbed environment** (no `BOHAY_*`, no
+   socket access), so a build script can't drive your session.
+4. Verifies the manifest didn't change during the build.
+5. Moves the checkout into bohay-managed storage and records the exact commit.
+
+A real install looks like this:
+
+```
+Install module from RizRiyz/bohay-agent-ping
+  id:      example.agent-ping
+  name:    Agent Ping 0.1.0
+  commit:  5d3687f1528e
+Commands this module can run:
+  action ping-now: python3 ping.py --force
+  on pane.agent_status_changed: python3 ping.py
+installed example.agent-ping (RizRiyz/bohay-agent-ping@5d3687f1528e…)
+```
+
+Read that command list before you say yes. It is the whole security review, and
+it is short on purpose.
+
+Use `--yes` to skip the prompt in scripts and CI, and only for sources you
+already trust. There's no `module update`: reinstall from GitHub to refresh a
+managed module.
+
+## Configuring
+
+Modules can declare their own settings. Open **Settings → Modules**
+(`Ctrl+Space` then the Menu button, or click **Menu** in the sidebar) and you'll
+see each module with its settings indented beneath it:
+
+- **Toggles** flip with `⏎` or a click.
+- **Numbers and choices** step with the `‹ ›` arrows.
+- **Text** opens a small prompt on `⏎`. Values marked secret show as `••••••`
+  and are never echoed back.
+
+Settings are collapsed while a module is disabled, so the list stays short.
+
+The same values are reachable from the CLI, which is handy for setup scripts:
+
+```sh
+bohay module settings you.ci               # every key, its type, current value
+bohay module settings you.ci limit         # read one
+bohay module settings you.ci limit 30      # write one
+```
+
+A listing reports a secret only as `"set": true|false`, never its value, since
+that output usually lands in your scrollback. Ask for the key by name when a
+script genuinely needs it.
+
+Anything a module stores itself lives in its own directory:
+
+```sh
+bohay module config-dir you.ci   # prints (and creates) it
+```
+
+## Managing
+
+```sh
+bohay module list                # what's installed, and whether it's runnable
+bohay module info <id>           # its actions, panes, docks, events, source
+bohay module enable <id>
+bohay module disable <id>
+bohay module run <id> <action>   # invoke an action by hand
+bohay module log [<id>]          # captured stdout/stderr + exit status
+bohay module uninstall <id>      # unregister + delete a managed checkout
+bohay module unlink <id>         # unregister only, leave the files alone
+```
+
+Everything here also works from **Settings → Modules**, where a click toggles a
+module on or off.
+
+**Disabling is the off switch you want.** A disabled module runs nothing: no
+actions, no event hooks, no startup commands, and its docks and right-click
+entries disappear. Re-enabling it lets it repaint its docks immediately, without
+a restart.
+
+`uninstall` only deletes files for modules bohay manages (installed from
+GitHub). For a module you linked from your own working directory it refuses, and
+tells you to use `unlink` instead, so it can never delete your source.
+
+## Where a module can show up
+
+Once enabled, a module appears wherever its manifest said it should:
+
+| Surface | Where you'll see it |
+|---|---|
+| **Dock** | A panel in either sidebar. Move it, or turn it off, in Settings → Layout |
+| **Pane** | A real pane you open with `bohay module pane open <id> <entrypoint>` |
+| **Right-click** | Extra rows below the divider in the pane, workspace, or agent menus |
+| **Settings** | Its own section in Settings → Modules |
+| **Events** | Invisible: it just runs when agents, panes, tabs, or tasks change |
+
+Docks are placed by the user, not the module. From **Settings → Layout**, each
+dock has `[Left] [Right] [Off]` buttons, so a module can suggest a side but
+never keep it.
+
+## Developing locally
+
+While writing a module, register your working directory instead of installing:
+
+```sh
+bohay module link /path/to/my-module      # add --disabled to register it off
+bohay module unlink you.my-module         # deregister; your files are untouched
+```
+
+`link` does **not** run `[[build]]` steps: build your own tree. Linking also
+runs the module's startup hooks straight away, so a dock shows up without a
+restart.
+
+Try the three examples that ship in the repo:
+
+```sh
+bohay module link ./examples/modules/branch-dock
+```
+
+## Trust
+
+A module is ordinary code that runs on your machine, as you, with your
+environment and your full bohay CLI. That openness is the point. It's the same
+deal as an editor extension or a shell plugin, and the same judgment applies.
+
+What bohay does for you:
+
+- Shows every declared command before an install, and waits for confirmation.
+- Runs build steps with a scrubbed environment and no socket access.
+- Refuses an install if the manifest changed after you saw the preview.
+- Pins the installed commit, so a later force-push doesn't change what you ran.
+- Keeps each module's config and state in its own directory.
+- Refuses to delete files it doesn't manage.
+
+What it does not do: **sandbox**. bohay doesn't inspect or restrict what a
+module's code does once you approve it. Install from authors you trust, skim the
+manifest and the scripts, and pin `--ref` when you want a specific revision.
+
+## Troubleshooting
+
+| Symptom | What's happening |
+|---|---|
+| Listed but `runnable: false` | Disabled, gated to another OS by `platforms`, or its manifest failed to load. `module list` shows the warning. |
+| An action *is ambiguous* | Two modules use the same action id. Qualify it: `module run <module-id> <action>`. |
+| Nothing in the log | The entry stays `running` until the command exits. Output is capped at 64 KiB per stream. |
+| A dock is empty | It repaints from a startup hook. If the module has none, run its refresh action once. |
+| Right-click row missing | The module is disabled, or the action's `platforms` exclude your OS. |
+| `module search` fails | It needs `curl` or `wget`, and GitHub rate-limits anonymous search. Browse [the topic](https://github.com/topics/bohay-module) instead. |
+| Install refused | Installing over a locally linked module is blocked. `unlink` the local one first. |
