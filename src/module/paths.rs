@@ -1,5 +1,5 @@
 //! Module filesystem layout under `~/.bohay/modules/` and the deterministic
-//! id→path-component sanitizer (docs/13 §3.6). Module ids may contain `:`/`.`
+//! id→path-component sanitizer (docs/13 §3.11). Module ids may contain `:`/`.`
 //! which aren't always safe filesystem components, so they're encoded.
 
 use std::collections::hash_map::DefaultHasher;

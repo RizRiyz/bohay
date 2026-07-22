@@ -3,7 +3,8 @@
 //! when open; returns the hit-test rects `render()` stores on the `App`.
 
 use super::*;
-use crate::app::{LayoutRow, SettingsTab};
+use crate::app::{LayoutRow, ModuleRow, SettingsTab};
+use crate::module::manifest::SettingKind;
 use ratatui::widgets::{Borders, Clear};
 
 pub(super) struct SettingsHits {
@@ -502,7 +503,8 @@ fn draw_content(
             }
         }
         SettingsTab::Modules => {
-            if app.modules.modules.is_empty() {
+            let rows = app.module_rows();
+            if rows.is_empty() {
                 f.render_widget(
                     Paragraph::new(Span::styled(
                         "   No modules installed — `bohay module link <dir>`.",
@@ -511,41 +513,182 @@ fn draw_content(
                     Rect::new(area.x, area.y, area.width, 1),
                 );
             } else {
-                for (i, m) in app.modules.modules.iter().enumerate() {
-                    let row = Rect::new(area.x, area.y + i as u16, area.width, 1);
-                    if row.y >= area.bottom() {
+                // Scroll so the cursor stays visible once modules expand their
+                // settings past the modal height (same idea as the Layout tab).
+                let h = area.height.max(1) as usize;
+                let first = cursor.saturating_sub(h.saturating_sub(1));
+                for (i, r) in rows.iter().enumerate().skip(first) {
+                    let y = area.y + (i - first) as u16;
+                    if y >= area.bottom() {
                         break;
                     }
+                    let row = Rect::new(area.x, y, area.width, 1);
                     let sel = i == cursor;
                     if sel {
                         fill_bg(f, row, t.sel_bg);
                     }
-                    // name + a hint (action count, or a ⚠ for a load warning)
-                    let hint = if m.warning.is_some() {
-                        " ⚠ unavailable".to_string()
-                    } else {
-                        format!(" · {} action(s)", m.manifest.actions.len())
-                    };
-                    f.render_widget(
-                        Paragraph::new(Line::from(vec![
-                            Span::styled(
-                                format!("  {}", m.id),
-                                Style::new().fg(if sel { t.text } else { t.subtext1 }),
-                            ),
-                            Span::styled(hint, Style::new().fg(t.overlay0)),
-                        ])),
-                        row,
-                    );
-                    f.render_widget(
-                        Paragraph::new(toggle(m.enabled, t)).alignment(Alignment::Right),
-                        Rect::new(row.x, row.y, row.width.saturating_sub(2), 1),
-                    );
+                    match *r {
+                        ModuleRow::Module(mi) => {
+                            let Some(m) = app.modules.modules.get(mi) else {
+                                continue;
+                            };
+                            // name + a hint (surface count, or a ⚠ for a load warning)
+                            let hint = if m.warning.is_some() {
+                                " ⚠ unavailable".to_string()
+                            } else {
+                                module_hint(m)
+                            };
+                            f.render_widget(
+                                Paragraph::new(Line::from(vec![
+                                    Span::styled(
+                                        format!("  {}", m.id),
+                                        Style::new().fg(if sel { t.text } else { t.subtext1 }),
+                                    ),
+                                    Span::styled(hint, Style::new().fg(t.overlay0)),
+                                ])),
+                                row,
+                            );
+                            f.render_widget(
+                                Paragraph::new(toggle(m.enabled, t)).alignment(Alignment::Right),
+                                Rect::new(row.x, row.y, row.width.saturating_sub(2), 1),
+                            );
+                        }
+                        ModuleRow::Setting(mi, si) => {
+                            let Some((m, spec)) = app
+                                .modules
+                                .modules
+                                .get(mi)
+                                .and_then(|m| m.manifest.settings.get(si).map(|s| (m, s)))
+                            else {
+                                continue;
+                            };
+                            let value = crate::module::settings::get(&m.manifest, &m.id, &spec.key)
+                                .unwrap_or_else(|| spec.default_value());
+                            let shown = crate::module::settings::display(spec, &value);
+                            // Indented under its module, with a ╰ tie so a long
+                            // settings list still reads as belonging to it.
+                            let label = format!("  ╰ {}", spec.title);
+                            match spec.kind {
+                                // Number/enum step through `‹ ›`, like the Layout sliders.
+                                SettingKind::Number | SettingKind::Enum => {
+                                    slider_row(
+                                        f,
+                                        area,
+                                        row.y,
+                                        i,
+                                        sel,
+                                        &label,
+                                        shown,
+                                        t,
+                                        &mut arrows,
+                                    );
+                                }
+                                SettingKind::Bool | SettingKind::String => {
+                                    f.render_widget(
+                                        Paragraph::new(Span::styled(
+                                            format!("  {label}"),
+                                            Style::new().fg(if sel { t.text } else { t.subtext0 }),
+                                        )),
+                                        row,
+                                    );
+                                    if spec.kind == SettingKind::Bool {
+                                        let on = value.as_bool().unwrap_or(false);
+                                        f.render_widget(
+                                            Paragraph::new(toggle(on, t))
+                                                .alignment(Alignment::Right),
+                                            Rect::new(row.x, row.y, row.width.saturating_sub(2), 1),
+                                        );
+                                    } else {
+                                        f.render_widget(
+                                            Paragraph::new(Span::styled(
+                                                format!("{shown}  "),
+                                                Style::new().fg(t.accent),
+                                            ))
+                                            .alignment(Alignment::Right),
+                                            row,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     ctls.push((i, row));
                 }
             }
         }
     }
     (ctls, arrows)
+}
+
+/// The one-line summary of what a module contributes, e.g. `· 2 actions · 1 dock`.
+/// Only non-zero surfaces are listed, so a small module stays quiet.
+fn module_hint(m: &crate::module::InstalledModule) -> String {
+    let man = &m.manifest;
+    let parts = [
+        (man.actions.len(), "action"),
+        (man.panes.len(), "pane"),
+        (man.docks.len(), "dock"),
+        (man.settings.len(), "setting"),
+    ];
+    let mut out = String::new();
+    for (n, name) in parts {
+        if n > 0 {
+            let plural = if n == 1 { "" } else { "s" };
+            out.push_str(&format!(" · {n} {name}{plural}"));
+        }
+    }
+    out
+}
+
+/// The inline prompt for a `type = "string"` module setting, drawn over the
+/// Settings modal. Mirrors the tab/workspace rename modals (docs/28).
+pub(super) fn draw_module_setting_prompt(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme) {
+    let Some(e) = app.module_setting_edit.as_ref() else {
+        return;
+    };
+    let w = 52.min(area.width.max(10));
+    let h = 5.min(area.height.max(3));
+    let rect = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(h)) / 2,
+        w,
+        h,
+    );
+    f.render_widget(Clear, rect);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {}", e.title),
+            Style::new().fg(t.subtext1),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    // A secret is echoed as bullets, so a shoulder-surfer can't read a token.
+    let shown = if e.secret {
+        "•".repeat(e.buffer.chars().count())
+    } else {
+        e.buffer.clone()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {shown}▏"),
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " ⏎ save · esc cancel",
+            Style::new().fg(t.overlay0),
+        )),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
 }
 
 /// The `‹ value ›` slider row for control `idx`. Records the two arrow cells as

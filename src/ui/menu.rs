@@ -2,7 +2,7 @@
 //! at the click point.
 
 use super::*;
-use crate::app::{AgentMenu, AgentMenuItem, PaneMenuItem, WsMenuItem};
+use crate::app::{AgentMenuItem, ModuleMenuAction, PaneMenuItem, WsMenuItem};
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
 
@@ -94,10 +94,11 @@ pub(super) fn draw_ws_menu(
     };
     let anchor = menu.anchor;
     let items = app.ws_menu_items(menu.index);
+    let extras = menu.module_actions.clone();
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: ws_label(*it, cat),
+            text: ws_label(*it, cat, &extras),
             divider: matches!(it, WsMenuItem::Divider),
             destructive: matches!(it, WsMenuItem::Close),
         })
@@ -119,11 +120,12 @@ pub(super) fn draw_pane_menu(
         return;
     };
     let anchor = menu.anchor;
-    let items = PaneMenuItem::ALL.to_vec();
+    let items = app.pane_menu_items();
+    let extras = menu.module_actions.clone();
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: pane_label(*it, cat),
+            text: pane_label(*it, cat, &extras),
             divider: matches!(it, PaneMenuItem::Divider),
             destructive: matches!(it, PaneMenuItem::Close),
         })
@@ -145,12 +147,13 @@ pub(super) fn draw_agent_menu(
         return;
     };
     let anchor = menu.anchor;
-    let items = AgentMenu::items_for(menu.target);
+    let items = app.agent_menu_items(menu.target);
+    let extras = menu.module_actions.clone();
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: agent_label(*it, cat),
-            divider: false,
+            text: agent_label(*it, cat, &extras),
+            divider: matches!(it, AgentMenuItem::Divider),
             destructive: matches!(it, AgentMenuItem::Close),
         })
         .collect();
@@ -160,14 +163,16 @@ pub(super) fn draw_agent_menu(
     }
 }
 
-fn agent_label(it: AgentMenuItem, cat: &Catalog) -> String {
+fn agent_label(it: AgentMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
     match it {
         AgentMenuItem::Resume => cat.menu_resume.to_string(),
         AgentMenuItem::Close => cap_first(cat.act_close),
+        AgentMenuItem::Divider => String::new(),
+        AgentMenuItem::Module(i) => module_label(extras, i),
     }
 }
 
-fn ws_label(it: WsMenuItem, cat: &Catalog) -> String {
+fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
     match it {
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
@@ -176,17 +181,26 @@ fn ws_label(it: WsMenuItem, cat: &Catalog) -> String {
         WsMenuItem::Divider => String::new(),
         WsMenuItem::OpenGit => cat.cmd_open_git.to_string(),
         WsMenuItem::OpenOrch => cat.cmd_open_board.to_string(),
+        WsMenuItem::Module(i) => module_label(extras, i),
     }
 }
 
-fn pane_label(it: PaneMenuItem, cat: &Catalog) -> String {
+fn pane_label(it: PaneMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
     match it {
         PaneMenuItem::SplitVertical => cat.menu_split_vertical.to_string(),
         PaneMenuItem::SplitHorizontal => cat.menu_split_horizontal.to_string(),
         PaneMenuItem::RunningCmd => cat.menu_running_cmd.to_string(),
         PaneMenuItem::Divider => String::new(),
         PaneMenuItem::Close => cap_first(cat.act_close),
+        PaneMenuItem::Module(i) => module_label(extras, i),
     }
+}
+
+/// A module action's row label. Module titles come from the module author, so
+/// they are never translated — and a stale index renders blank rather than
+/// panicking (the registry can change while a menu is open).
+fn module_label(extras: &[ModuleMenuAction], i: usize) -> String {
+    extras.get(i).map(|a| a.title.clone()).unwrap_or_default()
 }
 
 /// Uppercase the first character (no-op for scripts without case, e.g. CJK), so

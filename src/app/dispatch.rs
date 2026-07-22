@@ -256,7 +256,7 @@ impl App {
         }
     }
 
-    fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
+    pub(crate) fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
         match method {
             "ping" => Ok(json!({"type":"pong","version": env!("CARGO_PKG_VERSION"),"protocol":1})),
             "server.stop" => {
@@ -432,8 +432,27 @@ impl App {
             // ── tabs ──
             "tab.list" => {
                 let ws = self.ws();
-                let arr: Vec<Value> = (0..ws.tabs.len())
-                    .map(|i| json!({"tab": (i + 1).to_string(), "active": i == ws.active_tab}))
+                let arr: Vec<Value> = ws
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        // `name` is what `tab.rename` writes; `kind` distinguishes
+                        // the dashboard tabs, which have no panes and can't be named.
+                        let kind = if t.git.is_some() {
+                            "git"
+                        } else if t.orch {
+                            "orch"
+                        } else {
+                            "panes"
+                        };
+                        json!({
+                            "tab": (i + 1).to_string(),
+                            "active": i == ws.active_tab,
+                            "name": t.name.clone(),
+                            "kind": kind,
+                        })
+                    })
                     .collect();
                 Ok(json!({"type":"tab_list","tabs":arr}))
             }
@@ -445,6 +464,28 @@ impl App {
                 if let Some(i) = param_usize(p, "tab") {
                     self.switch_tab(i.saturating_sub(1));
                 }
+                Ok(json!({"type":"ok"}))
+            }
+            // Name a tab from a module (docs/13 §3.9) — the same label the
+            // tab-rename modal writes. An empty name clears it back to a number.
+            "tab.rename" => {
+                let i = param_usize(p, "tab")
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or(self.ws().active_tab);
+                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let active = self.active_ws;
+                let tab = self.workspaces[active]
+                    .tabs
+                    .get_mut(i)
+                    .ok_or_else(not_found)?;
+                // Git/orch tabs keep their fixed labels (docs/28).
+                if tab.git.is_some() || tab.orch {
+                    return Err(module_err(
+                        "git and orch tabs cannot be renamed".to_string(),
+                    ));
+                }
+                tab.name = (!name.is_empty()).then(|| name.chars().take(40).collect());
+                self.session_dirty = true;
                 Ok(json!({"type":"ok"}))
             }
             "tab.close" => {
@@ -564,6 +605,12 @@ impl App {
                 }))
             }
             // A module pushes rows into its sidebar dock (docs/29, DOCK-4).
+            // A one-line confirmation, the same transient toast a copy shows.
+            "ui.toast" => {
+                let text = req_str(p, "text")?;
+                self.show_toast(text.chars().take(120).collect::<String>());
+                Ok(json!({"type":"ok"}))
+            }
             "ui.dock.push" => {
                 let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 if id.is_empty() {
@@ -591,6 +638,10 @@ impl App {
                                 dot: r.get("dot").and_then(|v| v.as_str()).map(|s| s.to_string()),
                                 action: r
                                     .get("action")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                value: r
+                                    .get("value")
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string()),
                             })
@@ -757,6 +808,61 @@ impl App {
                     .module_open_pane(module, entrypoint, placement, "api")
                     .map_err(module_err)?;
                 Ok(json!({"type":"pane","pane": id.0.to_string()}))
+            }
+            // ── module settings (docs/13 §3.6) ──
+            "module.settings.list" => {
+                let id = req_str(p, "id")?.to_string();
+                let values = self.module_settings(&id).map_err(module_err)?;
+                let specs: Vec<Value> = self
+                    .modules
+                    .find(&id)
+                    .map(|m| {
+                        m.manifest
+                            .settings
+                            .iter()
+                            .map(|s| {
+                                let v = values.get(&s.key).cloned().unwrap_or(Value::Null);
+                                // A listing is the "show me everything" call and
+                                // usually lands in a terminal, so a secret reports
+                                // only whether it is set — same as the UI. Read the
+                                // exact value with `module.settings.get {key}`.
+                                let set = !matches!(&v, Value::Null)
+                                    && !v.as_str().is_some_and(|t| t.is_empty());
+                                json!({
+                                    "key": s.key, "title": s.title, "type": s.kind,
+                                    "options": s.options, "min": s.min, "max": s.max,
+                                    "secret": s.secret, "set": set,
+                                    "value": if s.secret { Value::Null } else { v },
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(json!({"type":"module_settings","id": id,"settings": specs}))
+            }
+            "module.settings.get" => {
+                let id = req_str(p, "id")?.to_string();
+                let values = self.module_settings(&id).map_err(module_err)?;
+                match p.get("key").and_then(|v| v.as_str()) {
+                    Some(k) => {
+                        let v = values
+                            .get(k)
+                            .cloned()
+                            .ok_or_else(|| module_err(format!("module {id} has no setting {k}")))?;
+                        Ok(json!({"type":"module_setting","id": id,"key": k,"value": v}))
+                    }
+                    None => Ok(json!({"type":"module_settings","id": id,"values": values})),
+                }
+            }
+            "module.settings.set" => {
+                let id = req_str(p, "id")?.to_string();
+                let key = req_str(p, "key")?.to_string();
+                // Accept a JSON value or a bare string (what the CLI sends).
+                let raw = p.get("value").cloned().unwrap_or(Value::Null);
+                let v = self
+                    .module_set_setting(&id, &key, raw)
+                    .map_err(module_err)?;
+                Ok(json!({"type":"module_setting","id": id,"key": key,"value": v}))
             }
             "module.pane.focus" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;

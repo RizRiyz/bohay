@@ -17,6 +17,7 @@ use crate::event::AppEvent;
 use crate::ids::PaneId;
 use crate::ipc::api::{self, ApiRequest, EventBus};
 use crate::layout::{Axis, Dir, TileLayout};
+use crate::module::context::Target;
 use crate::persist::{self, SessionSnapshot};
 use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
@@ -32,8 +33,9 @@ mod picker;
 mod settings;
 
 pub use keys::Cmd;
+pub use modules::ModuleMenuAction;
 pub use picker::{FolderPicker, Row};
-pub use settings::{LayoutRow, SettingsTab, SettingsUi};
+pub use settings::{LayoutRow, ModuleRow, SettingsTab, SettingsUi};
 
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
@@ -99,7 +101,11 @@ pub enum Side {
 pub struct DockRow {
     pub text: String,
     pub dot: Option<String>,
+    /// Action id to invoke when this row is clicked.
     pub action: Option<String>,
+    /// Opaque per-row payload handed to that action as `BOHAY_MODULE_ROW_VALUE`
+    /// — what turns a list of branches into a list of *buttons* (docs/13 §3.10).
+    pub value: Option<String>,
 }
 
 /// A module-contributed dock's cached content (title + rows). bohay owns the
@@ -269,10 +275,15 @@ pub struct WsMenu {
     pub anchor: (u16, u16),
     /// Each visible item + its clickable rect, filled in by the renderer.
     pub items: Vec<(WsMenuItem, Rect)>,
+    /// Module actions offered here, snapshotted when the menu opened (docs/13
+    /// §3.8) so a registry change mid-menu can't shift what a click runs.
+    pub module_actions: Vec<ModuleMenuAction>,
 }
 
 /// An action offered by the workspace context menu. Worktree / git actions only
 /// appear for nodes inside a git repo. `Divider` is a non-interactive separator.
+/// `Module(i)` is the `i`-th module action declaring `contexts = ["workspace"]`
+/// (docs/13 §3.8), resolved against the live registry when clicked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WsMenuItem {
     Close,
@@ -282,6 +293,7 @@ pub enum WsMenuItem {
     Divider,
     OpenGit,
     OpenOrch,
+    Module(usize),
 }
 
 /// A right-click context menu **inside a pane**: split or close it. Opened by
@@ -293,6 +305,8 @@ pub struct PaneMenu {
     pub anchor: (u16, u16),
     /// Each visible item + its clickable rect, filled in by the renderer.
     pub items: Vec<(PaneMenuItem, Rect)>,
+    /// Module actions offered here, snapshotted when the menu opened (docs/13 §3.8).
+    pub module_actions: Vec<ModuleMenuAction>,
 }
 
 /// An action offered by the pane context menu. `SplitVertical` puts the new pane
@@ -306,9 +320,13 @@ pub enum PaneMenuItem {
     RunningCmd,
     Divider,
     Close,
+    /// The `i`-th module action declaring `contexts = ["pane"]` (docs/13 §3.8).
+    Module(usize),
 }
 
 impl PaneMenuItem {
+    /// The built-in rows, in render order. Module actions are appended after a
+    /// divider by [`App::pane_menu_items`].
     pub const ALL: &'static [PaneMenuItem] = &[
         PaneMenuItem::SplitVertical,
         PaneMenuItem::SplitHorizontal,
@@ -333,16 +351,21 @@ pub struct AgentMenu {
     pub target: AgentTarget,
     pub anchor: (u16, u16),
     pub items: Vec<(AgentMenuItem, Rect)>,
+    /// Module actions offered here, snapshotted when the menu opened (docs/13 §3.8).
+    pub module_actions: Vec<ModuleMenuAction>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentMenuItem {
     Resume,
     Close,
+    Divider,
+    /// The `i`-th module action declaring `contexts = ["agent"]` (docs/13 §3.8).
+    Module(usize),
 }
 
 impl AgentMenu {
-    /// The items shown for a given target, in render order.
+    /// The built-in items for a given target, in render order.
     pub fn items_for(target: AgentTarget) -> Vec<AgentMenuItem> {
         match target {
             AgentTarget::Session(_) => vec![AgentMenuItem::Resume, AgentMenuItem::Close],
@@ -743,6 +766,21 @@ pub struct App {
     pub module_logs: Vec<crate::module::ModuleCommandLog>,
     /// Live module panes by pane id, untracked automatically on close (MOD-2).
     pub module_panes: HashMap<PaneId, crate::module::ModulePaneRecord>,
+    /// Modules whose `[[startup]]` hooks have already run this process, so a
+    /// re-entrant call (link, enable, socket-ready) can't run them twice.
+    pub module_startup_done: std::collections::HashSet<String>,
+    /// The module-settings row being edited in Settings → Modules, if any.
+    pub module_setting_edit: Option<ModuleSettingEdit>,
+}
+
+/// The inline text prompt for a `type = "string"` module setting (docs/13 §3.6).
+/// Number/bool/enum settings are stepped with the `‹ ›` arrows instead.
+pub struct ModuleSettingEdit {
+    pub module_id: String,
+    pub key: String,
+    pub title: String,
+    pub buffer: String,
+    pub secret: bool,
 }
 
 impl App {
@@ -885,6 +923,8 @@ impl App {
             modules: crate::module::registry::load(),
             module_logs: Vec::new(),
             module_panes: HashMap::new(),
+            module_startup_done: std::collections::HashSet::new(),
+            module_setting_edit: None,
         };
         // A fresh start still loads `orch.json` — its pane bindings belong to a
         // previous server run, so rebind/clear them (same as `from_snapshot`).
@@ -1178,6 +1218,8 @@ impl App {
             modules,
             module_logs: Vec::new(),
             module_panes,
+            module_startup_done: std::collections::HashSet::new(),
+            module_setting_edit: None,
         };
         // Pane ids are reallocated every run, so the ledger's pane bindings from
         // the previous server are stale — rebind them to the restored panes (by
@@ -1612,6 +1654,7 @@ impl App {
                 index,
                 anchor: (col, row),
                 items: Vec::new(),
+                module_actions: self.module_menu_actions("workspace"),
             });
         }
     }
@@ -1634,6 +1677,42 @@ impl App {
             items.push(WsMenuItem::OpenGit);
         }
         items.push(WsMenuItem::OpenOrch);
+        // Module actions declaring `contexts = ["workspace"]`, below a divider.
+        let extras = self.ws_menu.as_ref().map_or(0, |m| m.module_actions.len());
+        if extras > 0 {
+            items.push(WsMenuItem::Divider);
+            items.extend((0..extras).map(WsMenuItem::Module));
+        }
+        items
+    }
+
+    /// The pane context-menu items: the built-ins, then any module actions
+    /// declaring `contexts = ["pane"]` below a divider.
+    pub fn pane_menu_items(&self) -> Vec<PaneMenuItem> {
+        let mut items = PaneMenuItem::ALL.to_vec();
+        let extras = self
+            .pane_menu
+            .as_ref()
+            .map_or(0, |m| m.module_actions.len());
+        if extras > 0 {
+            items.push(PaneMenuItem::Divider);
+            items.extend((0..extras).map(PaneMenuItem::Module));
+        }
+        items
+    }
+
+    /// The AGENTS-list context-menu items for `target`, plus module actions
+    /// declaring `contexts = ["agent"]`.
+    pub fn agent_menu_items(&self, target: AgentTarget) -> Vec<AgentMenuItem> {
+        let mut items = AgentMenu::items_for(target);
+        let extras = self
+            .agent_menu
+            .as_ref()
+            .map_or(0, |m| m.module_actions.len());
+        if extras > 0 {
+            items.push(AgentMenuItem::Divider);
+            items.extend((0..extras).map(AgentMenuItem::Module));
+        }
         items
     }
 
@@ -1654,13 +1733,23 @@ impl App {
 
     /// Run a context-menu action for the menu's target, then close the menu.
     pub fn ws_menu_action(&mut self, item: WsMenuItem) {
-        let Some(index) = self.ws_menu.as_ref().map(|m| m.index) else {
+        let Some((index, actions)) = self
+            .ws_menu
+            .as_ref()
+            .map(|m| (m.index, m.module_actions.clone()))
+        else {
             return;
         };
         self.ws_menu = None;
         let cwd = self.workspaces.get(index).map(|w| w.cwd.clone());
         match item {
             WsMenuItem::Divider => {}
+            // The right-clicked node, which needn't be the focused one.
+            WsMenuItem::Module(i) => {
+                if let Some(a) = actions.get(i).cloned() {
+                    self.run_module_menu_action("workspace", a, Target::workspace(index));
+                }
+            }
             WsMenuItem::Rename => self.open_ws_rename(index),
             WsMenuItem::Close => self.close_workspace(index),
             WsMenuItem::NewWorktree => {
@@ -1749,6 +1838,7 @@ impl App {
             pane,
             anchor: (col, row),
             items: Vec::new(),
+            module_actions: self.module_menu_actions("pane"),
         });
     }
 
@@ -1769,7 +1859,11 @@ impl App {
 
     /// Run a pane context-menu action on its target pane, then close the menu.
     pub fn pane_menu_action(&mut self, item: PaneMenuItem) {
-        let Some(pane) = self.pane_menu.as_ref().map(|m| m.pane) else {
+        let Some((pane, actions)) = self
+            .pane_menu
+            .as_ref()
+            .map(|m| (m.pane, m.module_actions.clone()))
+        else {
             return;
         };
         self.pane_menu = None;
@@ -1777,6 +1871,13 @@ impl App {
         self.layout_mut().focus = pane;
         match item {
             PaneMenuItem::Divider => {}
+            PaneMenuItem::Module(i) => {
+                if let Some(a) = actions.get(i).cloned() {
+                    let mut target = Target::pane(pane);
+                    target.selection = self.selection_text();
+                    self.run_module_menu_action("pane", a, target);
+                }
+            }
             PaneMenuItem::SplitVertical => self.split(Axis::Col), // side by side
             PaneMenuItem::SplitHorizontal => self.split(Axis::Row), // stacked
             PaneMenuItem::RunningCmd => self.open_cmd_inspect(pane),
@@ -1794,10 +1895,16 @@ impl App {
     /// Open the AGENTS-list context menu for `target` (a resumable session or a
     /// live agent), anchored at the click.
     pub fn open_agent_menu(&mut self, target: AgentTarget, col: u16, row: u16) {
+        // Only a live agent has a pane for an action to act on.
+        let module_actions = match target {
+            AgentTarget::Live(_) => self.module_menu_actions("agent"),
+            AgentTarget::Session(_) => Vec::new(),
+        };
         self.agent_menu = Some(AgentMenu {
             target,
             anchor: (col, row),
             items: Vec::new(),
+            module_actions,
         });
     }
 
@@ -1810,6 +1917,7 @@ impl App {
                 .map(|(it, _)| *it)
         });
         match hit {
+            Some(AgentMenuItem::Divider) => {} // non-interactive; keep the menu open
             Some(it) => self.agent_menu_action(it),
             None => self.agent_menu = None, // click outside dismisses
         }
@@ -1818,7 +1926,11 @@ impl App {
     /// Run an AGENTS-menu action, then close the menu. Resume/Close act on a
     /// session; Close on a live agent jumps to and closes its pane.
     pub fn agent_menu_action(&mut self, item: AgentMenuItem) {
-        let Some(target) = self.agent_menu.as_ref().map(|m| m.target) else {
+        let Some((target, actions)) = self
+            .agent_menu
+            .as_ref()
+            .map(|m| (m.target, m.module_actions.clone()))
+        else {
             return;
         };
         self.agent_menu = None;
@@ -1830,6 +1942,13 @@ impl App {
                 self.close_pane(id);
             }
             (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
+            (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
+                if let Some(a) = actions.get(i).cloned() {
+                    self.run_module_menu_action("agent", a, Target::pane(id));
+                }
+            }
+            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::Divider, _) => {}
         }
     }
 
@@ -4156,6 +4275,7 @@ mod tests {
                 text: "build ok".into(),
                 dot: Some("done".into()),
                 action: None,
+                value: None,
             }],
         );
         assert_eq!(app.sidebars.side_of(&k), Some(Side::Right));

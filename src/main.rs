@@ -636,6 +636,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     app.set_color_mode(ipc::protocol::truecolor_supported());
     let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
     ipc::api::start_server(sock, api_tx, app.events.clone());
+    app.run_module_startup_hooks(); // docs/13 §3.7 — same point as the server role
 
     terminal.draw(|f| ui::render(f, &mut app))?;
     let mut last_draw = Instant::now();

@@ -42,6 +42,10 @@ pub fn run() -> Result<()> {
     let (api_tx, api_rx) = mpsc::channel::<api::ApiRequest>();
     api::start_server(sock, api_tx, app.events.clone());
     start_client_listener(persist::client_socket_path(), tx.clone());
+    // The session is restored and the API socket is listening, so a module's
+    // `[[startup]]` hooks can now call back in — this is where a module
+    // repaints the docks it owns (docs/13 §3.7).
+    app.run_module_startup_hooks();
 
     let mut clients: Clients = HashMap::new();
     let mut foreground: Option<u64> = None;

@@ -88,7 +88,12 @@ fn install_inner(
     }
 
     // 4. Run [[build]] with a scrubbed environment (no BOHAY_*/socket access).
+    // A step gated to other platforms is skipped, so one manifest can carry
+    // both a `npm.cmd` step for Windows and a `make` step for Unix.
     for b in &manifest.build {
+        if !super::manifest::allowed_on(b.platforms.as_ref()) {
+            continue;
+        }
         run_build(&module_root, &b.command)
             .with_context(|| format!("build step {:?} failed", b.command))?;
     }

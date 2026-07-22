@@ -6,9 +6,22 @@
 use std::path::Path;
 
 use super::*;
+use crate::module::context::Target;
 use crate::module::manifest::ModuleManifest;
 use crate::module::runtime::{ModuleCommandLog, ModuleStatus};
-use crate::module::{context, paths, registry, runtime, InstalledModule, ModulePaneRecord};
+use crate::module::{
+    context, paths, registry, runtime, settings, InstalledModule, ModulePaneRecord,
+};
+
+/// One module action offered in a right-click menu (docs/13 §3.8). A menu
+/// snapshots these when it opens, so the rows it draws and the action a click
+/// runs are the same list even if the registry changes underneath.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ModuleMenuAction {
+    pub module_id: String,
+    pub action_id: String,
+    pub title: String,
+}
 
 impl App {
     /// Register a module dir, recording its install `source` (a git install
@@ -36,6 +49,9 @@ impl App {
             warning: None,
         });
         registry::save(&self.modules);
+        // A freshly linked module gets its startup hooks now rather than at the
+        // next restart, so its docks appear immediately.
+        self.run_module_startup_hooks();
         Ok(id)
     }
 
@@ -80,11 +96,14 @@ impl App {
             .ok_or_else(|| format!("no module {id}"))?;
         m.enabled = on;
         registry::save(&self.modules);
-        // Disabling a module retires its docks; re-enabling re-mounts them on the
-        // module's next `ui.dock.push` (docs/29, DOCK-4).
+        // Disabling a module retires its docks; re-enabling re-runs its startup
+        // hooks so it can repaint them (docs/29, DOCK-4).
         if !on {
             let dock_ids = self.module_dock_ids(id);
             self.remove_module_docks(&dock_ids);
+            self.module_startup_done.remove(id);
+        } else {
+            self.run_module_startup_hooks();
         }
         Ok(())
     }
@@ -117,6 +136,112 @@ impl App {
         Ok(dir)
     }
 
+    // ── right-click menus (docs/13 §3.8) ─────────────────────────────────────
+
+    /// The module actions offered in right-click menu `context` (`pane`,
+    /// `workspace`, `agent`, `tab`), in registry order. Called when a menu opens,
+    /// not per frame.
+    pub fn module_menu_actions(&self, context: &str) -> Vec<ModuleMenuAction> {
+        self.modules
+            .modules
+            .iter()
+            .filter(|m| m.is_runnable())
+            .flat_map(|m| {
+                m.manifest
+                    .actions_for_context(context)
+                    .into_iter()
+                    .map(move |a| ModuleMenuAction {
+                        module_id: m.id.clone(),
+                        action_id: a.id.clone(),
+                        title: a.title.clone(),
+                    })
+            })
+            .collect()
+    }
+
+    /// Run a module action picked from a right-click menu, against `target`.
+    ///
+    /// `a` comes from the menu's own snapshot rather than a fresh lookup, so a
+    /// module enabled or disabled while the menu was open can't shift which
+    /// action a click runs. The module is re-resolved here, so one that went
+    /// away in the meantime is a no-op with a toast instead of a wrong action.
+    pub fn run_module_menu_action(&mut self, context: &str, a: ModuleMenuAction, target: Target) {
+        let argv = self
+            .modules
+            .find(&a.module_id)
+            .filter(|m| m.is_runnable())
+            .and_then(|m| m.manifest.action(&a.action_id).map(|x| x.command.clone()));
+        let Some(argv) = argv else {
+            self.show_toast(format!("{} is unavailable", a.module_id));
+            return;
+        };
+        let extra = vec![("BOHAY_MODULE_ACTION_ID".to_string(), a.action_id.clone())];
+        let label = format!("action:{}", a.action_id);
+        let source = format!("menu:{context}");
+        if let Err(e) =
+            self.run_module_command_for(&a.module_id, argv, label, extra, &source, target)
+        {
+            self.show_toast(e);
+        } else {
+            self.show_toast(a.title);
+        }
+    }
+
+    // ── settings (docs/13 §3.6) ──────────────────────────────────────────────
+
+    /// A module's effective settings (manifest defaults under stored values).
+    pub fn module_settings(&self, id: &str) -> Result<serde_json::Map<String, Value>, String> {
+        let m = self
+            .modules
+            .find(id)
+            .ok_or_else(|| format!("no module {id}"))?;
+        Ok(settings::effective(&m.manifest, id))
+    }
+
+    /// Set one declared setting, validated against its spec.
+    pub fn module_set_setting(&mut self, id: &str, key: &str, v: Value) -> Result<Value, String> {
+        let m = self
+            .modules
+            .find(id)
+            .ok_or_else(|| format!("no module {id}"))?;
+        settings::set(&m.manifest, id, key, v)
+    }
+
+    // ── startup hooks (docs/13 §3.7) ─────────────────────────────────────────
+
+    /// Run every enabled module's `[[startup]]` commands once per process.
+    ///
+    /// Called when the session is up and the API socket is listening, and again
+    /// when a module is linked or re-enabled mid-session — a module that paints
+    /// a dock needs somewhere to repaint it after a restart, and `ui.dock.push`
+    /// state is deliberately not persisted.
+    pub fn run_module_startup_hooks(&mut self) {
+        let pending: Vec<(String, Vec<Vec<String>>)> = self
+            .modules
+            .modules
+            .iter()
+            .filter(|m| m.is_runnable() && !self.module_startup_done.contains(&m.id))
+            .map(|m| {
+                let cmds = m
+                    .manifest
+                    .startup
+                    .iter()
+                    .filter(|s| crate::module::manifest::allowed_on(s.platforms.as_ref()))
+                    .map(|s| s.command.clone())
+                    .collect();
+                (m.id.clone(), cmds)
+            })
+            .collect();
+        for (id, cmds) in pending {
+            // Mark done even with no commands, so the scan stays cheap.
+            self.module_startup_done.insert(id.clone());
+            for argv in cmds {
+                let extra = vec![("BOHAY_MODULE_EVENT".to_string(), "startup".to_string())];
+                let _ = self.run_module_command(&id, argv, "startup".to_string(), extra, "startup");
+            }
+        }
+    }
+
     /// Invoke an action by id, optionally constrained to one module. Resolves by
     /// action id when unambiguous, else requires `module`. Returns the log id.
     pub fn module_invoke_action(
@@ -124,6 +249,28 @@ impl App {
         action_id: &str,
         module_filter: Option<&str>,
         source: &str,
+    ) -> Result<u64, String> {
+        self.module_invoke_action_with(action_id, module_filter, source, Vec::new())
+    }
+
+    /// Invoke a dock row's action, carrying that row's identity in the env so a
+    /// single action can back a whole list of rows (docs/13 §3.10).
+    pub fn module_invoke_dock_action(
+        &mut self,
+        action_id: &str,
+        module_filter: Option<&str>,
+        row_env: Vec<(String, String)>,
+    ) -> Result<u64, String> {
+        self.module_invoke_action_with(action_id, module_filter, "dock", row_env)
+    }
+
+    /// Invoke an action, appending `extra_env` to the usual injected environment.
+    pub fn module_invoke_action_with(
+        &mut self,
+        action_id: &str,
+        module_filter: Option<&str>,
+        source: &str,
+        extra_env: Vec<(String, String)>,
     ) -> Result<u64, String> {
         // When a specific module is named, validate it up front for a clear
         // error (e.g. "disabled") instead of a generic "no runnable module …".
@@ -163,7 +310,8 @@ impl App {
                 ))
             }
         };
-        let extra = vec![("BOHAY_MODULE_ACTION_ID".to_string(), action_id.to_string())];
+        let mut extra = vec![("BOHAY_MODULE_ACTION_ID".to_string(), action_id.to_string())];
+        extra.extend(extra_env);
         self.run_module_command(
             &module_id,
             argv,
@@ -188,7 +336,13 @@ impl App {
                 continue;
             }
             for e in &m.manifest.events {
-                if e.on == name {
+                // `workspace.*` also answers to the legacy `node.*` spelling, so
+                // a module written against the old names keeps working.
+                let matches = e.on == name
+                    || e.on
+                        .strip_prefix("node.")
+                        .is_some_and(|suffix| name.strip_prefix("workspace.") == Some(suffix));
+                if matches && crate::module::manifest::allowed_on(e.platforms.as_ref()) {
                     targets.push((m.id.clone(), e.command.clone()));
                 }
             }
@@ -227,7 +381,9 @@ impl App {
             m.manifest
                 .panes
                 .iter()
-                .find(|p| p.id == entrypoint)
+                .find(|p| {
+                    p.id == entrypoint && crate::module::manifest::allowed_on(p.platforms.as_ref())
+                })
                 .map(|p| p.command.clone())
                 .ok_or_else(|| format!("module {module_id} has no pane {entrypoint}"))?
         };
@@ -293,8 +449,7 @@ impl App {
         Ok(id)
     }
 
-    /// Run an argv command for a module: build env + context, enforce the
-    /// in-flight cap, push a `Running` log, and spawn the subprocess.
+    /// Run an argv command for a module against the focused workspace/pane.
     pub fn run_module_command(
         &mut self,
         module_id: &str,
@@ -302,6 +457,21 @@ impl App {
         label: String,
         extra_env: Vec<(String, String)>,
         source: &str,
+    ) -> Result<u64, String> {
+        self.run_module_command_for(module_id, argv, label, extra_env, source, Target::default())
+    }
+
+    /// Run an argv command for a module against an explicit `target`: build the
+    /// env and context, enforce the in-flight cap, push a `Running` log, and
+    /// spawn the subprocess.
+    pub fn run_module_command_for(
+        &mut self,
+        module_id: &str,
+        argv: Vec<String>,
+        label: String,
+        extra_env: Vec<(String, String)>,
+        source: &str,
+        target: Target,
     ) -> Result<u64, String> {
         {
             let module = self
@@ -326,7 +496,7 @@ impl App {
                 runtime::MAX_IN_FLIGHT
             ));
         }
-        let ctx = context::build(self, source);
+        let ctx = context::build_for(self, source, &target);
         let (root, mut env) = {
             let module = self.modules.find(module_id).unwrap();
             (module.root.clone(), runtime::base_env(module, &ctx))
@@ -712,6 +882,568 @@ command = ["sh", "-c", "sleep 5"]
                 .enabled,
             !before
         );
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Link a module whose manifest is `toml`, in a scratch home.
+    fn link(app: &mut App, home: &Path, name: &str, toml: &str) -> String {
+        let dir = home.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bohay-module.toml"), toml).unwrap();
+        app.module_link_with(&dir, true, None).unwrap()
+    }
+
+    /// Pump the loop until `log_id` resolves (or we give up).
+    fn settle(app: &mut App, rx: &std::sync::mpsc::Receiver<AppEvent>, log_id: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100)) {
+                app.handle_event(ev);
+            }
+            let done = app
+                .module_logs
+                .iter()
+                .find(|l| l.id == log_id)
+                .is_some_and(|l| l.status != ModuleStatus::Running);
+            if done || Instant::now() > deadline {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn module_actions_appear_in_the_right_click_menus() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modmenu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Before any module, the menus are exactly the built-ins.
+        let pane_builtins = app.pane_menu_items().len();
+        let ws_builtins = app.ws_menu_items(0).len();
+
+        let id = link(
+            &mut app,
+            &home,
+            "ctx-mod",
+            r#"
+id = "you.ctx"
+name = "Ctx"
+version = "0.1.0"
+min_bohay_version = "0.1.0"
+
+[[actions]]
+id = "on-pane"
+title = "Do pane thing"
+contexts = ["pane"]
+command = ["sh", "-c", "echo pane=$BOHAY_PANE_ID src=$BOHAY_MODULE_CONTEXT_JSON"]
+
+[[actions]]
+id = "on-node"
+title = "Do node thing"
+contexts = ["node"]
+command = ["sh", "-c", "echo ws=$BOHAY_WORKSPACE_ID"]
+
+[[actions]]
+id = "headless"
+title = "Never in a menu"
+command = ["true"]
+"#,
+        );
+
+        // Each menu offers only the actions declaring its context.
+        assert_eq!(app.module_menu_actions("pane").len(), 1);
+        assert_eq!(app.module_menu_actions("workspace").len(), 1, "node alias");
+        assert_eq!(app.module_menu_actions("agent").len(), 0);
+
+        // Opening a menu snapshots them, and adds a divider above the rows.
+        let target = app.layout().focus;
+        app.open_pane_menu(target, 1, 1);
+        assert_eq!(app.pane_menu_items().len(), pane_builtins + 2);
+        app.open_ws_menu(0, 1, 1);
+        assert_eq!(app.ws_menu_items(0).len(), ws_builtins + 2);
+        app.ws_menu = None;
+
+        // The rows actually render, with the module's own title (never translated).
+        {
+            use ratatui::backend::TestBackend;
+            use ratatui::Terminal;
+            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let text: String = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("Do pane thing"), "the module row is drawn");
+            assert!(
+                !text.contains("Never in a menu"),
+                "an action with no contexts stays out of the menu"
+            );
+            // Every row got a clickable rect, module rows included.
+            let rects = app.pane_menu.as_ref().unwrap().items.len();
+            assert_eq!(rects, app.pane_menu_items().len());
+        }
+
+        // Clicking the pane entry runs it against the right-clicked pane, and the
+        // injected context names that pane rather than whatever had focus.
+        app.pane_menu_action(PaneMenuItem::Module(0));
+        assert!(app.pane_menu.is_none(), "the menu closed");
+        let log_id = app
+            .module_logs
+            .iter()
+            .find(|l| l.label == "action:on-pane")
+            .map(|l| l.id)
+            .expect("the action was queued");
+        settle(&mut app, &rx, log_id);
+        let log = app.module_logs.iter().find(|l| l.id == log_id).unwrap();
+        assert_eq!(log.status, ModuleStatus::Succeeded, "stderr: {}", log.err);
+        assert!(
+            log.out.contains(&format!("pane={}", target.0)),
+            "flat BOHAY_PANE_ID points at the clicked pane: {:?}",
+            log.out
+        );
+        assert!(
+            log.out.contains("\"invocation_source\":\"menu:pane\""),
+            "the context records where it came from: {:?}",
+            log.out
+        );
+
+        // Disabling the module retires its menu rows immediately.
+        app.module_set_enabled(&id, false).unwrap();
+        assert_eq!(app.module_menu_actions("pane").len(), 0);
+        app.open_pane_menu(target, 1, 1);
+        assert_eq!(app.pane_menu_items().len(), pane_builtins, "no module rows");
+
+        // A module disabled *while its menu is open* must not shift what a click
+        // runs: the snapshot still names the action, but it no longer resolves,
+        // so the click is a no-op with a toast rather than a wrong action.
+        app.module_set_enabled(&id, true).unwrap();
+        app.open_pane_menu(target, 1, 1);
+        assert_eq!(app.pane_menu.as_ref().unwrap().module_actions.len(), 1);
+        app.module_set_enabled(&id, false).unwrap();
+        let before = app.module_logs.len();
+        app.pane_menu_action(PaneMenuItem::Module(0));
+        assert_eq!(app.module_logs.len(), before, "nothing was run");
+        assert!(app.toast.is_some(), "and the user was told why");
+
+        // An index past the snapshot is ignored rather than panicking.
+        app.open_pane_menu(target, 1, 1);
+        app.pane_menu_action(PaneMenuItem::Module(99));
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn startup_hooks_run_once_and_again_after_re_enable() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modboot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = link(
+            &mut app,
+            &home,
+            "boot-mod",
+            r#"
+id = "you.boot"
+name = "Boot"
+version = "0.1.0"
+min_bohay_version = "0.1.0"
+
+[[startup]]
+command = ["sh", "-c", "echo booted event=$BOHAY_MODULE_EVENT"]
+"#,
+        );
+
+        // Linking already ran it, so the module's dock can paint straight away.
+        let count = |a: &App| {
+            a.module_logs
+                .iter()
+                .filter(|l| l.label == "startup")
+                .count()
+        };
+        assert_eq!(count(&app), 1, "linking runs the hook");
+        let log_id = app
+            .module_logs
+            .iter()
+            .find(|l| l.label == "startup")
+            .unwrap()
+            .id;
+        settle(&mut app, &rx, log_id);
+        let log = app.module_logs.iter().find(|l| l.id == log_id).unwrap();
+        assert_eq!(log.status, ModuleStatus::Succeeded, "stderr: {}", log.err);
+        assert!(log.out.contains("event=startup"), "got: {:?}", log.out);
+
+        // Re-running the sweep (a second server tick) must not double-fire it.
+        app.run_module_startup_hooks();
+        app.run_module_startup_hooks();
+        assert_eq!(count(&app), 1, "once per process");
+
+        // Disable then re-enable: the module gets a fresh chance to repaint.
+        app.module_set_enabled(&id, false).unwrap();
+        assert_eq!(count(&app), 1, "disabling runs nothing");
+        app.module_set_enabled(&id, true).unwrap();
+        assert_eq!(count(&app), 2, "re-enabling re-runs it");
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn declared_settings_reach_a_command_as_env() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modsetenv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link(
+            &mut app,
+            &home,
+            "cfg-mod",
+            r#"
+id = "you.cfg"
+name = "Cfg"
+version = "0.1.0"
+min_bohay_version = "0.1.0"
+
+[[settings]]
+key = "token"
+title = "Token"
+type = "string"
+secret = true
+
+[[settings]]
+key = "limit"
+title = "Limit"
+type = "number"
+default = 5
+min = 1
+max = 10
+
+[[actions]]
+id = "show"
+title = "Show"
+command = ["sh", "-c", "echo t=$BOHAY_SETTING_TOKEN l=$BOHAY_SETTING_LIMIT"]
+"#,
+        );
+
+        // Defaults apply before the user touches anything.
+        let vals = app.module_settings("you.cfg").unwrap();
+        assert_eq!(vals.get("limit").unwrap(), 5);
+        assert_eq!(vals.get("token").unwrap(), "");
+
+        app.module_set_setting("you.cfg", "token", "abc123".into())
+            .unwrap();
+        // Over-max clamps instead of failing the whole write.
+        assert_eq!(
+            app.module_set_setting("you.cfg", "limit", 99.into())
+                .unwrap(),
+            10
+        );
+
+        let log_id = app.module_invoke_action("show", None, "test").unwrap();
+        settle(&mut app, &rx, log_id);
+        let log = app.module_logs.iter().find(|l| l.id == log_id).unwrap();
+        assert_eq!(log.status, ModuleStatus::Succeeded, "stderr: {}", log.err);
+        assert!(
+            log.out.contains("t=abc123 l=10"),
+            "settings reached the command: {:?}",
+            log.out
+        );
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn listing_settings_masks_secrets_but_get_returns_them() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modsec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link(
+            &mut app,
+            &home,
+            "sec-mod",
+            r#"
+id = "you.sec"
+name = "Sec"
+version = "0.1.0"
+min_bohay_version = "0.1.0"
+
+[[settings]]
+key = "token"
+title = "Token"
+type = "string"
+secret = true
+
+[[settings]]
+key = "host"
+title = "Host"
+type = "string"
+default = "example.com"
+"#,
+        );
+        app.module_set_setting("you.sec", "token", "s3cret".into())
+            .unwrap();
+
+        let list = app
+            .dispatch("module.settings.list", &json!({"id": "you.sec"}))
+            .unwrap();
+        let text = list.to_string();
+        assert!(
+            !text.contains("s3cret"),
+            "a listing must not print a secret: {text}"
+        );
+        let entries = list["settings"].as_array().unwrap();
+        let token = entries.iter().find(|e| e["key"] == "token").unwrap();
+        assert_eq!(token["value"], Value::Null, "masked");
+        assert_eq!(token["set"], true, "but reported as configured");
+        // A non-secret is unaffected.
+        let host = entries.iter().find(|e| e["key"] == "host").unwrap();
+        assert_eq!(host["value"], "example.com");
+
+        // Asking for the one key by name still returns it, for scripting.
+        let got = app
+            .dispatch(
+                "module.settings.get",
+                &json!({"id": "you.sec", "key": "token"}),
+            )
+            .unwrap();
+        assert_eq!(got["value"], "s3cret");
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn item_platforms_gate_panes_and_events() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modplat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link(
+            &mut app,
+            &home,
+            "plat-mod",
+            r#"
+id = "you.plat"
+name = "Plat"
+version = "0.1.0"
+min_bohay_version = "0.1.0"
+
+[[panes]]
+id = "nope"
+title = "Elsewhere only"
+platforms = ["plan9"]
+command = ["sh", "-c", "sleep 5"]
+
+[[events]]
+on = "tab.created"
+platforms = ["plan9"]
+command = ["sh", "-c", "echo should-not-run"]
+
+# A module written against the old event spelling still fires.
+[[events]]
+on = "node.created"
+command = ["sh", "-c", "echo legacy-alias-fired"]
+"#,
+        );
+
+        // A pane entrypoint gated to another OS is simply not there.
+        let err = app
+            .module_open_pane("you.plat", "nope", None, "test")
+            .unwrap_err();
+        assert!(err.contains("no pane nope"), "got: {err}");
+
+        // Nor does a gated event hook run.
+        app.emit_event("tab.created", json!({"tab": "1"}));
+        assert!(
+            !app.module_logs
+                .iter()
+                .any(|l| l.label == "event:tab.created"),
+            "a platform-gated hook stays out of the queue"
+        );
+
+        // `workspace.created` still reaches a hook declared as `node.created`.
+        app.emit_event("workspace.created", json!({"workspace": "0"}));
+        assert!(
+            app.module_logs
+                .iter()
+                .any(|l| l.label == "event:workspace.created"),
+            "the legacy node.* alias still fires"
+        );
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn settings_tab_renders_and_edits_module_settings() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modsettab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        link(
+            &mut app,
+            &home,
+            "ui-mod",
+            r#"
+id = "you.ui"
+name = "Ui"
+version = "0.1.0"
+min_bohay_version = "0.1.0"
+
+[[settings]]
+key = "loud"
+title = "Play a sound"
+type = "bool"
+
+[[settings]]
+key = "mode"
+title = "Mode"
+type = "enum"
+options = ["fast", "slow"]
+
+[[settings]]
+key = "token"
+title = "API token"
+type = "string"
+secret = true
+"#,
+        );
+
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        app.open_settings();
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('5'),
+            KeyModifiers::NONE,
+        ))); // Modules
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let screen = |t: &Terminal<TestBackend>| -> String {
+            t.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        };
+        let text = screen(&term);
+        assert!(text.contains("you.ui"), "the module row renders");
+        assert!(
+            text.contains("Play a sound"),
+            "its settings render under it"
+        );
+        assert!(text.contains("Mode"));
+        // 1 module row + 3 settings rows.
+        assert_eq!(app.module_rows().len(), 4);
+        assert_eq!(app.settings_ctl_rects.len(), 4);
+
+        // Row 2 is the enum: `›` steps it to the next option.
+        assert_eq!(
+            app.module_rows()[2],
+            crate::app::ModuleRow::Setting(0, 1),
+            "row 2 is the enum setting"
+        );
+        for _ in 0..2 {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.module_settings("you.ui").unwrap().get("mode").unwrap(),
+            "slow"
+        );
+
+        // Row 3 is the secret string: Enter opens the prompt, typed text saves,
+        // and the screen shows bullets rather than the value.
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.module_setting_edit.is_some(), "the prompt opened");
+        for c in "hunter2".chars() {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let typed = screen(&term);
+        assert!(typed.contains("•••••••"), "a secret echoes as bullets");
+        assert!(!typed.contains("hunter2"), "and never in the clear");
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.module_setting_edit.is_none(), "the prompt closed");
+        assert_eq!(
+            app.module_settings("you.ui").unwrap().get("token").unwrap(),
+            "hunter2"
+        );
+
+        // Disabling the module collapses its settings rows back to one.
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.modules.find("you.ui").unwrap().enabled);
+        assert_eq!(
+            app.module_rows().len(),
+            1,
+            "settings collapse when disabled"
+        );
+        // The cursor came back inside the shrunken list.
+        assert!(app.settings.as_ref().unwrap().cursor < app.module_rows().len());
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         std::env::remove_var("BOHAY_HOME");
         let _ = std::fs::remove_dir_all(&home);

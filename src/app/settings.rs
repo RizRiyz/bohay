@@ -89,6 +89,18 @@ pub enum LayoutRow {
     Dock(DockKind),
 }
 
+/// A selectable row in the Modules tab (docs/13 §3.6): a module, or one of the
+/// settings it declares (indented beneath it while the module is enabled).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModuleRow {
+    Module(usize),
+    Setting(usize, usize),
+}
+
+/// Cap a module setting's typed value, so a pathological paste can't bloat the
+/// module's `settings.json`.
+const MODULE_SETTING_MAX: usize = 512;
+
 impl App {
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
     /// dock section (used to draw the `── Docks ──` divider) is `dock_section_start`.
@@ -137,6 +149,7 @@ impl App {
 
     pub fn close_settings(&mut self) {
         self.settings = None;
+        self.module_setting_edit = None;
     }
 
     /// Number of selectable control rows in `tab` (for cursor clamping + render).
@@ -146,7 +159,7 @@ impl App {
             SettingsTab::Layout => self.layout_rows().len(),
             SettingsTab::Notifications => 3,
             SettingsTab::Keys => crate::app::Cmd::ALL.len(),
-            SettingsTab::Modules => self.modules.modules.len(),
+            SettingsTab::Modules => self.module_rows().len(),
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
             SettingsTab::Language => crate::i18n::LANGS.len(),
         }
@@ -253,6 +266,8 @@ impl App {
                         | Some(LayoutRow::RightWidth)
                         | Some(LayoutRow::Dock(_))
                 ),
+                // Number/enum module settings likewise only move via `‹ ›`.
+                Some(SettingsTab::Modules) => self.module_row_is_slider(i),
                 _ => false,
             };
             if !is_slider {
@@ -305,7 +320,7 @@ impl App {
             SettingsTab::Notifications => {} // the Test row only reacts to Enter/click
             SettingsTab::Keys => {}          // rebind is Enter (capture), not ‹ ›
             SettingsTab::Integrations => self.settings_activate(cursor),
-            SettingsTab::Modules => self.toggle_module(cursor),
+            SettingsTab::Modules => self.toggle_module(cursor, Some(delta)),
         }
     }
 
@@ -330,7 +345,7 @@ impl App {
                 }
             }
             SettingsTab::Integrations => self.install_integration(cursor),
-            SettingsTab::Modules => self.toggle_module(cursor),
+            SettingsTab::Modules => self.toggle_module(cursor, None),
         }
     }
 
@@ -340,11 +355,133 @@ impl App {
         all[cursor.min(all.len() - 1)]
     }
 
-    /// Enable/disable the module at `cursor` in the Modules tab.
-    fn toggle_module(&mut self, cursor: usize) {
-        if let Some(m) = self.modules.modules.get(cursor) {
-            let (id, on) = (m.id.clone(), !m.enabled);
-            let _ = self.module_set_enabled(&id, on);
+    /// The Modules tab's dynamic row model: one row per installed module,
+    /// followed by an indented row per setting it declares while it is enabled.
+    /// Disabled modules collapse, so the list stays short.
+    pub fn module_rows(&self) -> Vec<ModuleRow> {
+        let mut v = Vec::new();
+        for (mi, m) in self.modules.modules.iter().enumerate() {
+            v.push(ModuleRow::Module(mi));
+            if m.enabled && m.warning.is_none() {
+                v.extend((0..m.manifest.settings.len()).map(|si| ModuleRow::Setting(mi, si)));
+            }
+        }
+        v
+    }
+
+    /// Whether Modules row `i` is a `‹ ›` stepper (number/enum), which a click on
+    /// the row body should only select, not change.
+    fn module_row_is_slider(&self, i: usize) -> bool {
+        use crate::module::manifest::SettingKind;
+        let Some(ModuleRow::Setting(mi, si)) = self.module_rows().get(i).copied() else {
+            return false;
+        };
+        self.modules
+            .modules
+            .get(mi)
+            .and_then(|m| m.manifest.settings.get(si))
+            .is_some_and(|s| matches!(s.kind, SettingKind::Number | SettingKind::Enum))
+    }
+
+    /// Enable/disable the module at `cursor`, or step its setting. `delta` is
+    /// the direction for a `‹ ›` press; `None` means "activate" (Enter/click),
+    /// which toggles a bool and opens the prompt for a string.
+    fn toggle_module(&mut self, cursor: usize, delta: Option<i32>) {
+        match self.module_rows().get(cursor).copied() {
+            Some(ModuleRow::Module(mi)) => {
+                if let Some(m) = self.modules.modules.get(mi) {
+                    let (id, on) = (m.id.clone(), !m.enabled);
+                    let _ = self.module_set_enabled(&id, on);
+                    // Collapsing a module can leave the cursor past the end.
+                    self.clamp_settings_cursor();
+                }
+            }
+            Some(ModuleRow::Setting(mi, si)) => self.adjust_module_setting(mi, si, delta),
+            None => {}
+        }
+    }
+
+    /// Apply a step (or an activation) to one declared module setting.
+    fn adjust_module_setting(&mut self, mi: usize, si: usize, delta: Option<i32>) {
+        use crate::module::manifest::SettingKind;
+        let Some((id, spec)) = self.modules.modules.get(mi).and_then(|m| {
+            m.manifest
+                .settings
+                .get(si)
+                .map(|s| (m.id.clone(), s.clone()))
+        }) else {
+            return;
+        };
+        let current = crate::module::settings::get(
+            &self.modules.find(&id).unwrap().manifest.clone(),
+            &id,
+            &spec.key,
+        )
+        .unwrap_or_else(|| spec.default_value());
+
+        // A string setting has nothing to step — Enter (and either arrow) opens
+        // the inline prompt instead.
+        if spec.kind == SettingKind::String {
+            self.module_setting_edit = Some(ModuleSettingEdit {
+                module_id: id,
+                key: spec.key.clone(),
+                title: spec.title.clone(),
+                // A secret starts empty rather than revealing the stored value.
+                buffer: if spec.secret {
+                    String::new()
+                } else {
+                    current.as_str().unwrap_or_default().to_string()
+                },
+                secret: spec.secret,
+            });
+            return;
+        }
+        // Enter on a bool flips it; on a number/enum it advances one step.
+        let step = delta.unwrap_or(1) as i64;
+        let next = crate::module::settings::stepped(&spec, &current, step);
+        if let Err(e) = self.module_set_setting(&id, &spec.key, next) {
+            self.show_toast(e);
+        }
+    }
+
+    /// Key handling for the inline module-setting prompt (docs/13 §3.6).
+    /// `Enter` saves, `Esc` cancels — the same contract as the rename modals.
+    pub fn handle_module_setting_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.module_setting_edit = None,
+            KeyCode::Enter => {
+                if let Some(e) = self.module_setting_edit.take() {
+                    let v = Value::String(e.buffer);
+                    if let Err(err) = self.module_set_setting(&e.module_id, &e.key, v) {
+                        self.show_toast(err);
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(e) = self.module_setting_edit.as_mut() {
+                    e.buffer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(e) = self.module_setting_edit.as_mut() {
+                    if e.buffer.chars().count() < MODULE_SETTING_MAX {
+                        e.buffer.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Keep the settings cursor inside the current tab's row count (rows can
+    /// shrink under it when a module collapses).
+    fn clamp_settings_cursor(&mut self) {
+        let Some(tab) = self.settings.as_ref().map(|u| u.tab) else {
+            return;
+        };
+        let max = self.settings_rows(tab).saturating_sub(1);
+        if let Some(ui) = self.settings.as_mut() {
+            ui.cursor = ui.cursor.min(max);
         }
     }
 

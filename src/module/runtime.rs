@@ -49,8 +49,12 @@ pub fn next_log_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// The always-injected identity + context environment (docs/13 §3.4). Ensures
-/// the module's config/state dirs exist.
+/// The always-injected identity + context + settings environment (docs/13 §3.4).
+/// Ensures the module's config/state dirs exist.
+///
+/// Alongside `BOHAY_MODULE_CONTEXT_JSON` this flattens the ids into plain
+/// `BOHAY_WORKSPACE_ID` / `BOHAY_PANE_ID` / … vars and each declared setting
+/// into `BOHAY_SETTING_<KEY>`, so a bash module never has to parse JSON.
 pub fn base_env(module: &InstalledModule, ctx: &Value) -> Vec<(String, String)> {
     let config = paths::config_dir(&module.id);
     let state = paths::state_dir(&module.id);
@@ -73,7 +77,13 @@ pub fn base_env(module: &InstalledModule, ctx: &Value) -> Vec<(String, String)> 
             state.display().to_string(),
         ),
         ("BOHAY_MODULE_CONTEXT_JSON".to_string(), ctx.to_string()),
+        (
+            "BOHAY_MODULE_VERSION".to_string(),
+            module.manifest.version.clone(),
+        ),
     ];
+    env.extend(super::context::env_from(ctx));
+    env.extend(super::settings::env(&module.manifest, &module.id));
     if let Some(sock) = crate::ipc::api::socket_path_env() {
         env.push(("BOHAY_SOCKET_PATH".to_string(), sock));
     }
