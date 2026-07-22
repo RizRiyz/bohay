@@ -44,11 +44,11 @@ single-digit megabytes.
 ## Install
 
 ```bash
-# macOS (Apple silicon) / Linux — prebuilt binary, no Rust needed
+# macOS (Intel + Apple silicon) / Linux — prebuilt binary, no Rust needed
 curl -fsSL https://bohay.dev/install.sh | sh
 
-brew install RizRiyz/bohay/bohay      # Homebrew
-cargo install bohay                   # any platform, incl. Intel macs
+brew install RizRiyz/bohay/bohay      # Homebrew (also a prebuilt binary)
+cargo install bohay                   # build from source
 ```
 
 ```powershell

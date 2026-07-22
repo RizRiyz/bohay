@@ -14,14 +14,15 @@ Pick whichever channel you prefer:
     curl -fsSL https://bohay.dev/install.sh | sh
     ```
     Downloads the right prebuilt binary for your OS/arch from GitHub releases and
-    puts it on your `PATH` (`/usr/local/bin` or `~/.local/bin`). Prebuilt macOS
-    binaries are **Apple silicon**. On an Intel mac, use the Cargo tab.
+    puts it on your `PATH` (`/usr/local/bin` or `~/.local/bin`). macOS builds ship
+    for both **Apple silicon and Intel**; Linux for x86_64 and arm64.
   </TabItem>
   <TabItem label="Homebrew">
     ```sh
     brew install RizRiyz/bohay/bohay
     ```
-    Builds from the release source. Upgrading later: `brew upgrade bohay`.
+    Installs the same prebuilt binary, so there is no Rust toolchain and no
+    compile step. Upgrading later: `brew upgrade bohay`.
   </TabItem>
   <TabItem label="Cargo">
     ```sh

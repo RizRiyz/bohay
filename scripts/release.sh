@@ -16,10 +16,57 @@ REPO="RizRiyz/bohay"
 die()  { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 step() { printf '\n\033[36m▸ %s\033[0m\n' "$1"; }
 sha256() { if command -v shasum >/dev/null; then shasum -a 256; else sha256sum; fi | cut -d' ' -f1; }
-# Rewrite a formula's release url + sha256 in place ($TAG/$SHA set before calling).
+# Rewrite the formula in place for $TAG. The formula ships **prebuilt binaries**
+# (one url+sha256 per platform) plus a source fallback for Intel macs, so this
+# has to bump the version, every url, and every checksum — each from that
+# platform's published `.sha256` asset. $SHA (the source tarball's checksum) is
+# set before calling.
+#
+# Ordering matters: the binary assets only exist once the release workflow has
+# built them, so `wait_for_assets` runs first.
+FORMULA_TARGETS="aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+
+# Block until every prebuilt asset for $TAG is published (the workflow builds
+# them after the tag push). Gives up after ~10 minutes rather than hanging.
+wait_for_assets() {
+  local waited=0
+  while [ "$waited" -lt 600 ]; do
+    local missing=0
+    for t in $FORMULA_TARGETS; do
+      gh release view "$TAG" --repo "$REPO" --json assets \
+        --jq ".assets[].name" 2>/dev/null | grep -qx "bohay-$TAG-$t.sha256" || missing=1
+    done
+    [ "$missing" = 0 ] && return 0
+    printf '  waiting for release binaries… (%ss)\r' "$waited"
+    sleep 15
+    waited=$((waited + 15))
+  done
+  die "release assets for $TAG never appeared — bump the tap by hand once the workflow finishes"
+}
+
+# The published checksum for one target.
+asset_sha() {
+  gh release download "$TAG" --repo "$REPO" --pattern "bohay-$TAG-$1.sha256" -O - 2>/dev/null \
+    | awk '{print $1}'
+}
+
 bump_formula() {
-  perl -0pi -e "s{archive/refs/tags/v[0-9.]+\.tar\.gz}{archive/refs/tags/$TAG.tar.gz}g" "$1"
-  perl -0pi -e "s/^  sha256 \"[0-9a-f]{64}\"/  sha256 \"$SHA\"/m" "$1"
+  local f="$1" t sha
+  # version + the Intel-mac source fallback
+  perl -0pi -e "s/^  version \"[0-9.]+\"/  version \"$VERSION\"/m" "$f"
+  perl -0pi -e "s{archive/refs/tags/v[0-9.]+\.tar\.gz}{archive/refs/tags/$TAG.tar.gz}g" "$f"
+  # Each prebuilt: rewrite its url to $TAG, then the sha256 on the line after it.
+  for t in $FORMULA_TARGETS; do
+    sha="$(asset_sha "$t")"
+    [ -n "$sha" ] || die "no published checksum for $t — cannot bump the formula"
+    perl -0pi -e "s{releases/download/v[0-9.]+/bohay-v[0-9.]+-$t\.tar\.gz}{releases/download/$TAG/bohay-$TAG-$t.tar.gz}g" "$f"
+    perl -0pi -e "s{(bohay-$TAG-$t\.tar\.gz\"\n\s*sha256 \")[0-9a-f]{64}}{\${1}$sha}s" "$f"
+  done
+  # The source fallback's checksum is the last one still on the old value.
+  perl -0pi -e "s{(archive/refs/tags/$TAG\.tar\.gz\"\n\s*sha256 \")[0-9a-f]{64}}{\${1}$SHA}s" "$f"
+  # Nothing may still point at an older tag.
+  ! grep -qE "v[0-9]+\.[0-9]+\.[0-9]+" "$f" || grep -qE "$TAG" "$f" \
+    || die "formula still references an old tag after the bump"
 }
 
 VERSION="${1:-}"
@@ -114,9 +161,13 @@ echo "  sha256: $SHA"
 
 if [ -f "$TAP/Formula/bohay.rb" ]; then
   step "Update tap ($TAP)"
+  wait_for_assets
   bump_formula "$TAP/Formula/bohay.rb"
   git -C "$TAP" add Formula/bohay.rb
   git -C "$TAP" commit -m "bohay $TAG"
+  # The notch workflow pushes its cask to this same repo during the release, so
+  # land on top of whatever it did instead of being rejected.
+  git -C "$TAP" pull --rebase --quiet
   git -C "$TAP" push
   echo "  ✓ tap pushed — brew install $REPO/bohay now serves $TAG"
 else

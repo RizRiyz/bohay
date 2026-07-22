@@ -42,9 +42,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS: Apple-silicon only (Intel macs: `cargo install bohay`).
-          # GitHub retired the macos-13 Intel runners, and M-series is the target.
+          # macOS: both arches. GitHub retired the Intel (macos-13) runners, but
+          # an Apple-silicon runner cross-compiles x86_64 fine — Xcode ships both
+          # SDKs, so it is just `rustup target add` + `--target`. No Intel runner
+          # needed, and Intel macs get a real binary instead of a source build.
           - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
             os: macos-14
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
