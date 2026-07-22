@@ -40,6 +40,28 @@ idle. That way you never get a false state or a false completion chime.
 The **All / Active** toggle in the header switches between live agents only
 (default) and the full resumable history.
 
+## How bohay knows which agent a pane is running
+
+An agent is a program, so bohay asks the operating system rather than guessing
+from what a pane happens to be showing. It scans the processes running under
+each pane and matches the program name. A pane running `claude` is Claude Code;
+a pane that merely prints the word "claude" is a shell.
+
+That distinction matters more than it sounds. Names like `amp`, `cursor`,
+`droid` and `grok` are ordinary English words, so reading them off the screen
+turns "for example" into Amp and "cursor is out of bounds" into Cursor. Your
+sidebar fills with agents that were never running.
+
+The scan covers every pane at once, a couple of times a second, off the render
+path, so it costs nothing you can feel.
+
+Where bohay cannot see processes, it falls back to reading text, ranked by how
+deliberate that text is: the command the pane was started with, then the window
+title the agent sets for itself, then its output. Names that double as ordinary
+words are only ever believed from the first two, never from output. This
+fallback covers Windows and remote panes, so detection degrades there, it does
+not break.
+
 ## Sound alerts
 
 bohay can play a short retro chime when an agent **finishes** a working stretch
@@ -101,12 +123,54 @@ boundaries.
 
 ## Custom detection rules
 
-Detection ships with a built-in rule set that already covers the known agents.
-If you run an agent bohay does not recognize, or you want to tune how an
-existing one reads, you can add your own rules as TOML files in
-`~/.bohay/manifests/`. Every `*.toml` file in that folder is merged on top of
-the built-ins, and the first time bohay runs it drops an annotated
-`example.toml.txt` there to copy from.
+Detection ships with built-in defaults that already cover the known agents. If
+you run an agent bohay does not recognize, or you want to tune how an existing
+one reads, add your own TOML files in `~/.bohay/manifests/`. Name each file
+after its agent (`myagent.toml`) to keep things findable. Every `*.toml` in that
+folder merges on top of the built-ins, and the first time bohay runs it drops an
+annotated `example.toml.txt` there to copy from.
+
+A manifest controls two separate things:
+
+- `[identity]` decides **which agent** a pane is running
+- `[[rule]]` decides **what state** that agent is in
+
+### Teaching bohay a new agent
+
+`[identity]` lists the names that identify the agent, matched as whole words.
+The two lists differ in how far each name is trusted:
+
+| List | Trusted in |
+|---|---|
+| `distinct` | anywhere, including whatever the pane prints |
+| `ambiguous` | only the command that started the pane, or the agent's own window title |
+
+Put a name in `ambiguous` when it is also an ordinary word, so a pane that
+happens to print it is not mistaken for the agent. Add `replace = true` to drop
+bohay's built-in names instead of adding to them, which is how you remove a
+default you disagree with.
+
+```toml
+# ~/.bohay/manifests/cursor.toml
+agent = "cursor"
+
+[identity]
+distinct = ["cursor-agent"]   # the CLI binary: unmistakable
+ambiguous = ["cursor"]        # also a normal English word
+```
+
+Naming an agent bohay does not ship teaches it a new one, no rebuild and no
+waiting for a release:
+
+```toml
+# ~/.bohay/manifests/myagent.toml
+agent = "myagent"
+
+[identity]
+distinct = ["myagent-cli"]
+```
+
+### State rules
 
 A rule matches text on the pane's screen (or its window title) and, when it
 holds, sets the agent's state. Rules carry a priority, so the highest-priority
@@ -115,7 +179,8 @@ match wins and a rule of yours can override a built-in one for the same agent.
 ```toml
 # ~/.bohay/manifests/myagent.toml
 
-# Which agent these rules apply to. "generic" (the default) means every agent.
+# Which agent this file applies to. "generic" (the default) means every agent,
+# and is only valid for rules: identity always needs a specific agent.
 agent = "myagent"
 
 [[rule]]
