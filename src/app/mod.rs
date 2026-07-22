@@ -2022,6 +2022,14 @@ impl App {
     }
 
     /// Focus a pane anywhere (used when clicking an agent in the global list).
+    /// The node a pane lives in, or `None` if the pane is already gone. Used to
+    /// label a pane with its node (name / branch) in the API and events.
+    pub fn workspace_of_pane(&self, id: PaneId) -> Option<&Workspace> {
+        self.workspaces
+            .iter()
+            .find(|ws| ws.tabs.iter().any(|t| t.layout.leaves().contains(&id)))
+    }
+
     fn focus_pane_global(&mut self, id: PaneId) {
         let mut found = None;
         for (wi, ws) in self.workspaces.iter().enumerate() {
@@ -2306,8 +2314,15 @@ fn worktrees_dir_for(repo: &std::path::Path) -> PathBuf {
 /// Worktree grouping for a workspace at `cwd` (docs/18 WT): its git common dir, if
 /// `cwd` is inside a repo. Workspaces that share one group together in the sidebar.
 fn worktree_membership(cwd: &std::path::Path) -> Option<crate::git::WorktreeMembership> {
-    crate::git::local::common_dir(cwd)
-        .map(|common_dir| crate::git::WorktreeMembership { common_dir })
+    crate::git::local::common_dir(cwd).map(|common_dir| {
+        // A *linked* worktree's common dir lives in the repo's main working tree,
+        // so it is never inside this checkout's own folder. `common_dir` is
+        // already canonical; canonicalize `cwd` too or a symlinked path (macOS
+        // `/tmp` → `/private/tmp`) reads as linked when it is the main tree.
+        let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let linked = !common_dir.starts_with(&real);
+        crate::git::WorktreeMembership { common_dir, linked }
+    })
 }
 
 /// Re-spawn a saved module pane if its module is still installed + runnable;

@@ -156,24 +156,24 @@ impl App {
         };
         for (id, st, agent) in changes {
             // Publishes to subscribers and fires any module `[[events]]` hooks.
-            // Carry the pane's cwd + project basename so consumers (e.g. the notch
-            // companion, docs/24) can label the row without a second call.
-            let (cwd, project) = self
+            // Carry the pane's cwd + its node's label/branch so consumers (e.g. the
+            // notch companion, docs/24) can label the row without a second call.
+            // `project` is the **node label**, matching `agent.list` exactly — a
+            // consumer that patches rows from both must not see the name change
+            // shape (it used to be the cwd basename here, so renaming a node made
+            // the label alternate between the two).
+            let cwd = self
                 .panes
                 .get(&id)
-                .map(|p| {
-                    let proj = p
-                        .cwd
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
-                    (p.cwd.to_string_lossy().to_string(), proj)
-                })
+                .map(|p| p.cwd.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let (project, branch) = self
+                .workspace_of_pane(id)
+                .map(|ws| (ws.name.clone(), ws.branch.clone()))
                 .unwrap_or_default();
             self.emit_event(
                 "pane.agent_status_changed",
-                json!({ "pane": id.0.to_string(), "status": state_str(st), "agent": agent, "cwd": cwd, "project": project }),
+                json!({ "pane": id.0.to_string(), "status": state_str(st), "agent": agent, "cwd": cwd, "project": project, "branch": branch }),
             );
             // The optional retro chime (off by default). A plain shell going
             // quiet or blocking is not an agent, so it stays silent either way.
@@ -434,6 +434,19 @@ impl App {
                 let focus = self.layout().focus;
                 let mut arr = Vec::new();
                 for (wi, ws) in self.workspaces.iter().enumerate() {
+                    // Node-level context, identical for every pane in the node.
+                    // `project` deliberately repeats `workspace_name` so a consumer
+                    // can use one field name across `agent.list` *and*
+                    // `pane.agent_status_changed` without the label flip-flopping
+                    // between the node's label and its folder basename (docs/24).
+                    let branch = ws.branch.clone();
+                    let repo = ws
+                        .worktree
+                        .as_ref()
+                        .map(|m| m.common_dir.to_string_lossy().to_string());
+                    // Resolved when the membership was built (docs/18 WT) — this
+                    // runs on the app loop, so it must stay a field read.
+                    let is_worktree = ws.worktree.as_ref().is_some_and(|m| m.linked);
                     for (ti, tab) in ws.tabs.iter().enumerate() {
                         for id in tab.layout.leaves() {
                             let Some(s) = self.status.get(&id) else {
@@ -443,10 +456,17 @@ impl App {
                             if !(detect::is_agent(&s.agent) || s.agent_session.is_some()) {
                                 continue;
                             }
+                            let cwd = self
+                                .panes
+                                .get(&id)
+                                .map(|p| p.cwd.to_string_lossy().to_string())
+                                .unwrap_or_default();
                             arr.push(json!({
                                 "pane": id.0.to_string(), "agent": s.agent,
                                 "status": state_str(s.state),
                                 "workspace": wi.to_string(), "workspace_name": ws.name,
+                                "project": ws.name, "cwd": cwd,
+                                "branch": branch, "repo": repo, "worktree": is_worktree,
                                 "tab": (ti + 1).to_string(), "focused": id == focus,
                             }));
                         }
@@ -1091,5 +1111,44 @@ fn state_str(s: State) -> &'static str {
         State::Done => "done",
         State::Idle => "idle",
         State::Unknown => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+
+    /// The notch companion (docs/24) patches its rows from **both** `agent.list`
+    /// and `pane.agent_status_changed`. If the two disagree about what `project`
+    /// means, a renamed node visibly alternates between its label and its folder
+    /// basename as snapshots and events interleave. Pin the contract: both carry
+    /// the node label.
+    #[test]
+    fn agent_list_labels_a_pane_with_its_node_name() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // Rename the node so its label and its cwd basename can't coincide.
+        app.workspaces[0].name = "renamed-node".into();
+        app.workspaces[0].branch = Some("feat/x".into());
+
+        // Make the one existing pane look like a live agent.
+        let pane = app.layout().focus;
+        let s = app.status.get_mut(&pane).expect("pane has status");
+        s.agent = "claude".into();
+        s.state = State::Working;
+
+        let out = app
+            .dispatch("agent.list", &json!({}))
+            .expect("agent.list ok");
+        let row = &out["agents"][0];
+        assert_eq!(row["agent"], "claude");
+        assert_eq!(row["status"], "working");
+        // The label the notch renders, and the legacy field it falls back to.
+        assert_eq!(row["project"], "renamed-node");
+        assert_eq!(row["workspace_name"], "renamed-node");
+        assert_eq!(row["branch"], "feat/x");
+        // A plain node is not a linked worktree.
+        assert_eq!(row["worktree"], false);
     }
 }
