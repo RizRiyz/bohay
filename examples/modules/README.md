@@ -1,0 +1,52 @@
+# Example modules
+
+Three complete, working bohay modules — one per language — each covering a
+different part of the extension surface. They are meant to be **copied and
+edited**, not installed as-is.
+
+| Module | Language | Covers |
+|---|---|---|
+| [`branch-dock`](branch-dock) | Bash | A sidebar **dock**, clickable rows with a `value` payload, a **startup hook**, `number` + `enum` **settings**, a `workspace` right-click action |
+| [`agent-ping`](agent-ping) | Python | An **event hook** on agent status, a **secret** setting, an `agent` right-click action, toasts |
+| [`scratch-pane`](scratch-pane) | Node | A **pane** entrypoint, `pane` right-click actions, reading the **selection**, **renaming a tab**, the state dir |
+
+Nothing here needs a build step or a dependency beyond the language runtime
+itself (`sh`, `python3`, `node`).
+
+## Try one
+
+```sh
+bohay module link ./examples/modules/branch-dock
+bohay module list
+```
+
+`branch-dock` paints its dock immediately (its startup hook runs on link), so
+you should see a **BRANCHES** section appear in the left sidebar when the
+active node is a git repo. Click a branch to check it out. Open
+**Settings → Modules** to see its two settings, and right-click a WORKSPACES row
+for its "Refresh branches" entry.
+
+Remove it again with:
+
+```sh
+bohay module unlink example.branch-dock
+```
+
+## Reading them
+
+Start with `branch-dock/refresh.sh`. It is the shortest demonstration of the
+whole idea: read the injected `BOHAY_*` variables, do some work, and call back
+through `$BOHAY_BIN_PATH`. There is no SDK to import in any of these files.
+
+## Writing your own
+
+Full reference: **[bohay.dev/docs/extend/writing-modules](https://bohay.dev/docs/extend/writing-modules/)**.
+
+Two rules worth knowing up front:
+
+- Call back through `$BOHAY_BIN_PATH`, never a bare `bohay` on `PATH`. It points
+  at the running binary, so your module works across Unix sockets and Windows
+  named pipes.
+- Write durable data to `$BOHAY_MODULE_STATE_DIR` or `$BOHAY_MODULE_CONFIG_DIR`,
+  never into the module directory. For a git-installed module that directory is
+  a managed checkout a reinstall replaces.

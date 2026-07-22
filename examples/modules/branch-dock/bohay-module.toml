@@ -1,0 +1,57 @@
+id = "example.branch-dock"
+name = "Branch Dock"
+version = "0.1.0"
+min_bohay_version = "0.8.3"
+description = "A sidebar dock listing the active node's git branches. Click one to check it out."
+platforms = ["macos", "linux"]
+
+# The dock bohay reserves for this module. The module fills it over the socket
+# with `ui.dock.push`; bohay owns the rendering and the user can move it to the
+# other sidebar from Settings -> Layout.
+[[docks]]
+id = "branches"
+title = "BRANCHES"
+placement = "sidebar.left"
+
+# Run once when the session is up and the socket is listening. Dock contents are
+# deliberately not persisted, so this is what repaints the dock after a restart.
+[[startup]]
+command = ["sh", "refresh.sh"]
+
+# Keep the dock honest as the user moves around.
+[[events]]
+on = "workspace.created"
+command = ["sh", "refresh.sh"]
+
+[[events]]
+on = "tab.created"
+command = ["sh", "refresh.sh"]
+
+# Right-click a WORKSPACES row to refresh that node's branches on demand.
+[[actions]]
+id = "refresh"
+title = "Refresh branches"
+contexts = ["workspace"]
+command = ["sh", "refresh.sh"]
+
+# Clicking a dock row invokes this with the branch in BOHAY_MODULE_ROW_ACTION.
+[[actions]]
+id = "checkout"
+title = "Check out branch"
+command = ["sh", "checkout.sh"]
+
+[[settings]]
+key = "limit"
+title = "Branches to show"
+type = "number"
+default = 8
+min = 1
+max = 30
+step = 1
+
+[[settings]]
+key = "sort"
+title = "Sort by"
+type = "enum"
+options = ["recent", "name"]
+default = "recent"
