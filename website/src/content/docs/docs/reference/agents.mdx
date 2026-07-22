@@ -9,11 +9,15 @@ description: What bohay supports per agent, covering live status, session resume
 | GitHub Copilot CLI | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ |
 | opencode | ✓ | ✓ | ✓ |
+| Kimi Code CLI | ✓ | ✓ | ✓ |
 | Cursor | ✓ | resume command | no |
 | Gemini | ✓ | no | no |
 | Aider | ✓ | no | no |
 | Amp | ✓ | no | no |
 | Droid | ✓ | no | no |
+| Grok | ✓ | no | no |
+| Qwen | ✓ | no | no |
+| Kiro | ✓ | no | no |
 
 - **Live status** (blocked/working/done/idle) is screen-based and needs no
   setup, so it works for anything bohay recognizes on screen.
@@ -22,7 +26,9 @@ description: What bohay supports per agent, covering live status, session resume
   restore.
 - **Hook**, via `bohay integration install <agent>`, makes the agent report its
   exact session id and lifecycle events. Removal is surgical:
-  `bohay integration uninstall <agent>` touches only bohay's own entry.
+  `bohay integration uninstall <agent>` touches only bohay's own entry. Kimi keeps
+  its hooks in `~/.kimi-code/config.toml`, the same file as your API keys, so
+  bohay edits it in place and leaves your keys, comments, and own hooks untouched.
 
 Missing your agent? Detection is a small allowlist:
 [open an issue](https://github.com/RizRiyz/bohay/issues) or a PR.

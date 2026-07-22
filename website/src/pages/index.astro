@@ -31,7 +31,7 @@ const AGENTS = [
   { name: 'opencode', Icon: IconOpencode, mono: true, hook: true },
   { name: 'Cursor', Icon: IconCursor, mono: true },
   { name: 'Gemini', Icon: IconGemini },
-  { name: 'Kimi', Icon: IconKimi },
+  { name: 'Kimi', Icon: IconKimi, hook: true },
   { name: 'Amp', Icon: IconAmp },
   { name: 'Grok', Icon: IconGrok, mono: true },
   { name: 'Qwen', Icon: IconQwen },
@@ -225,7 +225,7 @@ const ogImage = 'https://bohay.dev/og.png';
         <a class="card s4" href="/docs/guides/agents/">
           <div class="card-ic">◉</div>
           <h3>See every agent at a glance</h3>
-          <p>One sidebar shows what each agent is doing right now: waiting on you, working, finished, or resting. An optional retro chime tells you the moment one finishes or needs you.</p>
+          <p>One sidebar shows what each agent is doing right now: waiting on you, working, finished, or resting. Status you can trust, too: an agent only counts as working when it really is, so a starting CLI or your own typing never reads as busy. An optional retro chime tells you the moment one finishes or needs you.</p>
           <div class="fx-strip" aria-hidden="true">
             <span class="fx-chip blocked"><i></i>claude · waiting</span>
             <span class="fx-chip working"><i></i>codex · working</span>
@@ -233,6 +233,12 @@ const ogImage = 'https://bohay.dev/og.png';
             <span class="fx-chip idle"><i></i>opencode · resting</span>
           </div>
           <span class="card-go">See the agent view</span>
+        </a>
+        <a class="card s2" href="/docs/guides/agents/">
+          <div class="card-ic">⌘</div>
+          <h3>See what an agent is really running</h3>
+          <p>Agents shorten long commands on screen. Click a pane's title for the real one, in full, straight from the system.</p>
+          <span class="card-go">Inspect a pane</span>
         </a>
         <a class="card s2" href="/docs/getting-started/first-session/">
           <div class="card-ic">∞</div>
