@@ -32,6 +32,10 @@ impl App {
             }
             AppEvent::Resize(_, _) => true,
             AppEvent::PtyData(id) => {
+                // The reader's coalescing flag is deliberately NOT cleared here
+                // — it re-arms on the frame/detect cadence (`rearm_pty_notify`),
+                // so a saturated pane wakes the loop at the render rate, not
+                // once per PTY read.
                 if let Some(s) = self.status.get_mut(&id) {
                     s.last_activity = Instant::now();
                 }
@@ -250,6 +254,15 @@ impl App {
                 {
                     return;
                 }
+                // A pane app that tracks the mouse (a TUI agent like Claude
+                // Code) gets the click itself — that's how clicking a collapsed
+                // tool result expands it, exactly like in a plain terminal. The
+                // click still focuses the pane first. `Shift` bypasses
+                // forwarding for bohay's own text selection (the standard
+                // terminal convention).
+                if !m.modifiers.contains(KeyModifiers::SHIFT) && self.begin_mouse_forward(&m, 0) {
+                    return;
+                }
                 // Begin a selection only inside a pane's content; otherwise drop
                 // any old one. Falls through to normal click handling (focus/etc).
                 self.selection = self
@@ -261,9 +274,24 @@ impl App {
                         cursor: (m.column, m.row),
                     });
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Down(MouseButton::Middle) => {
+                // Middle click has no bohay meaning — forward it to a
+                // mouse-tracking app (button 1), otherwise ignore it.
+                self.begin_mouse_forward(&m, 1);
+                return;
+            }
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Middle) => {
                 if self.resize_drag.is_some() {
                     self.update_resize(m.column, m.row);
+                    return;
+                }
+                // A forwarded press owns its drag — reported with the flags
+                // cached at press time (no engine lock), and only when the app
+                // asked for drag/motion tracking (a click-only app is left alone).
+                if let Some(g) = self.mouse_grab {
+                    if g.drag {
+                        self.send_grabbed_mouse(g, MouseSeq::Drag, m.column, m.row);
+                    }
                     return;
                 }
                 if let Some(sel) = self.selection.as_mut() {
@@ -275,9 +303,14 @@ impl App {
                 }
                 return;
             }
-            MouseEventKind::Up(MouseButton::Left) => {
+            MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
                 if self.resize_drag.is_some() {
                     self.end_resize();
+                    return;
+                }
+                // Close out a forwarded press with its release.
+                if let Some(g) = self.mouse_grab.take() {
+                    self.send_grabbed_mouse(g, MouseSeq::Release, m.column, m.row);
                     return;
                 }
                 // A real drag copies its text + flashes a toast; a plain click
@@ -289,6 +322,32 @@ impl App {
                         self.show_toast(msg);
                     }
                     None => self.selection = None,
+                }
+                return;
+            }
+            MouseEventKind::Moved => {
+                // Hover motion goes only to an any-motion (1003) app under the
+                // cursor. Deliberately *not* counted as user input for
+                // detection: hover isn't typing, and marking it would mask the
+                // agent's working state while the cursor rests on the pane.
+                if self.mouse_grab.is_none() {
+                    if let Some((id, content)) = self.pane_content_at(m.column, m.row) {
+                        if let Some(pane) = self.panes.get(&id) {
+                            let mm = pane.mouse_mode();
+                            if mm.motion {
+                                let col = m.column - content.x + 1;
+                                let row = m.row - content.y + 1;
+                                // No button held = code 3, with the motion flag.
+                                pane.send(&mouse_button_seq(
+                                    3 + mouse_mod_bits(m.modifiers),
+                                    MouseSeq::Drag,
+                                    col,
+                                    row,
+                                    mm.sgr,
+                                ));
+                            }
+                        }
+                    }
                 }
                 return;
             }
@@ -351,15 +410,15 @@ impl App {
                 // user scrolling, not the agent working (docs/07).
                 let mut scrolled_the_app = false;
                 if let Some(pane) = self.panes.get(&id) {
-                    let (mouse_report, sgr) = pane.mouse_mode();
-                    if mouse_report {
+                    let mm = pane.mouse_mode();
+                    if mm.report {
                         // The app tracks the mouse (e.g. a TUI agent like Claude
                         // Code on the alternate screen) — forward the wheel so it
                         // scrolls its own transcript, exactly like a real terminal.
                         let base = content.unwrap_or(Rect::new(0, 0, 1, 1));
                         let col = m.column.saturating_sub(base.x) + 1;
                         let row = m.row.saturating_sub(base.y) + 1;
-                        let seq = mouse_wheel_seq(up, col, row, sgr);
+                        let seq = mouse_wheel_seq(up, col, row, mm.sgr);
                         for _ in 0..3 {
                             pane.send(&seq);
                         }
@@ -673,6 +732,65 @@ impl App {
     }
 
     /// The pane whose **content** rect covers terminal cell `(x, y)`.
+    /// Try to forward a button press at the event's position into a
+    /// mouse-tracking pane app. On success: focuses the pane, snaps its
+    /// viewport live, records the grab — the pressed button with its modifier
+    /// bits, plus the app's drag/SGR flags — so the rest of the gesture is
+    /// **lock-free** (one engine lock per gesture, at press), and sends the
+    /// press. Returns whether the press was forwarded.
+    fn begin_mouse_forward(
+        &mut self,
+        m: &ratatui::crossterm::event::MouseEvent,
+        base_btn: u16,
+    ) -> bool {
+        let Some((id, _)) = self.pane_content_at(m.column, m.row) else {
+            return false;
+        };
+        let Some(pane) = self.panes.get(&id) else {
+            return false;
+        };
+        let mm = pane.mouse_mode();
+        if !mm.report {
+            return false;
+        }
+        pane.scroll_to_bottom(); // the app's coordinates are the live screen's
+        self.layout_mut().focus = id;
+        self.mode = Mode::Normal;
+        let g = crate::app::MouseGrab {
+            pane: id,
+            btn: base_btn + mouse_mod_bits(m.modifiers),
+            drag: mm.drag,
+            sgr: mm.sgr,
+        };
+        self.mouse_grab = Some(g);
+        self.send_grabbed_mouse(g, MouseSeq::Press, m.column, m.row);
+        true
+    }
+
+    /// Send one event of a forwarded gesture using the grab's cached flags —
+    /// no engine lock. Coordinates are translated to pane-local 1-based cells,
+    /// clamped into the pane's content so a drag that wanders outside still
+    /// reports sane positions. Counts as user input for detection, like the
+    /// forwarded wheel.
+    fn send_grabbed_mouse(&mut self, g: crate::app::MouseGrab, kind: MouseSeq, x: u16, y: u16) {
+        let Some(content) = self
+            .pane_content_rects
+            .iter()
+            .find(|(pid, _)| *pid == g.pane)
+            .map(|(_, r)| *r)
+        else {
+            return;
+        };
+        let cx = x.clamp(content.x, content.right().saturating_sub(1));
+        let cy = y.clamp(content.y, content.bottom().saturating_sub(1));
+        let col = cx - content.x + 1;
+        let row = cy - content.y + 1;
+        if let Some(pane) = self.panes.get(&g.pane) {
+            pane.send(&mouse_button_seq(g.btn, kind, col, row, g.sgr));
+        }
+        self.mark_input_for(g.pane);
+    }
+
     fn pane_content_at(&self, x: u16, y: u16) -> Option<(PaneId, Rect)> {
         self.pane_content_rects
             .iter()
@@ -999,6 +1117,53 @@ fn is_prefix(key: &KeyEvent) -> bool {
 
 /// Encode one mouse-wheel notch as the bytes a mouse-tracking app expects.
 /// `up` selects the wheel-up/down button; `col`/`row` are 1-based, pane-local.
+/// The phase of a forwarded button event.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MouseSeq {
+    Press,
+    Drag,
+    Release,
+}
+
+/// The xterm modifier bits ORed into a mouse button code: Shift +4, Alt +8,
+/// Ctrl +16.
+fn mouse_mod_bits(mods: ratatui::crossterm::event::KeyModifiers) -> u16 {
+    use ratatui::crossterm::event::KeyModifiers;
+    let mut bits = 0;
+    if mods.contains(KeyModifiers::SHIFT) {
+        bits += 4;
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        bits += 8;
+    }
+    if mods.contains(KeyModifiers::CONTROL) {
+        bits += 16;
+    }
+    bits
+}
+
+/// Encode a mouse button event (`btn`: 0 left · 1 middle · 2 right, plus any
+/// [`mouse_mod_bits`]) at 1-based `col`/`row` as the terminal escape a
+/// mouse-tracking app expects. SGR (1006): `ESC [< code;col;row M` for
+/// press/drag (`m` for release), with +32 on the code while moving. Legacy
+/// X10: `ESC [M` + three offset bytes, release encoded as button 3 (modifier
+/// bits kept).
+fn mouse_button_seq(btn: u16, kind: MouseSeq, col: u16, row: u16, sgr: bool) -> Vec<u8> {
+    let motion = if kind == MouseSeq::Drag { 32 } else { 0 };
+    if sgr {
+        let end = if kind == MouseSeq::Release { 'm' } else { 'M' };
+        format!("\x1b[<{};{col};{row}{end}", btn + motion).into_bytes()
+    } else {
+        let code = if kind == MouseSeq::Release {
+            3 | (btn & !3)
+        } else {
+            btn + motion
+        };
+        let enc = |v: u16| (32 + v.min(223)) as u8;
+        vec![0x1b, b'[', b'M', enc(code), enc(col), enc(row)]
+    }
+}
+
 fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
     let btn: u16 = if up { 64 } else { 65 };
     if sgr {
@@ -1109,6 +1274,64 @@ mod tests {
         assert_eq!(
             mouse_wheel_seq(false, 12, 40, true),
             b"\x1b[<65;12;40M".to_vec()
+        );
+    }
+
+    #[test]
+    fn button_seq_encodes_press_drag_and_release() {
+        // SGR press/drag/release: drag adds +32 to the code, release ends in `m`.
+        assert_eq!(
+            mouse_button_seq(0, MouseSeq::Press, 5, 3, true),
+            b"\x1b[<0;5;3M".to_vec()
+        );
+        assert_eq!(
+            mouse_button_seq(0, MouseSeq::Drag, 6, 3, true),
+            b"\x1b[<32;6;3M".to_vec()
+        );
+        assert_eq!(
+            mouse_button_seq(0, MouseSeq::Release, 6, 3, true),
+            b"\x1b[<0;6;3m".to_vec()
+        );
+        // Middle button is code 1.
+        assert_eq!(
+            mouse_button_seq(1, MouseSeq::Press, 1, 1, true),
+            b"\x1b[<1;1;1M".to_vec()
+        );
+        // Legacy X10: release is button 3; bytes are offset by 32 and capped.
+        assert_eq!(
+            mouse_button_seq(0, MouseSeq::Press, 1, 1, false),
+            vec![0x1b, b'[', b'M', 32, 33, 33]
+        );
+        assert_eq!(
+            mouse_button_seq(0, MouseSeq::Release, 1, 1, false),
+            vec![0x1b, b'[', b'M', 35, 33, 33]
+        );
+        // Modifier bits ride on the code (Ctrl = +16) and survive an X10 release.
+        assert_eq!(
+            mouse_button_seq(16, MouseSeq::Press, 1, 1, true),
+            b"\x1b[<16;1;1M".to_vec()
+        );
+        assert_eq!(
+            mouse_button_seq(16, MouseSeq::Release, 1, 1, false),
+            vec![0x1b, b'[', b'M', 32 + 19, 33, 33]
+        );
+        // Hover motion (1003): no button held = code 3, +32 while moving.
+        assert_eq!(
+            mouse_button_seq(3, MouseSeq::Drag, 2, 2, true),
+            b"\x1b[<35;2;2M".to_vec()
+        );
+    }
+
+    #[test]
+    fn modifier_bits_follow_the_xterm_convention() {
+        use ratatui::crossterm::event::KeyModifiers;
+        assert_eq!(mouse_mod_bits(KeyModifiers::NONE), 0);
+        assert_eq!(mouse_mod_bits(KeyModifiers::SHIFT), 4);
+        assert_eq!(mouse_mod_bits(KeyModifiers::ALT), 8);
+        assert_eq!(mouse_mod_bits(KeyModifiers::CONTROL), 16);
+        assert_eq!(
+            mouse_mod_bits(KeyModifiers::SHIFT | KeyModifiers::CONTROL),
+            20
         );
     }
 

@@ -17,3 +17,4 @@ website/.astro/
 website/public/install.sh
 website/public/install.ps1
 .DS_Store
+changelog/

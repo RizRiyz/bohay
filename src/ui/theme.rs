@@ -384,9 +384,18 @@ impl State {
     }
 }
 
-/// The working spinner's frames: the classic braille cycle every CLI tool uses,
-/// so it reads as "busy" instantly. Ten frames at the loop's ~100ms spin tick is
-/// one smooth revolution per second.
+/// The working spinner's frames: a braille mark rotating around the **middle**
+/// of the cell, so it sits level with the `○`/`●` dots on neighbouring rows.
+///
+/// A braille cell has four dot rows, and which rows a glyph uses decides where it
+/// sits vertically. The classic CLI spinner (`⠋⠙⠹…`) uses dots 1-6 (the upper
+/// three rows) and visibly rides high; the bottom two rows (dots 3/6/7/8) ride
+/// just as visibly low. These frames use dots **2/3/5/6** — rows two and three —
+/// which is the vertical centre of the cell.
+///
+/// Each frame is one edge of that 2x2 dot square, so the mark sweeps clockwise:
+/// left → top → right → bottom. Every frame is exactly two dots, so the spinner
+/// keeps constant weight as it turns (no pulsing).
 ///
 /// Glyph choice matters for alignment, so don't swap these casually:
 ///
@@ -402,7 +411,7 @@ impl State {
 ///   so there is no fallback to another face at a different size.
 ///
 /// [`state_glyphs_are_one_column`] guards these properties.
-const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const FRAMES: [&str; 4] = ["⠆", "⠒", "⠰", "⠤"];
 
 /// Frames in one full revolution. Iterate this instead of hardcoding a count so
 /// changing the animation can't silently desync a caller or a test.

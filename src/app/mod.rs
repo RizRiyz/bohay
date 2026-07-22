@@ -393,6 +393,17 @@ impl OrchForm {
     }
 }
 
+/// A forwarded mouse press held by a mouse-tracking pane app (see
+/// `App.mouse_grab`): the pressed button (with modifier bits already encoded)
+/// plus the app's drag/SGR flags captured at press time.
+#[derive(Clone, Copy)]
+pub struct MouseGrab {
+    pub pane: PaneId,
+    pub btn: u16,
+    pub drag: bool,
+    pub sgr: bool,
+}
+
 /// The board's **start-worker picker**: choose which agent to launch in the
 /// task's isolated worktree (or a plain shell). Opened by `s` on the board.
 pub struct OrchStart {
@@ -633,6 +644,12 @@ pub struct App {
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
+    /// A mouse button forwarded into a mouse-tracking pane app: set on press so
+    /// the matching drag/release reach the same app even if the cursor leaves
+    /// the pane mid-drag. Caches the app's drag/SGR flags from press time so
+    /// drags and releases touch no engine lock (the PTY reader holds that mutex
+    /// during output bursts).
+    pub mouse_grab: Option<MouseGrab>,
     /// Text to copy to the client's system clipboard (via OSC 52) — set when a
     /// selection finishes, drained + broadcast by the loop.
     pub pending_clipboard: Option<String>,
@@ -735,7 +752,16 @@ impl App {
         let keymap = keys::build_keymap(&config.keybindings);
 
         let id = PaneId::alloc();
-        let pane = Pane::spawn(id, cols, rows, cwd.clone(), app_tx.clone(), None, &shell)?;
+        let pane = Pane::spawn(
+            id,
+            cols,
+            rows,
+            cwd.clone(),
+            app_tx.clone(),
+            None,
+            &shell,
+            config.scrollback(),
+        )?;
         let command = pane.command.clone();
         let mut panes = HashMap::new();
         panes.insert(id, pane);
@@ -800,6 +826,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: false,
             selection: None,
+            mouse_grab: None,
             pending_clipboard: None,
             toast: None,
             downsample: false,
@@ -871,6 +898,7 @@ impl App {
         let config = crate::config::load();
         let keymap = keys::build_keymap(&config.keybindings);
         let shell = crate::platform::resolve_shell(&config.shell);
+        let scrollback = config.scrollback();
         let modules = crate::module::registry::load();
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
@@ -926,10 +954,9 @@ impl App {
                     });
                     // A module pane re-runs its entrypoint if the module is still
                     // installed + runnable; otherwise it falls back to a shell.
-                    let restored = ps
-                        .module
-                        .as_ref()
-                        .and_then(|(mid, ep)| restore_module_pane(&modules, mid, ep, id, &app_tx));
+                    let restored = ps.module.as_ref().and_then(|(mid, ep)| {
+                        restore_module_pane(&modules, mid, ep, id, &app_tx, scrollback)
+                    });
                     let (pane, module_rec) = match restored {
                         Some((p, rec)) => (p, Some(rec)),
                         None => {
@@ -950,6 +977,7 @@ impl App {
                                         ps.screen.as_deref(),
                                         &shell,
                                         argv,
+                                        scrollback,
                                     ),
                                     None => Pane::spawn(
                                         id,
@@ -959,6 +987,7 @@ impl App {
                                         app_tx.clone(),
                                         ps.screen.as_deref(),
                                         &shell,
+                                        scrollback,
                                     ),
                                 };
                                 if let Ok(p) = attempt {
@@ -1087,6 +1116,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: false,
             selection: None,
+            mouse_grab: None,
             pending_clipboard: None,
             toast: None,
             downsample: false,
@@ -1302,6 +1332,17 @@ impl App {
             .any(|s| s.state == crate::ui::theme::State::Working)
     }
 
+    /// Re-arm every pane's PTY wake-coalescing flag (see `Pane.data_pending`),
+    /// letting the readers announce fresh output again. Returns whether any
+    /// flag was set — output arrived since the last re-arm, so the caller may
+    /// owe one more render for the tail of a burst. Non-short-circuiting `|`:
+    /// every flag must be consumed.
+    pub fn rearm_pty_notify(&self) -> bool {
+        self.panes
+            .values()
+            .fold(false, |any, p| any | p.take_data_pending())
+    }
+
     pub fn ws(&self) -> &Workspace {
         &self.workspaces[self.active_ws]
     }
@@ -1332,7 +1373,17 @@ impl App {
     fn spawn_into(&mut self, cwd: PathBuf) -> Option<PaneId> {
         let id = PaneId::alloc();
         let shell = crate::platform::resolve_shell(&self.config.shell);
-        match Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None, &shell) {
+        let scrollback = self.config.scrollback();
+        match Pane::spawn(
+            id,
+            80,
+            24,
+            cwd,
+            self.app_tx.clone(),
+            None,
+            &shell,
+            scrollback,
+        ) {
             Ok(pane) => {
                 let cmd = pane.command.clone();
                 self.panes.insert(id, pane);
@@ -1355,12 +1406,30 @@ impl App {
     fn spawn_resume_pane(&mut self, cwd: PathBuf, resume: &str) -> Option<PaneId> {
         let id = PaneId::alloc();
         let shell = crate::platform::resolve_shell(&self.config.shell);
+        let scrollback = self.config.scrollback();
         let argv = crate::platform::shell_run_then_interactive(&shell, resume.trim());
         let spawned = match &argv {
-            Some(a) => {
-                Pane::spawn_shell_with(id, 80, 24, cwd, self.app_tx.clone(), None, &shell, a)
-            }
-            None => Pane::spawn(id, 80, 24, cwd, self.app_tx.clone(), None, &shell),
+            Some(a) => Pane::spawn_shell_with(
+                id,
+                80,
+                24,
+                cwd,
+                self.app_tx.clone(),
+                None,
+                &shell,
+                a,
+                scrollback,
+            ),
+            None => Pane::spawn(
+                id,
+                80,
+                24,
+                cwd,
+                self.app_tx.clone(),
+                None,
+                &shell,
+                scrollback,
+            ),
         };
         match spawned {
             Ok(pane) => {
@@ -2023,7 +2092,7 @@ impl App {
             .iter()
             .find(|(_, rect)| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom())
             .and_then(|(id, _)| self.panes.get(id))
-            .is_some_and(|p| p.mouse_mode().0);
+            .is_some_and(|p| p.mouse_mode().report);
         if over_mouse_app {
             return false;
         }
@@ -2249,6 +2318,7 @@ fn restore_module_pane(
     ep: &str,
     id: PaneId,
     app_tx: &Sender<AppEvent>,
+    scrollback: usize,
 ) -> Option<(Pane, crate::module::ModulePaneRecord)> {
     let m = modules.find(mid).filter(|m| m.is_runnable())?;
     let argv = m
@@ -2260,7 +2330,17 @@ fn restore_module_pane(
     let ctx = serde_json::json!({ "invocation_source": "restore" });
     let mut env = crate::module::runtime::base_env(m, &ctx);
     env.push(("BOHAY_MODULE_ENTRYPOINT_ID".to_string(), ep.to_string()));
-    let pane = Pane::spawn_command(id, 80, 24, m.root.clone(), app_tx.clone(), &argv, &env).ok()?;
+    let pane = Pane::spawn_command(
+        id,
+        80,
+        24,
+        m.root.clone(),
+        app_tx.clone(),
+        &argv,
+        &env,
+        scrollback,
+    )
+    .ok()?;
     Some((
         pane,
         crate::module::ModulePaneRecord {
@@ -2854,6 +2934,102 @@ mod tests {
     }
 
     #[test]
+    fn clicks_forward_to_a_mouse_tracking_app_instead_of_selecting() {
+        // A pane app that requested mouse tracking (a TUI agent) receives
+        // clicks — e.g. clicking a collapsed tool result expands it — instead
+        // of bohay starting a text selection. Shift restores selection.
+        let _env = crate::persist::test_env("mouse-forward");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let id = app.layout().focus;
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(pid, _)| *pid == id)
+            .map(|(_, r)| *r)
+            .expect("pane content rect");
+
+        // The app turns on button-event + SGR mouse tracking.
+        app.panes
+            .get(&id)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?1002h\x1b[?1006h");
+
+        let mouse = |kind, col, row, mods| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: mods,
+        };
+        // Press inside the content: forwarded (grab held), no selection begun.
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            content.x + 4,
+            content.y + 2,
+            KeyModifiers::NONE,
+        )));
+        let g = app.mouse_grab.expect("press grabbed for the app");
+        assert_eq!(g.pane, id);
+        assert_eq!(g.btn, 0);
+        assert!(g.drag, "1002: drag tracking cached at press");
+        assert!(g.sgr, "1006: SGR encoding cached at press");
+        assert!(app.selection.is_none(), "no selection while forwarding");
+        // Drag + release route to the app and close out the grab.
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            content.x + 6,
+            content.y + 2,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.selection.is_none());
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            content.x + 6,
+            content.y + 2,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.mouse_grab.is_none(), "release ends the grab");
+
+        // Shift+click bypasses forwarding: bohay's own selection begins.
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            content.x + 4,
+            content.y + 2,
+            KeyModifiers::SHIFT,
+        )));
+        assert!(app.mouse_grab.is_none());
+        assert!(app.selection.is_some(), "shift+drag still selects text");
+
+        // With tracking off, a plain click selects as before.
+        app.selection = None;
+        app.panes
+            .get(&id)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?1002l");
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            content.x + 4,
+            content.y + 2,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.mouse_grab.is_none());
+        assert!(app.selection.is_some(), "no tracking → selection as before");
+    }
+
+    #[test]
     fn resize_yields_to_pane_close_button() {
         let _env = crate::persist::test_env("resize-close-x");
         use crate::event::AppEvent;
@@ -3322,7 +3498,9 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }));
         };
-        // Click the Layout tab, then toggle "Pane titles" (control row 3).
+        // Click the Layout tab, then toggle "Pane titles". Its index is derived
+        // from `layout_rows()` rather than hardcoded, so inserting a row above it
+        // (e.g. Scrollback) can't silently point this test at the wrong control.
         let layout = app
             .settings_tab_rects
             .iter()
@@ -3333,10 +3511,15 @@ mod tests {
         assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Layout);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let before = app.config.layout.show_titles;
+        let titles_idx = app
+            .layout_rows()
+            .iter()
+            .position(|r| matches!(r, LayoutRow::PaneTitles))
+            .expect("the Layout tab has a Pane titles row");
         let row = app
             .settings_ctl_rects
             .iter()
-            .find(|(i, _)| *i == 3)
+            .find(|(i, _)| *i == titles_idx)
             .unwrap()
             .1;
         click(&mut app, row.x + 2, row.y);

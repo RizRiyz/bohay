@@ -16,6 +16,7 @@ categories = ["command-line-utilities", "development-tools"]
 # notes, previews, or CI/packaging files.
 exclude = [
     "/docs",
+    "/changelog",
     "/.github",
     "/assets",
     "/preview.html",

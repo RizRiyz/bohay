@@ -72,7 +72,7 @@ pub struct AlacrittyEngine {
 }
 
 impl AlacrittyEngine {
-    pub fn new(cols: u16, rows: u16, resp_tx: Sender<Vec<u8>>) -> Self {
+    pub fn new(cols: u16, rows: u16, resp_tx: Sender<Vec<u8>>, scrollback: usize) -> Self {
         let dims = Dims {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
@@ -82,13 +82,12 @@ impl AlacrittyEngine {
             tx: resp_tx,
             title: title.clone(),
         };
-        // Bound per-pane memory: scrollback is the dominant per-pane cost
-        // (history lines × columns × cell). alacritty's default is 10 000
-        // lines; 5 000 is still deep for scroll mode (tmux defaults to 2 000)
-        // at half the worst-case footprint — and it only allocates as history
-        // actually accumulates.
+        // Scrollback is the dominant per-pane cost (history lines × columns ×
+        // cell — measured ~10 MB per pane at 5 000 lines), so it is user-set:
+        // `config.layout.scrollback`, defaulting to tmux's 2 000. Only allocated
+        // as history actually accumulates.
         let config = Config {
-            scrolling_history: 5_000,
+            scrolling_history: scrollback,
             ..Config::default()
         };
         let term = Term::new(config, &dims, proxy);
@@ -212,6 +211,16 @@ impl VtEngine for AlacrittyEngine {
         self.title.lock().ok().and_then(|g| g.clone())
     }
 
+    fn set_scrollback(&mut self, lines: usize) {
+        // `set_options` funnels into `Grid::update_history`, which *shrinks* the
+        // retained history when the limit drops — so lowering the setting frees
+        // memory on existing panes instead of only applying to new ones.
+        self.term.set_options(Config {
+            scrolling_history: lines,
+            ..Config::default()
+        });
+    }
+
     fn scroll(&mut self, delta: i32) {
         if !self.term.mode().contains(TermMode::ALT_SCREEN) {
             self.term.scroll_display(Scroll::Delta(delta));
@@ -244,6 +253,16 @@ impl VtEngine for AlacrittyEngine {
     fn mouse_report(&self) -> bool {
         // MOUSE_MODE = REPORT_CLICK | MOUSE_MOTION | MOUSE_DRAG.
         self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    fn mouse_drag(&self) -> bool {
+        self.term
+            .mode()
+            .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+    }
+
+    fn mouse_motion(&self) -> bool {
+        self.term.mode().contains(TermMode::MOUSE_MOTION)
     }
 
     fn sgr_mouse(&self) -> bool {
@@ -401,10 +420,37 @@ mod tests {
     // Regression: `display_iter` yields *negative* lines once scrolled into
     // history, so skipping `r < 0` progressively blanked the pane — at the top of
     // history it drew nothing at all, and a selection there copied nothing.
+    // Scrollback is the dominant per-pane memory cost, so it is user-set
+    // (Settings → Layout). Lowering the limit must *drop* the excess history
+    // immediately, not just apply to new panes.
+    #[test]
+    fn scrollback_limit_is_honored_and_shrinks_live() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, 100);
+        feed_lines(&mut e, 400);
+        assert_eq!(
+            e.history_len(),
+            100,
+            "history is capped at the configured limit"
+        );
+
+        // Lowering it reclaims immediately…
+        e.set_scrollback(20);
+        assert_eq!(e.history_len(), 20, "excess history is dropped on the spot");
+        // …and the viewport can't be left scrolled past the new end.
+        e.scroll_to_top();
+        assert!(e.scroll_offset() <= 20);
+
+        // Raising it takes effect as new output accumulates.
+        e.set_scrollback(200);
+        feed_lines(&mut e, 400);
+        assert_eq!(e.history_len(), 200, "the raised limit is used");
+    }
+
     #[test]
     fn scrolled_back_still_renders_and_copies_history() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 6, tx);
+        let mut e = AlacrittyEngine::new(40, 6, tx, 2000);
         e.advance(b"OLDEST\r\n");
         feed_lines(&mut e, 40);
 
@@ -435,7 +481,7 @@ mod tests {
     #[test]
     fn detection_text_ignores_scrollback_offset() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 5, tx);
+        let mut e = AlacrittyEngine::new(40, 5, tx, 2000);
         // An old turn that was working, now scrolled far above the live screen.
         e.advance(b"\xE2\xA0\xB9 Thinking... (esc to interrupt)\r\n");
         feed_lines(&mut e, 40);
@@ -475,7 +521,7 @@ mod tests {
     #[test]
     fn scrollback_offset_moves_clamps_and_resets() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx); // 5 visible rows
+        let mut e = AlacrittyEngine::new(20, 5, tx, 2000); // 5 visible rows
         feed_lines(&mut e, 50); // 50 lines → ~45 in scrollback
 
         assert_eq!(e.scroll_offset(), 0, "starts live at the bottom");
@@ -505,7 +551,7 @@ mod tests {
     #[test]
     fn alt_screen_has_no_scrollback() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx);
+        let mut e = AlacrittyEngine::new(20, 5, tx, 2000);
         feed_lines(&mut e, 20);
         e.advance(b"\x1b[?1049h"); // enter the alternate screen
         assert!(e.alt_screen());
@@ -516,15 +562,25 @@ mod tests {
     #[test]
     fn mouse_tracking_modes_are_detected() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx);
+        let mut e = AlacrittyEngine::new(20, 5, tx, 2000);
         assert!(!e.mouse_report(), "no tracking by default");
         assert!(!e.sgr_mouse());
         // A TUI agent enabling normal + SGR mouse reporting (DECSET 1000, 1006).
         e.advance(b"\x1b[?1000h\x1b[?1006h");
         assert!(e.mouse_report(), "wheel should be forwarded to the app");
         assert!(e.sgr_mouse(), "reports use the SGR encoding");
+        assert!(!e.mouse_drag(), "click-only tracking: no drag reports");
+        // Button-event tracking (1002) adds press-and-move reporting.
+        e.advance(b"\x1b[?1002h");
+        assert!(e.mouse_drag(), "drag tracking requested");
+        assert!(!e.mouse_motion(), "1002 is not any-motion hover tracking");
+        // Any-motion tracking (1003) adds hover reporting too.
+        e.advance(b"\x1b[?1003h");
+        assert!(e.mouse_motion());
         // Disabling it hands the wheel back to bohay's scrollback.
-        e.advance(b"\x1b[?1000l");
+        e.advance(b"\x1b[?1003l\x1b[?1002l\x1b[?1000l");
         assert!(!e.mouse_report());
+        assert!(!e.mouse_drag());
+        assert!(!e.mouse_motion());
     }
 }
