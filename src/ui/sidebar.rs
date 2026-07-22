@@ -483,13 +483,21 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
 
     let focus = app.layout().focus;
     // Live agents across every workspace/tab (real agents or panes with a session).
-    let mut live: Vec<(PaneId, String, usize)> = Vec::new();
+    // `(pane, workspace name, tab label)`. The tab label follows the tab bar: a
+    // user-renamed tab (docs/28) shows its name, an unnamed one its number. It is
+    // resolved here rather than stored as an index, so renaming a tab updates the
+    // agent row too instead of leaving a stale `tab N`.
+    let mut live: Vec<(PaneId, String, String)> = Vec::new();
     for ws in app.workspaces.iter() {
         for (ti, tab) in ws.tabs.iter().enumerate() {
+            let tab_label = tab
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("tab {}", ti + 1));
             for id in tab.layout.leaves() {
                 if let Some(s) = app.status.get(&id) {
                     if crate::detect::is_agent(&s.agent) || s.agent_session.is_some() {
-                        live.push((id, ws.name.clone(), ti));
+                        live.push((id, ws.name.clone(), tab_label.clone()));
                     }
                 }
             }
@@ -520,7 +528,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     } else {
         for (vi, k) in (ascroll..atotal).take(acap).enumerate() {
             let y = alist_top + vi as u16 * ROW_STRIDE;
-            if let Some((id, wsname, ti)) = live.get(k) {
+            if let Some((id, wsname, tab_label)) = live.get(k) {
                 // A live agent: runtime status + which workspace/tab it runs in.
                 let id = *id;
                 let focused = id == focus;
@@ -560,7 +568,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                     f,
                     y + 1,
                     Line::from(Span::styled(
-                        format!("  {} · tab {}", wsname, ti + 1),
+                        format!("  {wsname} · {tab_label}"),
                         Style::new().fg(if focused { t.subtext0 } else { t.overlay0 }),
                     )),
                 );
@@ -715,6 +723,39 @@ mod tests {
             }
         }
         None
+    }
+
+    // Regression: the agent row's second line showed a hardcoded `tab N` built
+    // from the tab index, so renaming a tab (docs/28) left the sidebar stale.
+    #[test]
+    fn agent_row_follows_a_renamed_tab() {
+        let _env = crate::persist::test_env("agent-tab-name");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let id = app.layout().focus;
+        app.status.get_mut(&id).unwrap().agent = "claude".into();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        // Unnamed tabs still fall back to their number.
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            buffer_contains(&term, "· tab 1"),
+            "unnamed tab shows its number"
+        );
+
+        // Rename it the way the tab-rename modal does.
+        let ws = app.active_ws;
+        let ti = app.workspaces[ws].active_tab;
+        app.workspaces[ws].tabs[ti].name = Some("core".into());
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            buffer_contains(&term, "· core"),
+            "the agent row must show the renamed tab"
+        );
+        assert!(
+            !buffer_contains(&term, "· tab 1"),
+            "and must not still show the old number"
+        );
     }
 
     // The focused agent's "project · tab N" line sits on the selection
