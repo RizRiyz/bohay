@@ -1,0 +1,34 @@
+id = "example.scratch-pane"
+name = "Scratch Pane"
+version = "0.1.0"
+min_bohay_version = "0.8.3"
+description = "Right-click a pane to open a scratch shell beside it, in that pane's directory."
+
+# A pane entrypoint: bohay spawns this argv as a real pane, so it can be a REPL,
+# a TUI, a log tail -- anything that runs in a terminal.
+[[panes]]
+id = "notes"
+title = "Notes"
+placement = "split"
+command = ["node", "notes.js"]
+
+# Right-click inside any pane to get these rows.
+[[actions]]
+id = "open-notes"
+title = "Open notes beside this"
+contexts = ["pane"]
+command = ["node", "open.js"]
+
+# Right-click a pane with text selected to stash the selection into the notes
+# file -- the selection travels in the invocation context.
+[[actions]]
+id = "stash-selection"
+title = "Send selection to notes"
+contexts = ["pane"]
+command = ["node", "stash.js"]
+
+[[settings]]
+key = "name-the-tab"
+title = "Rename the tab to Notes"
+type = "bool"
+default = true

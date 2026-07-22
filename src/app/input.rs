@@ -128,6 +128,14 @@ impl App {
             }
             return;
         }
+        // A module-setting prompt sits on top of the Settings modal: a click
+        // anywhere cancels it rather than reaching the rows underneath.
+        if self.module_setting_edit.is_some() {
+            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                self.module_setting_edit = None;
+            }
+            return;
+        }
         // While the Settings modal is open it owns the mouse: clicks hit the
         // modal (or dismiss it); everything else is swallowed.
         if self.settings.is_some() {
@@ -548,14 +556,27 @@ impl App {
             .find(|(_, _, rect)| hit(*rect))
             .cloned()
         {
-            if let Some(action) = self
+            if let Some(row) = self
                 .module_docks
                 .get(&dock_id)
                 .and_then(|d| d.rows.get(row_i))
-                .and_then(|r| r.action.clone())
+                .cloned()
             {
-                let owner = self.module_owning_dock(&dock_id);
-                let _ = self.module_invoke_action(&action, owner.as_deref(), "dock");
+                if let Some(action) = row.action {
+                    let owner = self.module_owning_dock(&dock_id);
+                    // Tell the action *which* row was clicked, so one action can
+                    // serve a whole list (docs/13 §3.10).
+                    let extra = vec![
+                        ("BOHAY_MODULE_DOCK_ID".to_string(), dock_id.clone()),
+                        ("BOHAY_MODULE_ROW_INDEX".to_string(), row_i.to_string()),
+                        ("BOHAY_MODULE_ROW_TEXT".to_string(), row.text.clone()),
+                        (
+                            "BOHAY_MODULE_ROW_VALUE".to_string(),
+                            row.value.unwrap_or(row.text),
+                        ),
+                    ];
+                    let _ = self.module_invoke_dock_action(&action, owner.as_deref(), extra);
+                }
             }
             return;
         }
@@ -804,7 +825,7 @@ impl App {
 
     /// Extract the current selection's text from the pane's grid (linear, with
     /// trailing blanks trimmed). `None` for a click without a drag or empty text.
-    fn selection_text(&self) -> Option<String> {
+    pub(crate) fn selection_text(&self) -> Option<String> {
         let sel = self.selection?;
         if !sel.has_range() {
             return None;
@@ -947,6 +968,12 @@ impl App {
         // The help cheat-sheet overlay swallows the next key press and closes.
         if self.help_open {
             self.help_open = false;
+            return true;
+        }
+        // A module-setting prompt sits *inside* the Settings modal, so it must
+        // take keys first (docs/13 §3.6).
+        if self.module_setting_edit.is_some() {
+            self.handle_module_setting_key(key);
             return true;
         }
         // The Settings modal captures all input while open.

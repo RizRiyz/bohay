@@ -30,6 +30,7 @@ tabs:
   tab list                   list tabs in the current workspace
   tab new                    new tab
   tab focus <n>              focus tab n (1-based)
+  tab rename <name>          name a tab (--tab N to target one; empty clears it)
   tab close [<n>]            close a tab (default: active)
 
 panes / agents:
@@ -56,6 +57,7 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui toast <text>            flash a one-line message in the UI
 
 modules (extensions):
   module search [<query>]    find modules published to the `bohay-module` GitHub topic
@@ -72,6 +74,8 @@ modules (extensions):
   module pane focus <pane> | close <pane>
   module log [<id>]          tail module command logs (--limit N)
   module config-dir <id>     print/create a module's config dir
+  module settings <id>       list a module's declared settings and values
+  module settings <id> <key> [<value>]   read / write one setting
 
 git:
   git status                 branch, ahead/behind, working tree of the current workspace

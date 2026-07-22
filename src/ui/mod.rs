@@ -282,6 +282,8 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         app.settings_ctl_rects.clear();
         app.settings_arrow_rects.clear();
     }
+    // A module-setting prompt sits above the modal it was opened from.
+    settings::draw_module_setting_prompt(f, area, app, &t);
 
     // The folder picker also draws last (over everything) when open.
     let picker_open = app.picker.is_some();

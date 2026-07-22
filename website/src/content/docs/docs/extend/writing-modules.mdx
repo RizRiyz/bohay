@@ -7,9 +7,23 @@ A **module** is the way you extend bohay. It's a plain directory with one
 manifest file (`bohay-module.toml`) that declares **commands**, the argv arrays
 bohay runs as subprocesses. There's no SDK, no scripting runtime, and no
 language requirement: if it can be executed and read environment variables, it
-can be a bohay module. A command does its work by reading the injected
-`BOHAY_*` context and, when it needs to change the workspace, by calling the
-same `bohay` CLI you use by hand. **The bohay CLI is the module API**.
+can be a bohay module: a Bash script, a Python file, a Lua or Rust binary, a
+Node app, anything your machine can run. A command does its work by reading the
+injected `BOHAY_*` context and, when it needs to change the workspace, by
+calling the same `bohay` CLI you use by hand. **The bohay CLI is the module
+API**.
+
+A module can reach every surface the app has:
+
+| Surface | Declared as | What you get |
+|---|---|---|
+| **Docks** | `[[docks]]` | A panel in either sidebar, with clickable rows |
+| **Panes** | `[[panes]]` | A real terminal pane running your program |
+| **Tabs** | any command | Create, focus, name, and close tabs |
+| **Right-click** | `contexts` on an action | Rows in the pane / workspace / agent menus |
+| **Settings** | `[[settings]]` | Typed controls in Settings → Modules, no UI code |
+| **Events** | `[[events]]` | Run when agents, panes, tabs, or tasks change |
+| **Startup** | `[[startup]]` | Restore your state when the session comes up |
 
 ## A module in five minutes
 
@@ -24,7 +38,7 @@ my-module/
 id = "you.hello"                 # required, globally unique-ish
 name = "Hello"                   # required
 version = "0.1.0"                # required
-min_bohay_version = "0.1.0"      # required
+min_bohay_version = "0.8.3"      # required
 
 [[actions]]
 id = "refresh"                   # local id (no dots)
@@ -60,9 +74,14 @@ with `module log`.
 | `id` | ✓ | `[a-z0-9:._-]`, ≤120 chars. Dots allowed (e.g. `you.git-status`). |
 | `name` | ✓ | Human-readable, non-empty. |
 | `version` | ✓ | Your module's version. |
-| `min_bohay_version` | ✓ | Install is refused if newer than the host. |
+| `min_bohay_version` | ✓ | Install is refused if newer than the host. Use `0.8.3` if you use right-click menus, settings, startup hooks, or dock row values. |
 | `description` |  | One-line summary. |
 | `platforms` |  | e.g. `["macos", "linux"]`. Omit for all. `[]` is an error. |
+
+Every entry below (`build`, `startup`, `actions`, `events`, `panes`) also
+accepts its own `platforms` list, which overrides the top-level one. That's how
+one manifest ships a `pbcopy` action on macOS and a `clip.exe` action on
+Windows without either showing up on the wrong machine.
 
 ### `[[actions]]`: on-demand commands
 
@@ -70,11 +89,135 @@ with `module log`.
 [[actions]]
 id = "commit"                    # local id: [a-z0-9:_-], ≤120, NO dots
 title = "Commit staged changes"
+contexts = ["pane"]              # optional: also offer it on right-click
+platforms = ["macos", "linux"]   # optional: narrower than the top level
 command = ["bun", "run", "commit.ts"]
 ```
 
 Invoke with `bohay module run <module-id> <action-id>`. The qualified id is
 `{module-id}.{action-id}`.
+
+### `contexts`: put an action in a right-click menu
+
+An action with `contexts` is offered in bohay's own context menus, below a
+divider under the built-in items. This is the shortest path from a shell script
+to something that feels native.
+
+| Context | Where it appears | What the action receives |
+|---|---|---|
+| `pane` | Right-click inside any pane | The clicked pane, plus its **selected text** |
+| `workspace` | Right-click a WORKSPACES row | The clicked node (`node` is a legacy alias) |
+| `agent` | Right-click a live agent in AGENTS | That agent's pane |
+| `tab` | Reserved for a future tab menu | — |
+
+```toml
+[[actions]]
+id = "blame"
+title = "Blame this selection"
+contexts = ["pane"]
+command = ["python3", "blame.py"]
+```
+
+The target is **what you clicked**, not what happened to be focused: right-click
+a background node and `BOHAY_WORKSPACE_CWD` is that node's folder. Actions
+without `contexts` never appear in a menu, which is right for anything meant
+only for the CLI, a dock row, or another module.
+
+`invocation_source` in the context tells you where a run came from
+(`menu:pane`, `menu:workspace`, `menu:agent`, `dock`, `startup`, `event`,
+`cli`, `api`), so one script can serve several entry points.
+
+### `[[settings]]`: user-editable configuration
+
+Declare settings and bohay renders them in **Settings → Modules**, indented
+under your module, and hands the resolved values to every command you run. You
+never write a settings UI, and you never parse a config file.
+
+```toml
+[[settings]]
+key = "token"                    # local id: [a-z0-9:_-], NO dots
+title = "API token"
+type = "string"
+secret = true                    # masked in the UI and in the edit prompt
+
+[[settings]]
+key = "limit"
+title = "Rows to show"
+type = "number"
+default = 20
+min = 1
+max = 99
+step = 1
+
+[[settings]]
+key = "mode"
+title = "Mode"
+type = "enum"
+options = ["fast", "thorough"]
+default = "fast"
+
+[[settings]]
+key = "loud"
+title = "Play a sound"
+type = "bool"
+default = false
+```
+
+| `type` | Control | Notes |
+|---|---|---|
+| `bool` | A toggle | `default` is `false` when omitted |
+| `string` | An inline prompt on `⏎` | `secret = true` echoes bullets |
+| `number` | `‹ ›` steppers | Clamped to `min`/`max`; `step` defaults to 1 |
+| `enum` | `‹ ›` through `options` | Wraps; defaults to the first option |
+
+Values reach your command two ways, so no language needs a JSON parser:
+
+```sh
+echo "$BOHAY_SETTING_TOKEN"          # one flat var per key, UPPER_SNAKE
+echo "$BOHAY_SETTING_MODE"
+echo "$BOHAY_MODULE_SETTINGS_JSON"   # {"token":"...","limit":20,...}
+```
+
+bohay validates on write: a number is clamped into range, an enum choice
+outside `options` is refused, and a type that drifted between module versions
+falls back to the declared default rather than erroring. Values live in
+`$BOHAY_MODULE_CONFIG_DIR/settings.json`, so they survive a reinstall and you
+can read the file directly if you prefer.
+
+Read and write them from a script or the CLI too:
+
+```sh
+bohay module settings you.ci                  # list keys, types, current values
+bohay module settings you.ci limit            # read one
+bohay module settings you.ci limit 30         # write one
+```
+
+:::caution
+A **listing** reports a `secret` setting only as `"set": true|false`, never its
+value, because that output usually lands in a terminal and its scrollback. Ask
+for the key by name (`module settings you.ci token`) when a script genuinely
+needs the value. Your own commands always get the real value in
+`$BOHAY_SETTING_TOKEN`, so a module never needs to read its own secrets back
+over the API.
+:::
+
+### `[[startup]]`: run once when the session is ready
+
+```toml
+[[startup]]
+command = ["sh", "refresh.sh"]
+```
+
+Startup commands run for each enabled module once the session has been restored
+and the API socket is listening. They also run when a module is **linked or
+re-enabled**, so a module never sits idle waiting for a restart.
+
+This is how a module with a dock survives a restart: dock contents are cached in
+memory and deliberately not persisted, so the startup hook is where you repaint
+them. Keep hooks one-shot: restore your state, call what you need, exit. They
+are not supervised daemons, and a failure is logged without stopping the server.
+
+Startup commands get the normal environment plus `BOHAY_MODULE_EVENT=startup`.
 
 ### `[[events]]`: react to lifecycle events
 
@@ -85,10 +228,27 @@ command = ["sh", "notify.sh"]
 ```
 
 Your command runs with `BOHAY_MODULE_EVENT` (the name) and
-`BOHAY_MODULE_EVENT_JSON` (the payload). Hookable events: `node.created` ·
-`node.closed` · `tab.created` · `tab.closed` · `pane.created` · `pane.closed`
-· `pane.agent_status_changed` (payload `{pane, status, agent}`, the
-highest-value hook: notify when `status` becomes `blocked` or `done`).
+`BOHAY_MODULE_EVENT_JSON` (the payload).
+
+| Group | Events |
+|---|---|
+| Workspaces | `workspace.created` · `workspace.closed` (legacy aliases `node.created` / `node.closed`) |
+| Tabs | `tab.created` · `tab.closed` |
+| Panes | `pane.created` · `pane.closed` · `pane.agent_status_changed` |
+| Agents | `agent.hook` |
+| Orchestration | `task.added` · `task.claimed` · `task.started` · `task.updated` · `task.ready` · `task.done` · `task.released` · `task.deleted` · `task.merged` · `task.merge_conflict` · `task.needs_compaction` · `task.gate_running` · `task.gate_passed` · `task.gate_failed` |
+| Leases | `lease.acquired` · `lease.released` |
+
+`pane.agent_status_changed` is the highest-value hook -- notify when `status`
+becomes `blocked` or `done`. Its payload is the richest one:
+
+```json
+{ "pane": "4", "status": "blocked", "agent": "claude",
+  "cwd": "/Users/you/code/app", "project": "app", "branch": "main" }
+```
+
+A hook declared on `node.created` / `node.closed` still fires for the
+`workspace.*` events, so older modules keep working.
 
 ### `[[panes]]`: long-lived UI in a real pane
 
@@ -114,7 +274,7 @@ list) into the chrome.
 
 ```toml
 [[docks]]
-id = "you.ci"                    # local id: [a-z0-9:_-], ≤120, NO dots
+id = "you:ci"                    # local id: [a-z0-9:_-], ≤120, NO dots
 title = "CI"                     # the dock header
 placement = "sidebar.right"      # default side: sidebar.left | sidebar.right
 ```
@@ -128,8 +288,8 @@ the right sidebar, or turn it **Off** with `[Left] [Right] [Off]` buttons.
 Push rows with the CLI:
 
 ```sh
-"$BOHAY_BIN_PATH" ui dock push --id you.ci --title CI --rows '[
-  {"text": "build passing", "dot": "done",    "action": "open-ci"},
+"$BOHAY_BIN_PATH" ui dock push --id you:ci --title CI --rows '[
+  {"text": "build passing", "dot": "done",    "action": "open-ci", "value": "1421"},
   {"text": "3 checks",      "dot": "working"}
 ]'
 ```
@@ -137,7 +297,7 @@ Push rows with the CLI:
 or pipe the JSON array on stdin (handy when you build it with `jq`):
 
 ```sh
-printf '%s' "$rows_json" | "$BOHAY_BIN_PATH" ui dock push --id you.ci --title CI
+printf '%s' "$rows_json" | "$BOHAY_BIN_PATH" ui dock push --id you:ci --title CI
 ```
 
 Each **row** is an object:
@@ -147,14 +307,26 @@ Each **row** is an object:
 | `text` | ✓ | The row label. |
 | `dot` |  | A status dot: `idle` / `working` / `blocked` / `done` (colored like the Agents list). |
 | `action` |  | A module **action id** run when the row is clicked. |
+| `value` |  | An opaque payload for that action, so one action can back every row. |
 
 The **first push mounts** the dock into its `placement` side automatically (or
 wherever the user has since moved it). Later pushes just refresh the rows. Clear
 a dock with an empty array: `--rows '[]'`.
 
-A row with an `action` is **clickable**: clicking it runs that action (exactly
-like `bohay module run <your-id> <action>`), so a dock can be interactive: click
-a failing check to open its page, click a branch to check it out.
+A row with an `action` is **clickable**: clicking it runs that action and tells
+it which row was hit, so a dock becomes a list of buttons rather than a static
+readout.
+
+| Variable | Meaning |
+|---|---|
+| `BOHAY_MODULE_ROW_VALUE` | The row's `value` (falls back to `text`). |
+| `BOHAY_MODULE_ROW_TEXT` | The row's visible label. |
+| `BOHAY_MODULE_ROW_INDEX` | Its position in the dock. |
+| `BOHAY_MODULE_DOCK_ID` | Which dock it came from. |
+
+That's the whole trick behind a clickable branch list: push one row per branch
+with `"action": "checkout"` and `"value": "<branch>"`, then have `checkout` read
+`$BOHAY_MODULE_ROW_VALUE`.
 
 Declared docks show up in the **registry** in Settings → Layout even before they
 push anything, so the user can place them straight away. Disabling or unlinking
@@ -169,7 +341,7 @@ changes:
 
 ```toml
 [[docks]]
-id = "you.git"
+id = "you:git"
 title = "Git"
 placement = "sidebar.right"
 
@@ -181,21 +353,23 @@ command = ["sh", "push-git.sh"]
 ```sh
 #!/bin/sh
 # push-git.sh: build the rows with jq and push them
-cwd=$(printf '%s' "$BOHAY_MODULE_CONTEXT_JSON" | jq -r .node.cwd)
+cwd="$BOHAY_WORKSPACE_CWD"        # no JSON parsing needed for the common ids
 branch=$(git -C "$cwd" branch --show-current)
 dirty=$(git -C "$cwd" status --porcelain | wc -l | tr -d ' ')
 rows=$(jq -n --arg b "$branch" --arg d "$dirty" '[
   {text: ("on " + $b),        dot: "idle"},
   {text: ($d + " changed"),   dot: (if $d == "0" then "done" else "working" end)}
 ]')
-printf '%s' "$rows" | "$BOHAY_BIN_PATH" ui dock push --id you.git --title Git
+printf '%s' "$rows" | "$BOHAY_BIN_PATH" ui dock push --id you:git --title Git
 ```
 
 That's a live git dock in the sidebar, kept current with zero per-frame cost.
 
 :::tip
-Namespace your dock id (e.g. `you.ci`, `acme:builds`) so it can't collide with
-another plugin's dock. Colons are allowed in a dock id, but dots are not.
+Namespace your dock id (e.g. `you:ci`, `acme:builds`) so it can't collide with
+another module's dock. Colons are allowed in a dock id, but **dots are not** --
+that rule applies to every local id (actions, panes, docks, setting keys). Only
+the top-level module `id` may contain dots.
 :::
 
 ### `[[build]]`: install-time setup
@@ -212,8 +386,13 @@ socket access). For local `link` you run your own setup.
 
 A manifest is rejected if: any `command` is empty (or contains an empty
 string) · `min_bohay_version` is newer than the host · an id uses characters
-outside its set, or a local id contains a dot · two actions/panes/docks share
-an id · `platforms = []`.
+outside its set, or a local id contains a dot · two actions/panes/docks/settings
+share an id · `platforms = []` at any level · an action names a `contexts` value
+that isn't `pane` / `workspace` / `node` / `agent` / `tab` · an `enum` setting
+has no `options`, or a setting's `min` is above its `max`.
+
+Failing loudly on a typo'd context matters: the alternative is a menu entry that
+silently never appears.
 
 :::note
 Commands run **without a shell**: `["git", "status"]`, not `"git status"`.
@@ -235,17 +414,39 @@ takes down bohay.
 
 ## Environment variables
 
+**Identity**
+
 | Variable | Meaning |
 |---|---|
 | `BOHAY_ENV` | Always `1`, meaning you're running under bohay. |
 | `BOHAY_MODULE_ID` | Your module's id. |
+| `BOHAY_MODULE_VERSION` | Your module's declared version. |
 | `BOHAY_MODULE_ROOT` | The module directory (also the cwd). Read-only by convention. |
 | `BOHAY_MODULE_CONFIG_DIR` | Durable, user-owned config/secrets dir (created for you). |
 | `BOHAY_MODULE_STATE_DIR` | Durable state/cache dir (created for you). |
-| `BOHAY_MODULE_CONTEXT_JSON` | JSON snapshot of the focused workspace/tab/pane. |
 | `BOHAY_SOCKET_PATH` | The control socket (the CLI finds it automatically). |
 | `BOHAY_BIN_PATH` | Absolute path to the `bohay` binary. Use this to call back. |
-| `BOHAY_MODULE_ACTION_ID` | The action id, for action commands. |
+
+**Context** — the same snapshot twice: flattened for shells, whole for everyone else.
+
+| Variable | Meaning |
+|---|---|
+| `BOHAY_MODULE_CONTEXT_JSON` | The full snapshot (below). |
+| `BOHAY_WORKSPACE_ID` / `BOHAY_WORKSPACE_CWD` | The target node. |
+| `BOHAY_TAB_INDEX` | Its active tab, 1-based. |
+| `BOHAY_PANE_ID` / `BOHAY_PANE_CWD` | The target pane. |
+| `BOHAY_PANE_AGENT` / `BOHAY_PANE_STATUS` | What's running there and its state. |
+
+**Per-invocation**
+
+| Variable | Set for |
+|---|---|
+| `BOHAY_MODULE_ACTION_ID` | Action commands. |
+| `BOHAY_MODULE_ENTRYPOINT_ID` | Pane commands. |
+| `BOHAY_MODULE_EVENT` | Event hooks (the name) and startup hooks (`startup`). |
+| `BOHAY_MODULE_EVENT_JSON` | Event hooks (the payload). |
+| `BOHAY_MODULE_ROW_*` | Actions run from a clicked dock row. |
+| `BOHAY_SETTING_<KEY>` / `BOHAY_MODULE_SETTINGS_JSON` | Every command, when you declare `[[settings]]`. |
 
 Persist data in the **state/config dirs**, never in the module root, because for
 git-installed modules it's a managed checkout.
@@ -254,20 +455,32 @@ git-installed modules it's a managed checkout.
 
 ```json
 {
-  "node": { "id": "0", "name": "sudos", "cwd": "/Users/you/code/sudos" },
-  "tab":  { "index": "1" },
-  "pane": { "id": "4", "cwd": "/Users/you/code/sudos", "agent": "claude", "status": "working" },
-  "invocation_source": "cli",
+  "workspace": { "id": "0", "name": "sudos", "cwd": "/Users/you/code/sudos", "branch": "main" },
+  "node":      { "id": "0", "name": "sudos", "cwd": "/Users/you/code/sudos", "branch": "main" },
+  "tab":       { "index": "1", "name": "core" },
+  "pane":      { "id": "4", "cwd": "/Users/you/code/sudos", "agent": "claude", "status": "working" },
+  "selection": "the text highlighted in the pane, when there is any",
+  "invocation_source": "menu:pane",
   "correlation_id": "c7"
 }
 ```
 
-`status` is `idle` / `working` / `blocked` / `done` / `unknown`. Quick `jq`
-example:
+`node` is a legacy alias of `workspace`; both are always present. `status` is
+`idle` / `working` / `blocked` / `done` / `unknown`. For a right-click the
+workspace and pane describe **what you clicked**; everywhere else they describe
+what's focused.
+
+Most scripts want the flat vars, which need no parser at all:
 
 ```sh
-node_cwd=$(printf '%s' "$BOHAY_MODULE_CONTEXT_JSON" | jq -r .node.cwd)
-cd "$node_cwd" && git status --short
+cd "$BOHAY_WORKSPACE_CWD" && git status --short
+```
+
+Reach for the blob when you want `selection`, `invocation_source`, or the tab
+name:
+
+```sh
+selected=$(printf '%s' "$BOHAY_MODULE_CONTEXT_JSON" | jq -r .selection)
 ```
 
 ## Calling back into bohay
@@ -276,11 +489,331 @@ cd "$node_cwd" && git status --short
 "$BOHAY_BIN_PATH" pane run "git pull"     # run a command in the focused pane
 "$BOHAY_BIN_PATH" pane split --down       # change the layout
 "$BOHAY_BIN_PATH" workspace list          # inspect (JSON to stdout)
-"$BOHAY_BIN_PATH" ui dock push --id you.ci --rows '[...]'   # feed your sidebar dock
+"$BOHAY_BIN_PATH" tab rename review        # name the current tab
+"$BOHAY_BIN_PATH" ui toast "build passing" # flash a one-line message
+"$BOHAY_BIN_PATH" ui dock push --id you:ci --rows '[...]'   # feed your sidebar dock
 ```
 
-Anything in `bohay help` is available. Your command reads context from the
-environment and effects change through the CLI.
+Anything in `bohay help` is available: panes, tabs, workspaces, worktrees, the
+git tab, the orchestration board, agents, and the UI chrome. Your command reads
+context from the environment and effects change through the CLI. There is no
+separate module API and no restricted command set.
+
+:::tip
+Always call through `$BOHAY_BIN_PATH` rather than a bare `bohay` on `PATH`. It
+points at the running binary, so your module keeps working across Unix sockets
+and Windows named pipes, and against a build that isn't first on the path.
+:::
+
+## Complete examples
+
+Three whole modules, one per language. Each is short enough to read in full and
+covers a different part of the surface. They also ship in the repo under
+[`examples/modules/`](https://github.com/RizRiyz/bohay/tree/main/examples/modules)
+if you'd rather link one directly:
+
+```sh
+bohay module link ./examples/modules/branch-dock
+```
+
+| Example | Language | Shows |
+|---|---|---|
+| [Branch dock](#example-1-a-clickable-branch-dock-bash) | Bash | A dock, clickable rows, a startup hook, number + enum settings |
+| [Agent ping](#example-2-notify-when-an-agent-needs-you-python) | Python | An event hook, a secret setting, an `agent` right-click action |
+| [Scratch pane](#example-3-a-scratch-pane-from-a-right-click-node) | Node | A pane entrypoint, the selection, tab renaming |
+
+### Example 1: a clickable branch dock (Bash)
+
+A sidebar dock listing the node's git branches. Click one to check it out. It
+repaints on startup, so it survives a restart.
+
+```
+branch-dock/
+├── bohay-module.toml
+├── refresh.sh
+└── checkout.sh
+```
+
+```toml
+# bohay-module.toml
+id = "example.branch-dock"
+name = "Branch Dock"
+version = "0.1.0"
+min_bohay_version = "0.8.3"
+description = "The active node's git branches, in the sidebar."
+platforms = ["macos", "linux"]
+
+[[docks]]
+id = "branches"                  # local id: no dots
+title = "BRANCHES"
+placement = "sidebar.left"
+
+[[startup]]                      # repaint the dock after a restart
+command = ["sh", "refresh.sh"]
+
+[[events]]                       # and keep it honest as the user moves around
+on = "workspace.created"
+command = ["sh", "refresh.sh"]
+
+[[actions]]                      # right-click a WORKSPACES row to refresh
+id = "refresh"
+title = "Refresh branches"
+contexts = ["workspace"]
+command = ["sh", "refresh.sh"]
+
+[[actions]]                      # invoked by clicking a dock row
+id = "checkout"
+title = "Check out branch"
+command = ["sh", "checkout.sh"]
+
+[[settings]]
+key = "limit"
+title = "Branches to show"
+type = "number"
+default = 8
+min = 1
+max = 30
+
+[[settings]]
+key = "sort"
+title = "Sort by"
+type = "enum"
+options = ["recent", "name"]
+default = "recent"
+```
+
+```sh
+#!/bin/sh
+# refresh.sh -- build the rows and push them.
+set -eu
+bohay="${BOHAY_BIN_PATH:-bohay}"
+repo="${BOHAY_WORKSPACE_CWD:-$PWD}"
+limit="${BOHAY_SETTING_LIMIT:-8}"
+sort="${BOHAY_SETTING_SORT:-recent}"
+
+if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+  "$bohay" ui dock push --id branches --title BRANCHES \
+    --rows '[{"text":"not a git repo"}]'
+  exit 0
+fi
+
+case "$sort" in
+  name) order='refname' ;;
+  *)    order='-committerdate' ;;
+esac
+current=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')
+
+# `value` is the payload the row hands to its action when clicked -- that is
+# what lets one `checkout` action serve every row.
+rows=$(git -C "$repo" for-each-ref --format='%(refname:short)' \
+         --sort="$order" --count="$limit" refs/heads/ |
+  while IFS= read -r branch; do
+    [ -n "$branch" ] || continue
+    if [ "$branch" = "$current" ]; then dot=working; else dot=idle; fi
+    esc=$(printf '%s' "$branch" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '{"text":"%s","dot":"%s","action":"checkout","value":"%s"},' \
+      "$esc" "$dot" "$esc"
+  done)
+
+"$bohay" ui dock push --id branches --title BRANCHES --rows "[${rows%,}]"
+```
+
+```sh
+#!/bin/sh
+# checkout.sh -- the clicked row arrives in BOHAY_MODULE_ROW_VALUE.
+set -eu
+bohay="${BOHAY_BIN_PATH:-bohay}"
+repo="${BOHAY_WORKSPACE_CWD:-$PWD}"
+branch="${BOHAY_MODULE_ROW_VALUE:-}"
+
+if [ -z "$branch" ]; then
+  "$bohay" ui toast "no branch selected"
+  exit 1
+fi
+
+if git -C "$repo" checkout "$branch" >/dev/null 2>&1; then
+  "$bohay" ui toast "switched to $branch"
+  sh "$(dirname "$0")/refresh.sh"    # repaint so the current-branch dot moves
+else
+  "$bohay" ui toast "cannot switch to $branch (uncommitted changes?)"
+  exit 1
+fi
+```
+
+### Example 2: notify when an agent needs you (Python)
+
+Posts a webhook when an agent goes blocked or finishes, with the URL stored as
+a **secret** setting so it never renders in the clear.
+
+```toml
+# bohay-module.toml
+id = "example.agent-ping"
+name = "Agent Ping"
+version = "0.1.0"
+min_bohay_version = "0.8.3"
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "ping.py"]
+
+[[actions]]                      # right-click a live agent in the AGENTS list
+id = "ping-now"
+title = "Send a ping"
+contexts = ["agent"]
+command = ["python3", "ping.py", "--force"]
+
+[[settings]]
+key = "webhook"
+title = "Webhook URL"
+type = "string"
+secret = true                    # shown as bullets, never echoed
+
+[[settings]]
+key = "notify-on"
+title = "Notify on"
+type = "enum"
+options = ["blocked", "done", "both"]
+default = "blocked"
+```
+
+```python
+#!/usr/bin/env python3
+import json, os, subprocess, sys, urllib.request
+
+BOHAY = os.environ.get("BOHAY_BIN_PATH", "bohay")
+
+def bohay(*args):
+    """Call back into bohay, ignoring failures: a module must never wedge the UI."""
+    try:
+        subprocess.run([BOHAY, *args], check=False, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+forced = "--force" in sys.argv
+webhook = os.environ.get("BOHAY_SETTING_WEBHOOK", "").strip()
+# `notify-on` becomes BOHAY_SETTING_NOTIFY_ON: upper-cased, dashes to underscores.
+notify_on = os.environ.get("BOHAY_SETTING_NOTIFY_ON", "blocked")
+
+agent = os.environ.get("BOHAY_PANE_AGENT") or "agent"
+status = os.environ.get("BOHAY_PANE_STATUS") or "unknown"
+
+# An event hook prefers the event payload: it describes the pane that actually
+# changed, not the one in focus.
+raw = os.environ.get("BOHAY_MODULE_EVENT_JSON")
+if raw:
+    event = json.loads(raw)
+    agent = event.get("agent") or agent
+    status = event.get("status") or status
+
+# A right-click always pings; an event only pings for the chosen states.
+if not forced:
+    wanted = {"both": {"blocked", "done"}}.get(notify_on, {notify_on})
+    if status not in wanted:
+        raise SystemExit(0)
+
+where = os.path.basename(os.environ.get("BOHAY_WORKSPACE_CWD", "")) or "bohay"
+message = f"{agent} is {status} in {where}"
+bohay("ui", "toast", message)
+
+if webhook:
+    req = urllib.request.Request(
+        webhook,
+        data=json.dumps({"text": message}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10).close()
+    except OSError as err:
+        # stderr lands in `bohay module log`, which is where you debug a module.
+        print(f"webhook failed: {err}", file=sys.stderr)
+        raise SystemExit(1)
+```
+
+### Example 3: a scratch pane from a right-click (Node)
+
+Opens a real pane running your own program, and stashes the pane's **selected
+text** into a notes file.
+
+```toml
+# bohay-module.toml
+id = "example.scratch-pane"
+name = "Scratch Pane"
+version = "0.1.0"
+min_bohay_version = "0.8.3"
+
+[[panes]]
+id = "notes"
+title = "Notes"
+placement = "split"
+command = ["node", "notes.js"]
+
+[[actions]]
+id = "open-notes"
+title = "Open notes beside this"
+contexts = ["pane"]
+command = ["node", "open.js"]
+
+[[actions]]
+id = "stash-selection"
+title = "Send selection to notes"
+contexts = ["pane"]
+command = ["node", "stash.js"]
+
+[[settings]]
+key = "name-the-tab"
+title = "Rename the tab to Notes"
+type = "bool"
+default = true
+```
+
+```js
+// open.js -- open the pane entrypoint, then name the tab.
+const { spawnSync } = require("node:child_process");
+const bohay = process.env.BOHAY_BIN_PATH ?? "bohay";
+const run = (...args) => spawnSync(bohay, args, { encoding: "utf8" });
+
+// A module pane is a normal bohay pane once it opens: focus, split, close,
+// and the layout APIs all work on it.
+run("module", "pane", "open", process.env.BOHAY_MODULE_ID, "notes",
+    "--placement", "split");
+
+if (process.env.BOHAY_SETTING_NAME_THE_TAB === "true") {
+  const tab = process.env.BOHAY_TAB_INDEX ?? "";
+  run("tab", "rename", "notes", ...(tab ? ["--tab", tab] : []));
+}
+run("ui", "toast", "notes opened");
+```
+
+```js
+// stash.js -- append the pane's selection to a notes file.
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+
+const bohay = process.env.BOHAY_BIN_PATH ?? "bohay";
+const toast = (t) => spawnSync(bohay, ["ui", "toast", t], { encoding: "utf8" });
+
+// The selection is one of the fields only the context blob carries.
+const context = JSON.parse(process.env.BOHAY_MODULE_CONTEXT_JSON ?? "{}");
+const selection = (context.selection ?? "").trim();
+if (!selection) {
+  toast("select some text first");
+  process.exit(0);
+}
+
+// Durable state goes in the state dir, never the module root: for a
+// git-installed module that root is a managed checkout a reinstall replaces.
+const stateDir = process.env.BOHAY_MODULE_STATE_DIR ?? process.cwd();
+fs.mkdirSync(stateDir, { recursive: true });
+fs.appendFileSync(
+  path.join(stateDir, "notes.md"),
+  `\n## from ${context.pane?.cwd ?? ""}\n\n${selection}\n`,
+);
+toast(`saved ${selection.split("\n").length} line(s) to notes`);
+```
+
+The `notes` pane itself is any program that reads stdin and writes stdout --
+a REPL, a log tail, a TUI. bohay closes the pane when the process exits.
 
 ## Distribution & discovery
 
@@ -300,6 +833,16 @@ environment, verifies the manifest didn't change during the build, and pins
 the checkout to the installed commit. There's intentionally **no central
 registry**: publishing is pushing a public repo.
 
+Once the topic is on your repo, it shows up in `bohay module search` and on the
+[module index](/modules/) with no further submission. Two things make a listing
+land well, because they're what people see before they trust you:
+
+- **The repo description** is the card text on the index. One line, what it
+  adds, not how it works.
+- **The README** should show the thing: a screenshot of the dock or menu entry,
+  the tools it needs (`jq`, `node`, …), and a `min_bohay_version` you've
+  actually tested against.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -309,3 +852,7 @@ registry**: publishing is pushing a public repo.
 | Action *is ambiguous* | Two modules expose the id, so qualify it: `module run <module-id> <action>`. |
 | No output in the log | The entry stays `running` until the command exits. Output is capped at 64 KiB. |
 | Callbacks do nothing | `$BOHAY_BIN_PATH` needs the bohay server for your session to be running. |
+| Action missing from a menu | Check its `contexts`, that the module is enabled, and that no `platforms` gate excludes this OS. |
+| Dock is empty after a restart | Push its rows from a `[[startup]]` hook. Dock contents are cached, not persisted. |
+| Settings row not showing | Settings appear only under an **enabled** module. Disabled modules collapse. |
+| `$BOHAY_SETTING_*` is empty | The key is upper-cased with `-` and `:` turned into `_`: `notify-on` → `BOHAY_SETTING_NOTIFY_ON`. |

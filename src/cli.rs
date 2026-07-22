@@ -54,6 +54,7 @@ tabs:
   tab list                   list tabs in the current workspace
   tab new                    new tab
   tab focus <n>              focus tab n (1-based)
+  tab rename <name>          name a tab (--tab N to target one; empty clears it)
   tab close [<n>]            close a tab (default: active)
 
 panes / agents:
@@ -80,6 +81,7 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui toast <text>            flash a one-line message in the UI
 
 modules (extensions):
   module search [<query>]    find modules published to the `bohay-module` GitHub topic
@@ -96,6 +98,8 @@ modules (extensions):
   module pane focus <pane> | close <pane>
   module log [<id>]          tail module command logs (--limit N)
   module config-dir <id>     print/create a module's config dir
+  module settings <id>       list a module's declared settings and values
+  module settings <id> <key> [<value>]   read / write one setting
 
 git:
   git status                 branch, ahead/behind, working tree of the current workspace
@@ -634,6 +638,25 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
     // First positional arg after the verb (for workspace/tab indices).
     let arg0 = || rest.first().cloned();
+    // Everything after the verb, joined, minus flags and their values — for free
+    // text like a tab name, where `bohay tab rename my tab --tab 2` must not
+    // fold the flag into the name.
+    let rest_text = || {
+        let mut out: Vec<&str> = Vec::new();
+        let mut skip = false;
+        for a in rest {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if a.starts_with("--") {
+                skip = true; // assume `--flag value`; a bare flag just eats the next word
+                continue;
+            }
+            out.push(a);
+        }
+        out.join(" ")
+    };
     let one = |key: &str, val: Option<String>| {
         let mut obj = serde_json::Map::new();
         if let Some(v) = val {
@@ -667,6 +690,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         // Sidebar docks for module/plugin authors (docs/29). `push` feeds rows to
         // a dock: `--rows '<json array>'`, or pipe the JSON array on stdin.
+        ("ui", "toast") => ("ui.toast".into(), one("text", Some(rest_text()))),
         ("ui", "dock") => {
             let sub = rest.first().map(String::as_str).unwrap_or("list");
             match sub {
@@ -722,6 +746,15 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("tab", "new") => ("tab.new".into(), json!({})),
         ("tab", "focus") => ("tab.focus".into(), one("tab", arg0())),
         ("tab", "close") => ("tab.close".into(), one("tab", arg0())),
+        // `tab rename <name>` names the active tab; `--tab N` targets another.
+        ("tab", "rename") => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("name".to_string(), json!(rest_text()));
+            if let Some(n) = flag(args, "--tab") {
+                obj.insert("tab".to_string(), json!(n));
+            }
+            ("tab.rename".into(), Value::Object(obj))
+        }
         ("tab", _) => ("tab.list".into(), json!({})),
 
         ("pane", "split") => {
@@ -821,6 +854,30 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
         ("module", "info") => ("module.info".into(), one("id", arg0())),
         ("module", "config-dir") => ("module.config_dir".into(), one("id", arg0())),
+        // `module settings <id>` lists; `… <id> <key>` reads; `… <id> <key> <value>` writes.
+        ("module", "settings") => {
+            let mut obj = serde_json::Map::new();
+            let Some(id) = rest.first() else {
+                return Err(anyhow!(
+                    "usage: bohay module settings <id> [<key> [<value>]]"
+                ));
+            };
+            obj.insert("id".to_string(), json!(id));
+            match (rest.get(1), rest.get(2)) {
+                (Some(k), Some(v)) => {
+                    obj.insert("key".to_string(), json!(k));
+                    // A bare word is sent as-is; the server coerces it to the
+                    // declared type, so `--json` is only needed for arrays.
+                    obj.insert("value".to_string(), parse_setting_value(v));
+                    ("module.settings.set".into(), Value::Object(obj))
+                }
+                (Some(k), None) => {
+                    obj.insert("key".to_string(), json!(k));
+                    ("module.settings.get".into(), Value::Object(obj))
+                }
+                _ => ("module.settings.list".into(), Value::Object(obj)),
+            }
+        }
         ("module", "pane") => {
             let sub = rest.first().map(String::as_str).unwrap_or("");
             match sub {
@@ -999,6 +1056,21 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// A module-setting value typed on the command line. `true`/`false` and whole
+/// numbers become JSON scalars so a bool/number setting takes them directly;
+/// everything else stays a string (the server coerces against the declared
+/// type either way).
+fn parse_setting_value(s: &str) -> Value {
+    match s {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        _ => match s.parse::<i64>() {
+            Ok(n) => Value::from(n),
+            Err(_) => Value::String(s.to_string()),
+        },
+    }
 }
 
 #[cfg(test)]

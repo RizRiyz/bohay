@@ -1,0 +1,38 @@
+id = "example.agent-ping"
+name = "Agent Ping"
+version = "0.1.0"
+min_bohay_version = "0.8.3"
+description = "Post a webhook when an agent needs you or finishes. Right-click an agent to ping it on demand."
+
+# Fires every time a pane's agent state changes. The payload arrives as
+# BOHAY_MODULE_EVENT_JSON; the pane it happened in is in the usual context vars.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "ping.py"]
+
+# Adds a row to the right-click menu on a live agent in the AGENTS sidebar.
+# The clicked agent's pane is the invocation target, not whatever had focus.
+[[actions]]
+id = "ping-now"
+title = "Send a ping"
+contexts = ["agent"]
+command = ["python3", "ping.py", "--force"]
+
+[[settings]]
+key = "webhook"
+title = "Webhook URL"
+type = "string"
+secret = true
+
+[[settings]]
+key = "notify-on"
+title = "Notify on"
+type = "enum"
+options = ["blocked", "done", "both"]
+default = "blocked"
+
+[[settings]]
+key = "toast"
+title = "Also show a toast"
+type = "bool"
+default = true

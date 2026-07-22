@@ -34,14 +34,14 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.bohay/bohay.so
 | Family | Methods |
 |---|---|
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.close` |
-| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.close` |
+| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.rename` · `tab.close` |
 | panes | `pane.list` · `pane.split` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
-| modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.invoke` · `module.pane.open` · `module.log` |
-| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ping` · `server.stop` · `events.subscribe` |
+| modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
+| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` |
 
 Parameter shapes mirror the CLI flags (`bohay task add --paths x` →
 `{"paths": ["x"]}`). When a method takes a pane and none is given, it defaults
@@ -80,7 +80,8 @@ exactly this.
 ```
 
 Event names: `pane.created` · `pane.closed` · `pane.agent_status_changed` ·
-`agent.hook` · `node.created` · `node.closed` · `tab.created` · `tab.closed`
+`agent.hook` · `workspace.created` · `workspace.closed` (a module hook may
+still spell these `node.created` / `node.closed`) · `tab.created` · `tab.closed`
 · `task.added` · `task.claimed` · `task.started` · `task.ready` ·
 `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
 `task.needs_compaction` · `task.done` · `task.merged` ·

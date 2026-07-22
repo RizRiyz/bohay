@@ -87,6 +87,7 @@ const ogImage = 'https://bohay.dev/og.png';
       </a>
       <div class="nav-links">
         <a href="/docs/">Docs</a>
+        <a href="/modules/">Modules</a>
         <a href="/compare/">Compare</a>
         <a href="/changelog/">Changelog</a>
         <a href={GITHUB} class="gh">
@@ -462,10 +463,8 @@ const ogImage = 'https://bohay.dev/og.png';
           <span class="dim">by Riz</span>
         </div>
         <div class="foot-links">
-          <a href="/changelog/">changelog</a>
+          <a href={GITHUB}>github</a>
           <a href="https://crates.io/crates/bohay">crates.io</a>
-          <a href={`${GITHUB}/releases`}>releases</a>
-          <a href={`${GITHUB}/blob/main/LICENSE`}>license</a>
         </div>
       </div>
     </footer>
@@ -1620,6 +1619,13 @@ const ogImage = 'https://bohay.dev/og.png';
       @media (max-width: 480px) {
         .agent-grid { grid-template-columns: repeat(2, 1fr); }
         .nav-links a[href$='orchestration/'] { display: none; }
+      }
+
+      /* Four nav links + the GitHub pill no longer fit a phone in one row:
+         let them wrap rather than widen the page. */
+      @media (max-width: 560px) {
+        .nav-inner { flex-wrap: wrap; row-gap: 0.45rem; padding-top: 0.7rem; padding-bottom: 0.7rem; }
+        .nav-links { gap: 0.9rem; font-size: 0.78rem; flex-wrap: wrap; justify-content: flex-end; }
       }
     </style>
   </body>

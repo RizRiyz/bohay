@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod paths;
 pub mod registry;
 pub mod runtime;
+pub mod settings;
 
 pub use registry::{InstalledModule, ModuleRegistry};
 pub use runtime::ModuleCommandLog;
