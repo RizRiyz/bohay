@@ -107,11 +107,14 @@ notes() {
   # A prose lead. Generated notes can only ever restate commit subjects, so leave
   # an explicit prompt: these notes exist to *explain the work*, not to list it.
   # Delete the blockquote once written.
+  #
+  # NOTE the hard-wrap warning below — GitHub renders release notes with GFM hard
+  # line breaks, so a newline inside a paragraph shows up as a literal <br>.
   printf '> _Write 2-4 sentences: what this release is about and who should care._\n'
   printf '>\n'
-  printf '> _Then expand each bullet below into what it actually does for the reader —\n'
-  printf '> the behaviour, why it changed, and anything to watch out for. Drop bullets\n'
-  printf '> that are not user-facing. Delete this note when done._\n\n'
+  printf '> _Then expand each bullet below into what it actually does for the reader: the behaviour, why it changed, and anything to watch out for. Drop bullets that are not user-facing._\n'
+  printf '>\n'
+  printf '> _Keep every paragraph and bullet on ONE line — do not hard-wrap. GitHub renders release notes with hard line breaks, so a wrapped paragraph shows a break after every line. Delete this note when done._\n\n'
 
   section '✨ Added' 'feat'
   section '🔧 Changed' 'change|refactor|perf|style'
