@@ -41,6 +41,18 @@ git fetch --tags --quiet
 git rev-parse "$TAG" >/dev/null 2>&1 && die "$TAG already exists"
 CURRENT=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
 echo "  $CURRENT  →  $VERSION"
+# `changelog/<tag>.md` is the single source the GitHub Release *and* bohay.dev
+# both render, so it has to exist and be committed before we tag. Generate the
+# skeleton and stop, rather than shipping a release with auto-listed commits.
+CHANGELOG="changelog/$TAG.md"
+if [ ! -f "$CHANGELOG" ]; then
+  bash scripts/changelog.sh "$TAG" --write
+  die "wrote $CHANGELOG — edit it, commit it, then re-run this script"
+fi
+if grep -q 'Then delete this note' "$CHANGELOG"; then
+  die "$CHANGELOG still has the placeholder note — write the summary, commit, then re-run"
+fi
+echo "  notes: $CHANGELOG"
 # The Homebrew tap (its own git repo): the in-repo clone by default.
 TAP="${BOHAY_TAP_DIR:-homebrew-bohay}"
 if [ -f "$TAP/Formula/bohay.rb" ]; then

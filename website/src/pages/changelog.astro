@@ -1,8 +1,11 @@
 ---
-// The /changelog page: every GitHub release rendered as a timeline. Release
-// notes are fetched from the GitHub API at build time and their Markdown bodies
-// are rendered with Astro's own pipeline, so this stays in sync with the repo's
-// Releases page with zero manual upkeep. Standalone dark page matching the
+// The /changelog page: every release rendered as a timeline.
+//
+// The notes come from `changelog/<tag>.md` **in the repo**, which is the same
+// source `scripts/changelog.sh` publishes to the GitHub Release — so the site and
+// the Releases page can never drift, the build needs no network (the GitHub API
+// is rate-limited to 60 requests/hour unauthenticated), and release notes are
+// reviewable in the PR that ships them. Standalone dark page matching the
 // landing / compare look.
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
@@ -19,32 +22,48 @@ const description =
   'Every bohay release: new features, fixes, and changes, straight from the GitHub Releases page.';
 const ogImage = 'https://bohay.dev/og.png';
 
-// Fetch releases at build time; degrade gracefully to a link if the API is
-// unreachable or rate-limited (unauthenticated GitHub API allows 60 req/hr).
-let releases = [];
-try {
-  const res = await fetch('https://api.github.com/repos/RizRiyz/bohay/releases?per_page=100', {
-    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'bohay-site' },
-  });
-  if (res.ok) releases = await res.json();
-} catch {
-  releases = [];
-}
-releases = (Array.isArray(releases) ? releases : []).filter((r) => !r.draft);
+// Read `changelog/*.md` from the repo at build time. `?raw` gives the file text;
+// eager so it resolves during the build rather than at runtime.
+const files = import.meta.glob('../../../changelog/*.md', { query: '?raw', import: 'default', eager: true });
 
-// Render each release body's Markdown → HTML with Astro's markdown processor
-// (GFM), so it's styled and consistent with the rest of the site.
+// Each file starts with `---\nversion: vX.Y.Z\ndate: YYYY-MM-DD\n---`. Pull those
+// out and hand the rest to the Markdown renderer.
+const parse = (path, text) => {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  const meta = {};
+  if (m) {
+    for (const line of m[1].split(/\r?\n/)) {
+      const kv = /^(\w+):\s*(.*)$/.exec(line.trim());
+      if (kv) meta[kv[1]] = kv[2];
+    }
+  }
+  const tag = meta.version || (path.split('/').pop() || '').replace(/\.md$/, '');
+  return { tag, date: meta.date || '', body: m ? text.slice(m[0].length) : text };
+};
+
+// Newest first, comparing version numbers rather than strings so v0.10.0 sorts
+// above v0.9.0.
+const rank = (tag) =>
+  tag.replace(/^v/, '').split('.').map(Number).reduce((a, n) => a * 10000 + (n || 0), 0);
+
 const md = await createMarkdownProcessor({ gfm: true });
-const fmtDate = (s) =>
-  new Date(s).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+const fmtDate = (s) => {
+  if (!s) return '';
+  const d = new Date(`${s}T00:00:00Z`);
+  return isNaN(+d) ? s : d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+};
+
+const parsed = Object.entries(files)
+  .map(([path, text]) => parse(path, text))
+  .sort((a, b) => rank(b.tag) - rank(a.tag));
 
 const entries = await Promise.all(
-  releases.map(async (r) => ({
-    tag: r.tag_name,
-    date: r.published_at ? fmtDate(r.published_at) : '',
-    url: r.html_url,
-    prerelease: !!r.prerelease,
-    html: (await md.render((r.body || '').trim() || '_No release notes._')).code,
+  parsed.map(async (r) => ({
+    tag: r.tag,
+    date: fmtDate(r.date),
+    url: `${RELEASES}/tag/${r.tag}`,
+    prerelease: false,
+    html: (await md.render(r.body.trim() || '_No release notes._')).code,
   }))
 );
 ---
