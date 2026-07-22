@@ -39,6 +39,11 @@ pub enum AppEvent {
     /// thread — the scan walks agent session stores and must never block the
     /// event loop).
     SessionsScanned(Vec<crate::agent::SessionInfo>),
+    /// The periodic process scan finished: command lines running under each
+    /// pane's child pid, from one `ps`. `None` means the platform cannot tell
+    /// (Windows) or `ps` failed — detection then falls back to text heuristics
+    /// rather than concluding that no agent is running.
+    ProcScanned(Option<std::collections::HashMap<u32, Vec<String>>>),
     /// A git-tab fetch finished; apply it to the matching `GitView`.
     GitData {
         view: u64,

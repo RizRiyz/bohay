@@ -664,10 +664,17 @@ pub struct App {
     /// A resumable-session disk scan is running on a worker thread; don't start
     /// another until its `SessionsScanned` result arrives.
     sessions_scan_inflight: bool,
+    /// Command lines running in each pane, refreshed off-loop (docs/07). The
+    /// authoritative answer to "which agent is this?", since an agent is a
+    /// process, not a word on screen. Empty for a pane we could not scan.
+    pub(crate) proc_commands: HashMap<PaneId, Vec<String>>,
+    /// One process scan at a time, same guard as the session scan.
+    proc_scan_inflight: bool,
     /// Session ids the user removed from the sidebar list (hidden, not deleted).
     pub dismissed_sessions: HashSet<String>,
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
+    last_proc_at: Instant,
     /// Throttle for per-pane agent classification — it locks each pane's VT engine
     /// and scans its grid, so it runs at ~100ms, not at the render frame rate.
     last_detect_at: Instant,
@@ -833,8 +840,11 @@ impl App {
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
             sessions_scan_inflight: false,
+            proc_commands: HashMap::new(),
+            proc_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
+            last_proc_at: Instant::now(),
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -1123,8 +1133,11 @@ impl App {
             last_cwd_at: Instant::now(),
             resumable: Vec::new(),
             sessions_scan_inflight: false,
+            proc_commands: HashMap::new(),
+            proc_scan_inflight: false,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
+            last_proc_at: Instant::now(),
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -1926,6 +1939,24 @@ impl App {
     fn refresh_resumable(&mut self) {
         let found = crate::agent::recent_sessions(12);
         self.apply_scanned_sessions(found);
+    }
+
+    /// Fold a finished process scan into `proc_commands`, re-keyed from child
+    /// pids to panes. A `None` result means the scan could not run at all, so
+    /// the previous mapping is *kept* rather than cleared — dropping it would
+    /// silently demote every agent back to text-only detection.
+    pub(crate) fn apply_proc_scan(&mut self, found: Option<HashMap<u32, Vec<String>>>) -> bool {
+        self.proc_scan_inflight = false;
+        let Some(by_pid) = found else { return false };
+        let mut next: HashMap<PaneId, Vec<String>> = HashMap::new();
+        for (id, pane) in self.panes.iter() {
+            if let Some(cmds) = pane.child_pid.and_then(|pid| by_pid.get(&pid)) {
+                next.insert(*id, cmds.clone());
+            }
+        }
+        let changed = next != self.proc_commands;
+        self.proc_commands = next;
+        changed
     }
 
     /// Fold a finished session scan into the sidebar list. Returns whether the

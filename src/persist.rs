@@ -160,14 +160,38 @@ pub fn ensure_manifests_dir() -> PathBuf {
 /// Sample manifest shipped into `~/.bohay/manifests/` on first run. The `.txt`
 /// suffix keeps it from being loaded; copy it to `<agent>.toml` and edit.
 const MANIFEST_EXAMPLE: &str = "\
-# bohay agent-detection manifest (docs/07). Copy to e.g. `claude.toml` and edit.
-# Every *.toml file here adds rules to bohay's built-in detection. Rules are
-# merged by priority (highest wins), so a higher-priority rule overrides a
-# built-in one for the same agent.
+# bohay agent-detection manifest (docs/07). Copy to `<agent>.toml` and edit --
+# one file per agent keeps things findable. Every *.toml here merges into
+# bohay's built-in detection; rules are merged by priority (highest wins), so a
+# higher-priority rule overrides a built-in one for the same agent.
+#
+# A manifest controls two separate things:
+#   [identity]  -- how bohay decides *which agent* a pane is running
+#   [[rule]]    -- how bohay decides *what state* that agent is in
 
-# Which agent these rules apply to. `generic` (default) means all agents.
+# Which agent this file applies to. `generic` (default) means all agents, and
+# is only valid for [[rule]] -- identity needs a specific agent.
 agent = \"claude\"
 
+# ── identity (optional) ──────────────────────────────────────────────────────
+# Patterns are matched as whole words, so `amp` no longer matches inside
+# \"example\" and `.kiro/settings` no longer matches `kiro`. The two lists differ
+# in how far they are trusted:
+#
+#   distinct   -- believed anywhere, including whatever the pane prints
+#   ambiguous  -- also an ordinary English word, so believed ONLY in the command
+#                 that spawned the pane or the agent's own terminal title
+#
+# Use `replace = true` to drop bohay's built-in patterns instead of adding to
+# them (the way to *remove* a default). Naming an agent bohay does not ship
+# teaches it a new one, no rebuild needed.
+#
+# [identity]
+# distinct = [\"cursor-agent\"]
+# ambiguous = [\"cursor\"]
+# replace = true
+
+# ── state rules ──────────────────────────────────────────────────────────────
 # One rule per [[rule]] block. `state` is working | blocked | idle.
 # `region` is screen (the recent bottom text, default) or title (the OSC title).
 # Conditions (all listed must hold): any / all / not (substring lists, case

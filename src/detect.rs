@@ -1,9 +1,17 @@
-//! Agent detection (M3, docs/07). Screen based, no platform process APIs.
+//! Agent detection (M3, docs/07). Two questions, two very different answers.
 //!
-//! State is inferred from what's on screen via a small **manifest** engine: a
-//! set of rules, each tied to a screen region (the OSC title or the recent
-//! bottom text), a priority, and one or more conditions (substrings / a spinner
-//! glyph). The highest-priority matching rule wins. Built-in rules cover the
+//! **Which agent is this?** The pane's running processes (docs/07 §2.1), passed
+//! in as `running`. An agent is a program, so this is ground truth; a pane that
+//! merely *prints* "claude" is a shell. Where processes can't be seen (Windows,
+//! a remote pane) it falls back to text, ranked by how deliberate that text is —
+//! spawn command, then OSC title, then output — with names that double as
+//! ordinary words (`amp`, `cursor`, `droid`, `grok`) believed only from the
+//! first two. Identity is configurable: see `[identity]` in the manifests.
+//!
+//! **What state is it in?** Inferred from what's on screen via a small
+//! **manifest** engine: a set of rules, each tied to a screen region (the OSC
+//! title or the recent bottom text), a priority, and one or more conditions
+//! (substrings / a spinner glyph). The highest-priority matching rule wins. Built-in rules cover the
 //! markers common to modern agent CLIs plus a few per-agent quirks; **users can
 //! add or override rules** by dropping `*.toml` files in `~/.bohay/manifests/`
 //! (loaded at startup, merged by priority) so detection can be fixed or extended
@@ -23,11 +31,119 @@ use serde::Deserialize;
 
 use crate::ui::theme::State;
 
-/// Agents we recognise by name in the title / screen.
-const KNOWN_AGENTS: &[&str] = &[
-    "claude", "codex", "gemini", "cursor", "aider", "opencode", "copilot", "amp", "droid", "kimi",
-    "grok", "qwen", "kiro",
+/// One agent bohay can recognise, and how far each identifying string may be
+/// trusted. Splitting the two matters because the haystack for `screen` is
+/// *whatever the pane happens to be printing*, which nobody controls.
+struct KnownAgent {
+    /// Canonical name: what the UI shows and `agent.list` returns.
+    name: &'static str,
+    /// Strings distinctive enough to believe anywhere, pane output included.
+    distinct: &'static [&'static str],
+    /// Strings that are also ordinary words. Believed only where a human or the
+    /// agent itself put them deliberately — the spawned command and the OSC
+    /// title — never from incidental output. Without this, `error: cursor is out
+    /// of bounds` names the pane cursor, and "for example" named it amp.
+    ambiguous: &'static [&'static str],
+}
+
+/// Agents we recognise. `distinct`/`ambiguous` are matched as whole words (see
+/// [`contains_agent_word`]); the canonical `name` is what gets reported.
+const KNOWN_AGENTS: &[KnownAgent] = &[
+    KnownAgent {
+        name: "claude",
+        distinct: &["claude"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "codex",
+        distinct: &["codex"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "gemini",
+        distinct: &["gemini"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "aider",
+        distinct: &["aider"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "opencode",
+        distinct: &["opencode"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "copilot",
+        distinct: &["copilot"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "kimi",
+        distinct: &["kimi"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "qwen",
+        distinct: &["qwen"],
+        ambiguous: &[],
+    },
+    KnownAgent {
+        name: "kiro",
+        distinct: &["kiro"],
+        ambiguous: &[],
+    },
+    // The CLI binary is distinctive even though the brand name is not.
+    KnownAgent {
+        name: "cursor",
+        distinct: &["cursor-agent"],
+        ambiguous: &["cursor"],
+    },
+    KnownAgent {
+        name: "amp",
+        distinct: &[],
+        ambiguous: &["amp"],
+    },
+    KnownAgent {
+        name: "droid",
+        distinct: &[],
+        ambiguous: &["droid"],
+    },
+    KnownAgent {
+        name: "grok",
+        distinct: &[],
+        ambiguous: &["grok"],
+    },
 ];
+
+/// The runtime form of [`KnownAgent`]: owned, so `~/.bohay/manifests/*.toml` can
+/// refine a built-in agent or teach bohay one it has never heard of.
+#[derive(Clone)]
+struct AgentIdent {
+    name: String,
+    distinct: Vec<String>,
+    ambiguous: Vec<String>,
+}
+
+impl AgentIdent {
+    /// Every identifying string, deliberate placement assumed.
+    fn all(&self) -> impl Iterator<Item = &String> {
+        self.distinct.iter().chain(self.ambiguous.iter())
+    }
+}
+
+/// The built-in registry, in runtime form.
+fn builtin_agents() -> Vec<AgentIdent> {
+    KNOWN_AGENTS
+        .iter()
+        .map(|a| AgentIdent {
+            name: a.name.to_string(),
+            distinct: a.distinct.iter().map(|s| s.to_string()).collect(),
+            ambiguous: a.ambiguous.iter().map(|s| s.to_string()).collect(),
+        })
+        .collect()
+}
 
 // ── markers (matched case-insensitively) ─────────────────────────────────────
 
@@ -142,26 +258,41 @@ struct Rule {
     conds: Vec<Cond>,
 }
 
-/// The active rule set: built-in rules plus any loaded from `~/.bohay/manifests`.
+/// The active detection set: which agents exist and how to recognise them
+/// (`agents`), plus the state rules (`rules`). Both come from the built-ins
+/// merged with `~/.bohay/manifests/*.toml`.
 pub struct Manifests {
     rules: Vec<Rule>,
+    agents: Vec<AgentIdent>,
 }
 
 impl Manifests {
-    /// Just the compiled-in rules (test helper; production uses `load`).
+    /// Just the compiled-in defaults (test helper; production uses `load`).
     #[cfg(test)]
     pub fn builtin() -> Manifests {
         Manifests {
             rules: builtin_rules(),
+            agents: builtin_agents(),
         }
     }
 
-    /// Built-in rules plus every valid `*.toml` in `dir`. Malformed files are
+    /// Built-in defaults plus every valid `*.toml` in `dir`. Malformed files are
     /// skipped (logged), never fatal, so a bad manifest can't break detection.
     pub fn load(dir: &Path) -> Manifests {
         let mut rules = builtin_rules();
-        rules.extend(load_dir(dir));
-        Manifests { rules }
+        let mut agents = builtin_agents();
+        for mf in load_dir(dir) {
+            mf.apply_identity(&mut agents);
+            rules.extend(mf.into_rules());
+        }
+        Manifests { rules, agents }
+    }
+
+    /// True if `name` is a recognised agent (not a plain shell). Drives whether
+    /// a pane appears in the AGENTS list.
+    pub fn is_agent(&self, name: &str) -> bool {
+        let low = name.to_lowercase();
+        self.agents.iter().any(|a| a.name == low)
     }
 
     fn evaluate(&self, agent: &str, regions: &Regions) -> Option<State> {
@@ -288,6 +419,27 @@ struct ManifestFile {
     agent: String,
     #[serde(default)]
     rule: Vec<RuleSpec>,
+    /// How to *recognise* this agent (docs/07). Absent means "leave identity
+    /// alone and only add state rules", which is what most manifests want.
+    #[serde(default)]
+    identity: Option<IdentitySpec>,
+}
+
+/// Identity patterns for one agent. Matched as whole words; see
+/// [`contains_agent_word`] for why the two lists are not interchangeable.
+#[derive(Deserialize)]
+struct IdentitySpec {
+    /// Distinctive enough to trust anywhere, pane output included.
+    #[serde(default)]
+    distinct: Vec<String>,
+    /// Also an ordinary word, so trusted only in the spawned command or the
+    /// agent's own OSC title.
+    #[serde(default)]
+    ambiguous: Vec<String>,
+    /// Replace the built-in patterns instead of adding to them. Needed to
+    /// *remove* a default, e.g. dropping `cursor` so only `cursor-agent` counts.
+    #[serde(default)]
+    replace: bool,
 }
 
 #[derive(Deserialize)]
@@ -320,21 +472,24 @@ fn default_screen() -> String {
     "screen".to_string()
 }
 
-fn load_dir(dir: &Path) -> Vec<Rule> {
+fn load_dir(dir: &Path) -> Vec<ManifestFile> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
+    // Sorted so a merge is deterministic across machines (read_dir order is not).
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    paths.sort();
+    for path in paths {
         let parsed = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| toml::from_str::<ManifestFile>(&s).ok());
         match parsed {
-            Some(mf) => out.extend(mf.into_rules()),
+            Some(mf) => out.push(mf),
             None => eprintln!(
                 "bohay: skipping invalid detection manifest {}",
                 path.display()
@@ -345,6 +500,46 @@ fn load_dir(dir: &Path) -> Vec<Rule> {
 }
 
 impl ManifestFile {
+    /// Merge this file's `[identity]` into the live registry. A manifest may
+    /// refine a built-in agent or introduce one bohay has never heard of, so
+    /// detection can follow a new CLI without waiting for a release.
+    fn apply_identity(&self, agents: &mut Vec<AgentIdent>) {
+        let Some(id) = &self.identity else { return };
+        if self.agent.eq_ignore_ascii_case("generic") {
+            return; // identity is meaningless without an agent to attach it to
+        }
+        let name = self.agent.to_lowercase();
+        let lc = |v: &Vec<String>| v.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>();
+        let entry = match agents.iter_mut().find(|a| a.name == name) {
+            Some(e) => e,
+            None => {
+                // Start empty: seeding the name into `distinct` here would
+                // silently outrank a manifest that deliberately declared that
+                // same name `ambiguous`. The name-as-default is applied below,
+                // and only when the manifest supplied no patterns at all.
+                agents.push(AgentIdent {
+                    name: name.clone(),
+                    distinct: Vec::new(),
+                    ambiguous: Vec::new(),
+                });
+                agents.last_mut().expect("just pushed")
+            }
+        };
+        if id.replace {
+            entry.distinct.clear();
+            entry.ambiguous.clear();
+        }
+        entry.distinct.extend(lc(&id.distinct));
+        entry.ambiguous.extend(lc(&id.ambiguous));
+        entry.distinct.dedup();
+        entry.ambiguous.dedup();
+        // An agent with no pattern at all could never be matched, so fall back
+        // to its own name rather than registering something inert.
+        if entry.distinct.is_empty() && entry.ambiguous.is_empty() {
+            entry.distinct.push(name);
+        }
+    }
+
     fn into_rules(self) -> Vec<Rule> {
         let agent = if self.agent.eq_ignore_ascii_case("generic") {
             String::new()
@@ -433,24 +628,44 @@ pub fn classify(
     recent_input: bool,
     base_command: &str,
     known_agent: &str,
+    // `running`: command lines actually live in the pane (docs/07). Ground
+    // truth when available; `&[]` means "could not tell" (Windows, remote, `ps`
+    // failed), never "nothing is running".
+    running: &[String],
     manifests: &Manifests,
 ) -> Detection {
     let regions = Regions {
         screen: bottom.to_lowercase(),
         title: title.map(|t| t.to_lowercase()).unwrap_or_default(),
     };
-    // Identity, most reliable first: the name on screen right now, else what this
-    // pane is *already known* to be, else the spawned command.
+    // Identity has two regimes, and which one applies is decided by whether we
+    // could see the pane's processes at all.
     //
-    // The middle case matters: an agent's UI does not print its own name on every
-    // frame — Claude Code's bottom rows are a prompt box and a model label. So a
-    // repaint (switching tabs, clicking into the pane, resizing) would otherwise
-    // resolve to the bare shell, fall into the plain-shell branch below, and read
-    // the repaint's output as work. `known_agent` keeps the pane's identity
-    // sticky across those frames.
-    let agent = detect_agent(title, &regions.screen)
-        .or_else(|| is_agent(known_agent).then(|| known_agent.to_string()))
-        .unwrap_or_else(|| base_command.to_string());
+    // `running` non-empty means the scan worked, so it is the *whole* answer: an
+    // agent is a program, and a pane that is not running one is a plain shell no
+    // matter what it prints. Letting text vote here is what put "amp" and "kiro"
+    // in the sidebar for panes running neither.
+    //
+    // `running` empty means we could not tell (Windows, a remote pane, `ps`
+    // failed, or the pane has no child yet). Only then do the text heuristics
+    // run — including `known_agent` stickiness, which covers the frames where an
+    // agent's UI does not print its own name (Claude Code's bottom rows are a
+    // prompt box and a model label, so a repaint would otherwise resolve to the
+    // bare shell and read its own redraw as work).
+    let agent = if running.is_empty() {
+        manifests
+            .detect_agent(title, &regions.screen, base_command)
+            .or_else(|| {
+                manifests
+                    .is_agent(known_agent)
+                    .then(|| known_agent.to_string())
+            })
+            .unwrap_or_else(|| base_command.to_string())
+    } else {
+        manifests
+            .agent_in_processes(running)
+            .unwrap_or_else(|| base_command.to_string())
+    };
 
     // A recognised agent is *working* only on positive evidence — a spinner or
     // an on-screen generating hint matched by a rule. Its output alone proves
@@ -458,7 +673,7 @@ pub fn classify(
     // idle, so no rule match means Idle. Plain shells have no markers to match,
     // so they keep the activity fallback (which powers `wait` on ordinary
     // commands), gated so typing echo isn't misread as output.
-    let fallback = if !is_agent(&agent) && recent_activity && !recent_input {
+    let fallback = if !manifests.is_agent(&agent) && recent_activity && !recent_input {
         State::Working
     } else {
         State::Idle
@@ -468,24 +683,141 @@ pub fn classify(
     Detection { state, agent }
 }
 
-fn detect_agent(title: Option<&str>, low_bottom: &str) -> Option<String> {
-    let mut hay = String::new();
-    if let Some(t) = title {
-        hay.push_str(&t.to_lowercase());
-        hay.push(' ');
+/// Name the agent running in a pane, in decreasing order of how deliberate the
+/// evidence is: the command the pane was spawned with, then the OSC title the
+/// agent sets for itself, then — for distinctive names only — its output.
+impl Manifests {
+    /// Name the agent from the pane's **running processes** -- the only signal
+    /// that is ground truth rather than inference. An agent is a program, not a
+    /// word on a screen, so this outranks every text heuristic: a pane merely
+    /// *printing* "claude" is not running claude.
+    ///
+    /// Both pattern classes apply, because a command line is as deliberate as
+    /// it gets. Matching is per-argv-token against the bare binary name, so
+    /// `/opt/homebrew/bin/amp` counts while `--example` never can.
+    fn agent_in_processes(&self, running: &[String]) -> Option<String> {
+        for cmd in running {
+            let low = cmd.to_lowercase();
+            let mut tokens = low.split_whitespace();
+            let Some(first) = tokens.next() else { continue };
+            let first = binary_name(first);
+            if let Some(a) = self.match_binary(first) {
+                return Some(a);
+            }
+            // Several agents ship as a script run by an interpreter, so argv[0]
+            // is `node` / `python` and the real name is the script slot: the
+            // first non-flag argument. Nothing later counts -- `cargo test
+            // --example amp` must not resolve to amp.
+            if is_interpreter(first) {
+                for t in tokens {
+                    if t.starts_with('-') {
+                        continue;
+                    }
+                    return self.match_binary(binary_name(t));
+                }
+            }
+        }
+        None
     }
-    hay.push_str(low_bottom);
-    KNOWN_AGENTS
-        .iter()
-        .find(|name| hay.contains(*name))
-        .map(|n| n.to_string())
+
+    /// The agent whose patterns name exactly this binary.
+    fn match_binary(&self, base: &str) -> Option<String> {
+        self.agents
+            .iter()
+            .find(|a| a.all().any(|p| p == base))
+            .map(|a| a.name.clone())
+    }
+
+    /// Name the agent running in a pane, in decreasing order of how deliberate
+    /// the evidence is: the command the pane was spawned with, then the OSC
+    /// title the agent sets for itself, then -- for distinctive names only --
+    /// its output.
+    fn detect_agent(
+        &self,
+        title: Option<&str>,
+        low_bottom: &str,
+        base_command: &str,
+    ) -> Option<String> {
+        let cmd = base_command.to_lowercase();
+        let title = title.map(|t| t.to_lowercase()).unwrap_or_default();
+
+        // Deliberate signals: somebody typed this, or the agent published it.
+        for region in [&cmd, &title] {
+            if let Some(a) = self
+                .agents
+                .iter()
+                .find(|a| a.all().any(|p| contains_agent_word(region, p)))
+            {
+                return Some(a.name.clone());
+            }
+        }
+        // Incidental signal: pane output. Only names that can't be ordinary words.
+        self.agents
+            .iter()
+            .find(|a| {
+                a.distinct
+                    .iter()
+                    .any(|p| contains_agent_word(low_bottom, p))
+            })
+            .map(|a| a.name.clone())
+    }
 }
 
-/// True if `name` is a recognised agent (not a plain shell). Drives whether a
-/// pane appears in the AGENTS list.
-pub fn is_agent(name: &str) -> bool {
-    let low = name.to_lowercase();
-    KNOWN_AGENTS.iter().any(|a| low == *a)
+/// The bare binary name of an argv token: no directory, no `.exe`, and no
+/// leading `-` (login shells appear as `-zsh`).
+fn binary_name(token: &str) -> &str {
+    token
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(token)
+        .trim_start_matches('-')
+        .trim_end_matches(".exe")
+}
+
+/// Runtimes that execute an agent as a script, so the name to look for is the
+/// argument rather than argv[0].
+fn is_interpreter(base: &str) -> bool {
+    matches!(
+        base,
+        "node"
+            | "nodejs"
+            | "bun"
+            | "deno"
+            | "npx"
+            | "pnpm"
+            | "yarn"
+            | "python"
+            | "python3"
+            | "py"
+            | "uv"
+            | "uvx"
+            | "ruby"
+            | "perl"
+            | "env"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+    )
+}
+
+/// True when `needle` appears in `hay` as a **standalone word**.
+///
+/// A plain substring test is not good enough here: the haystack is whatever the
+/// pane happens to be showing, and short agent names hide inside ordinary words
+/// — `amp` alone is a substring of *example*, *sample*, *stamped*, *champion*
+/// and *implementation*, so a Claude pane printing "for example" renamed itself
+/// to the amp agent. Path separators are excluded from the boundary set too, or
+/// listing `~/.kiro` names the pane kiro. `-` and `_` still count as boundaries
+/// so `claude-code` and `claude_code` keep matching.
+fn contains_agent_word(hay: &str, needle: &str) -> bool {
+    let boundary = |c: Option<char>| match c {
+        None => true,
+        Some(c) => !c.is_alphanumeric() && !matches!(c, '.' | '/' | '\\'),
+    };
+    hay.match_indices(needle).any(|(i, _)| {
+        boundary(hay[..i].chars().next_back()) && boundary(hay[i + needle.len()..].chars().next())
+    })
 }
 
 #[cfg(test)]
@@ -500,6 +832,7 @@ mod tests {
             input,
             "claude",
             "claude",
+            &[],
             &Manifests::builtin(),
         )
         .state
@@ -575,6 +908,7 @@ mod tests {
             false,
             "zsh",
             "",
+            &[],
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Working);
@@ -591,6 +925,7 @@ mod tests {
             false,
             "kimi",
             "kimi",
+            &[],
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Working);
@@ -606,6 +941,7 @@ mod tests {
             false,
             "kimi",
             "kimi",
+            &[],
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Blocked);
@@ -623,6 +959,7 @@ mod tests {
             false,                   // and the user did not type
             "zsh",                   // launched through a shell
             "claude",                // but the pane is KNOWN to be claude
+            &[],
             &Manifests::builtin(),
         );
         assert_eq!(
@@ -634,7 +971,16 @@ mod tests {
 
     #[test]
     fn quiet_is_idle() {
-        let d = classify(None, "$ ", false, false, "zsh", "", &Manifests::builtin());
+        let d = classify(
+            None,
+            "$ ",
+            false,
+            false,
+            "zsh",
+            "",
+            &[],
+            &Manifests::builtin(),
+        );
         assert_eq!(d.state, State::Idle);
         assert_eq!(d.agent, "zsh");
     }
@@ -660,6 +1006,7 @@ mod tests {
             false,
             "claude",
             "claude",
+            &[],
             &m,
         );
         assert_eq!(d.state, State::Blocked, "user rule applies");
@@ -671,8 +1018,181 @@ mod tests {
             false,
             "codex",
             "codex",
+            &[],
             &m,
         );
         assert_eq!(d2.state, State::Idle, "user rule is scoped to its agent");
+    }
+
+    /// A pane is named after the agent *running in it*, never after a word that
+    /// happens to be on screen. `amp` is a substring of "example", "sample",
+    /// "stamped" and "implementation", so a Claude pane printing ordinary prose
+    /// renamed itself to the amp agent; listing `~/.kiro` renamed a shell to
+    /// kiro. Both then propagated to the sidebar, the AGENTS list and the notch.
+    #[test]
+    fn ordinary_words_do_not_name_an_agent() {
+        let m = Manifests::builtin();
+        // `known` empty: the pane has no established agent identity yet, which
+        // is exactly when a stray word could invent one.
+        let named = |title: Option<&str>, screen: &str, base: &str| {
+            classify(title, screen, true, false, base, "", &[], &m).agent
+        };
+
+        for prose in [
+            "for example, run the build",
+            "a sample config",
+            "cargo test --example foo",
+            "stamped output",
+            "the implementation examples",
+            "champion",
+        ] {
+            assert_eq!(
+                named(Some("zsh"), prose, "zsh"),
+                "zsh",
+                "ordinary prose must not name an agent: {prose:?}"
+            );
+        }
+
+        // Path fragments are not agents either.
+        assert_eq!(
+            named(Some("zsh"), ".kiro/settings/mcp.json\n", "zsh"),
+            "zsh",
+            "listing ~/.kiro must not turn a shell into the kiro agent"
+        );
+
+        // Names that are also ordinary words are believed only where they were
+        // placed deliberately: the spawned command or the agent's own title.
+        assert_eq!(
+            named(Some("zsh"), "error: cursor is out of bounds\n", "zsh"),
+            "zsh",
+            "a compiler error must not name the pane cursor"
+        );
+        assert_eq!(
+            named(Some("zsh"), "warning: unused variable `droid`\n", "zsh"),
+            "zsh"
+        );
+        assert_eq!(
+            named(Some("zsh"), "you have to grok it first\n", "zsh"),
+            "zsh"
+        );
+        assert_eq!(named(Some("amp"), "", "zsh"), "amp", "title names it");
+        assert_eq!(named(Some("zsh"), "", "droid"), "droid", "command names it");
+        assert_eq!(
+            named(Some("zsh"), "cursor-agent v1\n", "zsh"),
+            "cursor",
+            "the CLI binary is distinctive enough to trust from output"
+        );
+
+        // Distinctive names still resolve from output — bare and hyphenated.
+        assert_eq!(named(Some("zsh"), "claude\n", "zsh"), "claude");
+        assert_eq!(named(Some("zsh"), "claude-code v2\n", "zsh"), "claude");
+    }
+
+    /// Identity is configurable, not hardcoded: a manifest can tighten a
+    /// built-in agent (drop the ambiguous `cursor`, keep `cursor-agent`) and can
+    /// teach bohay an agent it has never heard of, so detection follows a new
+    /// CLI without waiting for a release.
+    #[test]
+    fn user_manifest_can_refine_and_add_agent_identity() {
+        let apply = |toml: &str, m: &mut Manifests| {
+            toml::from_str::<ManifestFile>(toml)
+                .unwrap()
+                .apply_identity(&mut m.agents);
+        };
+
+        // Built-in: `cursor` is ambiguous, so the title still names it.
+        let mut m = Manifests::builtin();
+        let named = |m: &Manifests, title: Option<&str>, screen: &str, cmd: &str| {
+            classify(title, screen, true, false, cmd, "", &[], m).agent
+        };
+        assert_eq!(named(&m, Some("cursor"), "", "zsh"), "cursor");
+
+        // Tighten it: only the CLI binary counts now.
+        apply(
+            r#"
+            agent = "cursor"
+            [identity]
+            distinct = ["cursor-agent"]
+            replace = true
+        "#,
+            &mut m,
+        );
+        assert_eq!(
+            named(&m, Some("cursor"), "", "zsh"),
+            "zsh",
+            "`replace` drops the built-in ambiguous pattern"
+        );
+        assert_eq!(named(&m, Some("cursor-agent"), "", "zsh"), "cursor");
+
+        // Teach it an agent that does not exist in the built-in registry.
+        let mut m2 = Manifests::builtin();
+        assert!(!m2.is_agent("nimbus"));
+        apply(
+            r#"
+            agent = "nimbus"
+            [identity]
+            distinct = ["nimbus-cli"]
+            ambiguous = ["nimbus"]
+        "#,
+            &mut m2,
+        );
+        assert!(m2.is_agent("nimbus"), "the new agent is recognised");
+        assert_eq!(
+            named(&m2, Some("zsh"), "nimbus-cli v3 ready\n", "zsh"),
+            "nimbus",
+            "a distinct pattern is trusted from pane output"
+        );
+        assert_eq!(
+            named(&m2, Some("zsh"), "the nimbus is a cloud\n", "zsh"),
+            "zsh",
+            "an ambiguous pattern is not trusted from pane output"
+        );
+    }
+
+    /// Identity comes from the pane's processes, because an agent is a program
+    /// and not a word on a screen. This is the signal that survives a pane
+    /// printing prose about other agents — the failure that put "amp" and
+    /// "kiro" in the sidebar for panes running neither.
+    #[test]
+    fn running_process_outranks_screen_text() {
+        let m = Manifests::builtin();
+        let named = |screen: &str, running: &[String]| {
+            classify(Some("zsh"), screen, true, false, "zsh", "", running, &m).agent
+        };
+        let proc = |c: &str| vec![c.to_string()];
+
+        // The screen is talking about other agents; the process is the truth.
+        assert_eq!(
+            named("see the claude docs\n", &proc("/opt/homebrew/bin/amp")),
+            "amp",
+            "a real amp process beats the word claude on screen"
+        );
+        assert_eq!(
+            named(
+                "installing opencode from npm\n",
+                &proc("node /usr/local/bin/claude")
+            ),
+            "claude"
+        );
+
+        // A shell that merely mentions agents is still just a shell.
+        assert_eq!(
+            named("see the claude docs\n", &proc("-zsh")),
+            "zsh",
+            "no agent process means no agent, whatever the screen says"
+        );
+        assert_eq!(
+            named("the copilot subscription page\n", &proc("-zsh")),
+            "zsh"
+        );
+        assert_eq!(named("gemini is a constellation\n", &proc("-zsh")), "zsh");
+
+        // Flags never count as the binary, and .exe is stripped.
+        assert_eq!(named("", &proc("cargo test --example amp")), "zsh");
+        assert_eq!(named("", &proc("C:\\tools\\droid.exe")), "droid");
+
+        // No scan available (Windows / remote / `ps` failed) → text heuristics,
+        // which must keep working rather than reporting "no agents at all".
+        assert_eq!(named("claude\n", &[]), "claude");
     }
 }

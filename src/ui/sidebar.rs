@@ -496,7 +496,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 .unwrap_or_else(|| format!("tab {}", ti + 1));
             for id in tab.layout.leaves() {
                 if let Some(s) = app.status.get(&id) {
-                    if crate::detect::is_agent(&s.agent) || s.agent_session.is_some() {
+                    if app.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
                         live.push((id, ws.name.clone(), tab_label.clone()));
                     }
                 }

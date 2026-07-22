@@ -38,6 +38,23 @@ impl App {
                 let _ = tx.send(AppEvent::SessionsScanned(crate::agent::recent_sessions(12)));
             });
         }
+        // Identity comes from the pane's *processes* (docs/07), which means a `ps`
+        // scan — a subprocess spawn, so it runs on a worker thread and posts
+        // `ProcScanned` back. Never inline: this tick is on the render-critical
+        // loop. 2s is well inside the human-visible window for "an agent started"
+        // while costing one `ps` for all panes, not one per pane.
+        if now.duration_since(self.last_proc_at) >= Duration::from_secs(2)
+            && !self.proc_scan_inflight
+        {
+            self.last_proc_at = now;
+            self.proc_scan_inflight = true;
+            let pids: Vec<u32> = self.panes.values().filter_map(|p| p.child_pid).collect();
+            let tx = self.app_tx.clone();
+            std::thread::spawn(move || {
+                let found = crate::platform::descendant_commands(&pids);
+                let _ = tx.send(AppEvent::ProcScanned(found));
+            });
+        }
         // The per-pane classification below locks each pane's VT engine + scans its
         // grid; agent state (blocked/working/done) is human-paced, so ~100ms is
         // plenty — running it at the render frame rate (up to 60fps) just burns CPU.
@@ -84,7 +101,7 @@ impl App {
                 .status
                 .get(&id)
                 .map(|s| {
-                    if detect::is_agent(&s.agent) {
+                    if self.manifests.is_agent(&s.agent) {
                         s.agent.clone()
                     } else {
                         s.agent_session
@@ -94,6 +111,8 @@ impl App {
                     }
                 })
                 .unwrap_or_default();
+            // Ground truth for identity, when the last scan could see this pane.
+            let running = self.proc_commands.get(&id).cloned().unwrap_or_default();
             let det = detect::classify(
                 title.as_deref(),
                 &bottom,
@@ -101,6 +120,7 @@ impl App {
                 recent_input,
                 &base,
                 &known,
+                &running,
                 &self.manifests,
             );
 
@@ -123,11 +143,11 @@ impl App {
                 // resolved agent_session: keep its disk/hook identity so the brand —
                 // and the notch logo keyed off it — stays stable across an agent's
                 // quiet moments (Claude showing "Opus 4.8" but not "claude", etc.).
-                let detected = if detect::is_agent(&det.agent) {
+                let detected = if self.manifests.is_agent(&det.agent) {
                     det.agent
                 } else {
                     match &s.agent_session {
-                        Some(sess) if detect::is_agent(&sess.agent) => sess.agent.clone(),
+                        Some(sess) if self.manifests.is_agent(&sess.agent) => sess.agent.clone(),
                         _ => det.agent,
                     }
                 };
@@ -195,7 +215,7 @@ impl App {
             );
             // The optional retro chime (off by default). A plain shell going
             // quiet or blocking is not an agent, so it stays silent either way.
-            let is_agent_pane = crate::detect::is_agent(&agent)
+            let is_agent_pane = self.manifests.is_agent(&agent)
                 || self
                     .status
                     .get(&id)
@@ -471,7 +491,7 @@ impl App {
                                 continue;
                             };
                             // Only real agent sessions, not the shells behind tabs.
-                            if !(detect::is_agent(&s.agent) || s.agent_session.is_some()) {
+                            if !(self.manifests.is_agent(&s.agent) || s.agent_session.is_some()) {
                                 continue;
                             }
                             let cwd = self

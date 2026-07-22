@@ -164,27 +164,26 @@ pub struct ProcInfo {
     pub command: String,
 }
 
-/// Every process running under `root` (inclusive), depth-first, newest branch
-/// last. This is the honest answer to "what command is this agent running?":
-/// an agent's own UI usually *elides* long commands (`Bash(cargo test …)`), and
-/// those characters never reach bohay, so the screen simply cannot be expanded.
-/// The OS still knows the real argv, and bohay owns the pane's child pid.
-///
-/// **Call on demand only** (opening the overlay), never per frame: it shells out
-/// to `ps` once and walks the result. Empty on unsupported platforms, and on any
-/// failure — the caller degrades to showing just the pane's own command.
+/// The process table: `pid → command`, and `ppid → children` for walking it.
+type PsTable = (
+    std::collections::HashMap<u32, String>,
+    std::collections::HashMap<u32, Vec<u32>>,
+);
+
+/// The whole process table from one `ps`.
+/// `None` when `ps` is unavailable or failed, which callers must distinguish
+/// from an empty table: "I cannot tell" is not "nothing is running".
 #[cfg(unix)]
-pub fn process_tree(root: u32) -> Vec<ProcInfo> {
+fn ps_table() -> Option<PsTable> {
     use std::collections::HashMap;
     let out = match std::process::Command::new("ps")
         .args(["-Ao", "pid=,ppid=,args="])
         .output()
     {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
+        _ => return None,
     };
     let text = String::from_utf8_lossy(&out);
-    // pid → (ppid, command), plus a child index so we can walk the tree.
     let mut cmd: HashMap<u32, String> = HashMap::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     for line in text.lines() {
@@ -207,6 +206,59 @@ pub fn process_tree(root: u32) -> Vec<ProcInfo> {
         cmd.insert(pid, rest.to_string());
         children.entry(ppid).or_default().push(pid);
     }
+    Some((cmd, children))
+}
+
+/// Command lines running under each of `roots` (the root's own included), from
+/// a **single** `ps` scan — the batched form used by agent detection, which
+/// needs an answer for every pane at once and must never spawn one process per
+/// pane. `None` means the platform cannot tell (see [`ps_table`]).
+#[cfg(unix)]
+pub fn descendant_commands(roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
+    use std::collections::{HashMap, HashSet};
+    let (cmd, children) = ps_table()?;
+    let mut out: HashMap<u32, Vec<String>> = HashMap::new();
+    for &root in roots {
+        let mut found = Vec::new();
+        let mut seen = HashSet::new();
+        let mut stack = vec![root];
+        while let Some(pid) = stack.pop() {
+            // Same bounds as `process_tree`: a visited set survives pid reuse,
+            // and the cap stops a pathological tree from being unbounded work.
+            if !seen.insert(pid) || found.len() >= 64 {
+                continue;
+            }
+            if let Some(c) = cmd.get(&pid) {
+                found.push(c.clone());
+            }
+            if let Some(kids) = children.get(&pid) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+        out.insert(root, found);
+    }
+    Some(out)
+}
+
+#[cfg(not(unix))]
+pub fn descendant_commands(_roots: &[u32]) -> Option<std::collections::HashMap<u32, Vec<String>>> {
+    None
+}
+
+/// Every process running under `root` (inclusive), depth-first, newest branch
+/// last. This is the honest answer to "what command is this agent running?":
+/// an agent's own UI usually *elides* long commands (`Bash(cargo test …)`), and
+/// those characters never reach bohay, so the screen simply cannot be expanded.
+/// The OS still knows the real argv, and bohay owns the pane's child pid.
+///
+/// **Call on demand only** (opening the overlay), never per frame: it shells out
+/// to `ps` once and walks the result. Empty on unsupported platforms, and on any
+/// failure — the caller degrades to showing just the pane's own command.
+#[cfg(unix)]
+pub fn process_tree(root: u32) -> Vec<ProcInfo> {
+    let Some((cmd, children)) = ps_table() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     // Iterative DFS so a pathological tree can't blow the stack; the visited set
     // makes a cyclic/reparented table (pid reuse) terminate.
