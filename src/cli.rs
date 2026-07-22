@@ -124,6 +124,7 @@ orchestration (multiple agents on one project, docs/22):
   task merge <id>            integrate the task's branch into bohay/integration
                              (isolated worktree, conflicts block the task)
   task release <id>          return a claimed task to the queue
+  task delete <id>           remove a task (release/finish an active one first)
   lease acquire <glob>... --task <id>   reserve file paths (denied if they overlap)
   lease release <id>         release a lease
   lease list                 list active path leases
@@ -881,6 +882,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("task.claim".into(), Value::Object(obj))
         }
         ("task", "done") => ("task.done".into(), one("id", arg0())),
+        ("task", "delete") => ("task.delete".into(), one("id", arg0())),
         ("task", "merge") => ("task.merge".into(), one("id", arg0())),
         ("task", "release") => ("task.release".into(), one("id", arg0())),
         ("task", "update") => {

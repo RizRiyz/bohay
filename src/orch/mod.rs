@@ -307,6 +307,32 @@ impl OrchState {
         }
     }
 
+    /// Delete a task outright (board `D` / `task delete`). An **active** task
+    /// (claimed/running — a worker may be using it) must be released or finished
+    /// first. Its leases are dropped and its id is removed from other tasks'
+    /// `deps` (deleting a Done dep keeps dependents ready; deleting a queued dep
+    /// deliberately unblocks them — the work was cancelled, not lost).
+    pub fn delete_task(&mut self, id: &str) -> OrchResult<Task> {
+        let idx = self
+            .tasks
+            .iter()
+            .position(|t| t.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        let status = self.tasks[idx].status;
+        if matches!(status, TaskStatus::Claimed | TaskStatus::Running) {
+            return Err(Reject::new(
+                "task_active",
+                format!("{id} is {} — release or finish it first", status.as_str()),
+            ));
+        }
+        let task = self.tasks.remove(idx);
+        self.leases.retain(|l| l.task != id);
+        for t in &mut self.tasks {
+            t.deps.retain(|d| d != id);
+        }
+        Ok(task)
+    }
+
     /// Return a claimed task to the pool (its leases are released separately).
     pub fn release_task(&mut self, id: &str) -> OrchResult<Task> {
         let now = unix_now();
@@ -599,6 +625,31 @@ mod tests {
         // Clamped to [0,1].
         assert!(s.heartbeat("t1", 1.5).unwrap());
         assert_eq!(s.task("t1").unwrap().context, Some(1.0));
+    }
+
+    #[test]
+    fn delete_removes_task_leases_and_dep_references() {
+        let mut s = OrchState::default();
+        s.add_task("base".into(), vec![], vec![], None).unwrap(); // t1
+        s.add_task("dep".into(), vec![], vec!["t1".into()], None)
+            .unwrap(); // t2
+        s.acquire_lease(1, "t1".into(), vec!["src/**".into()])
+            .unwrap();
+
+        // Active tasks can't be deleted — release/finish first.
+        s.claim("t1", 1).unwrap();
+        assert_eq!(s.delete_task("t1").unwrap_err().code, "task_active");
+        s.release_task("t1").unwrap();
+
+        let deleted = s.delete_task("t1").unwrap();
+        assert_eq!(deleted.id, "t1");
+        assert!(s.task("t1").is_none());
+        assert!(s.leases.is_empty(), "its leases are dropped");
+        // t2 no longer references the deleted dep, so it's claimable.
+        assert!(s.task("t2").unwrap().deps.is_empty());
+        assert!(s.ready("t2"));
+
+        assert_eq!(s.delete_task("nope").unwrap_err().code, "not_found");
     }
 
     #[test]

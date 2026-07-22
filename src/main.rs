@@ -1192,6 +1192,61 @@ mod tests {
         assert!(text.contains("◇ orch"), "board tab label missing");
     }
 
+    /// The board's UX layer renders: a Running worker row with its live agent
+    /// state, the start-worker picker, and the task detail overlay.
+    #[test]
+    fn renders_board_live_state_picker_and_detail() {
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        let pane = *app.panes.keys().next().unwrap();
+        app.orch
+            .add_task(
+                "Auth worker".into(),
+                vec!["src/auth/**".into()],
+                vec![],
+                None,
+            )
+            .unwrap();
+        app.orch.claim("t1", pane.0).unwrap();
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Running)
+            .unwrap();
+        app.orch
+            .bind_worktree("t1", Some("/tmp/wt".into()), Some("bohay/t1".into()));
+        // The worker pane's live detection state rides on the row.
+        if let Some(st) = app.status.get_mut(&pane) {
+            st.agent = "claude".into();
+            st.state = crate::ui::theme::State::Working;
+        }
+        app.open_orch_board();
+
+        let render_text = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
+            terminal.draw(|f| ui::render(f, app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            buf.content().iter().map(|c| c.symbol()).collect::<String>()
+        };
+
+        let text = render_text(&mut app);
+        assert!(text.contains("running"), "started worker shows running");
+        assert!(text.contains("bohay/t1"), "worker branch shown");
+        assert!(text.contains("working"), "live agent state shown");
+
+        // The start-worker picker draws over the board.
+        app.orch_start = Some(crate::app::OrchStart {
+            task: "t1".into(),
+            cursor: 0,
+        });
+        let text = render_text(&mut app);
+        assert!(text.contains("claude"), "picker lists agents");
+        app.orch_start = None;
+
+        // The detail overlay shows the task's binding.
+        app.orch_detail = Some("t1".into());
+        let text = render_text(&mut app);
+        assert!(text.contains("/tmp/wt"), "detail shows the worktree");
+    }
+
     /// Regression: a pane whose grid holds a control char must not panic
     /// ratatui's `cell_width`. `git status` aligns with TABs, which alacritty
     /// stores as a literal `\t` cell — `set_symbol("\t")` tripped the assert.

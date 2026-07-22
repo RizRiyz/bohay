@@ -110,6 +110,24 @@ impl App {
             }
             return;
         }
+        // The board's start-worker picker / task detail own the mouse while
+        // open: a click dismisses them, the wheel scrolls the detail.
+        if self.orch_start.is_some() || self.orch_detail.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.orch_start = None;
+                    self.orch_detail = None;
+                }
+                MouseEventKind::ScrollUp if self.orch_detail.is_some() => {
+                    self.orch_detail_scroll = self.orch_detail_scroll.saturating_sub(2)
+                }
+                MouseEventKind::ScrollDown if self.orch_detail.is_some() => {
+                    self.orch_detail_scroll += 2
+                }
+                _ => {}
+            }
+            return;
+        }
         // The folder picker likewise owns the mouse while open.
         if self.picker.is_some() {
             match m.kind {
@@ -766,6 +784,15 @@ impl App {
         // The board's new-task form captures all input while open (ORCH-7).
         if self.orch_form.is_some() {
             self.handle_orch_form_key(key);
+            return true;
+        }
+        // Likewise the board's start-worker picker and task detail overlay.
+        if self.orch_start.is_some() {
+            self.handle_orch_start_key(key);
+            return true;
+        }
+        if self.orch_detail.is_some() {
+            self.handle_orch_detail_key(key);
             return true;
         }
         // Keyboard scroll mode owns every key until it's left (`q`/`Esc`/typing);

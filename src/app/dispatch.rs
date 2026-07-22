@@ -919,6 +919,13 @@ impl App {
                 }
                 Ok(json!({ "type": "ok", "over_threshold": over }))
             }
+            "task.delete" => {
+                let id = req_str(p, "id")?.to_string();
+                let task = self.orch.delete_task(&id).map_err(orch_err)?;
+                self.orch.save();
+                self.emit_event("task.deleted", json!({ "id": id }));
+                Ok(json!({ "type": "task", "task": task_json(&task) }))
+            }
             "task.release" => {
                 let id = req_str(p, "id")?.to_string();
                 let task = self.orch.release_task(&id).map_err(orch_err)?;

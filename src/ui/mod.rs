@@ -207,10 +207,26 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     let mut git_section_rects = Vec::new();
     let cursor = if app.active_is_orch() {
         app.orch_area = pane_area;
+        // Each task's live worker state (detection) rides along on its row.
+        let live: Vec<Option<board::RowLive>> = app
+            .orch
+            .tasks
+            .iter()
+            .map(|task| {
+                task.assignee
+                    .map(crate::ids::PaneId)
+                    .and_then(|pid| app.status.get(&pid))
+                    .map(|st| board::RowLive {
+                        agent: st.agent.clone(),
+                        state: st.state,
+                    })
+            })
+            .collect();
         app.orch_scroll = board::render(
             f,
             pane_area,
             &app.orch,
+            &live,
             app.orch_scroll,
             app.orch_cursor,
             cat,
@@ -315,6 +331,21 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     if let Some(form) = &app.orch_form {
         board::draw_form(f, area, form, cat, &t);
     }
+    // The board's start-worker picker and task detail overlay.
+    if let Some(start) = &app.orch_start {
+        board::draw_start(f, area, start, cat, &t);
+    }
+    if let Some(id) = &app.orch_detail {
+        let clamped = app
+            .orch
+            .tasks
+            .iter()
+            .find(|task| &task.id == id)
+            .map(|task| board::draw_detail(f, area, task, app.orch_detail_scroll, cat, &t));
+        if let Some(s) = clamped {
+            app.orch_detail_scroll = s;
+        }
+    }
     // A transient toast (e.g. "Copied") flashes on top of everything.
     if let Some((text, _)) = &app.toast {
         draw_toast(f, area, text, &t);
@@ -330,6 +361,8 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         || app.pane_menu.is_some()
         || app.agent_menu.is_some()
         || app.orch_form.is_some()
+        || app.orch_start.is_some()
+        || app.orch_detail.is_some()
     {
         None
     } else {

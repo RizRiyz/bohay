@@ -22,6 +22,7 @@ use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
 mod board;
+pub use board::agent_choices;
 mod dispatch;
 mod git;
 mod input;
@@ -375,6 +376,15 @@ impl OrchForm {
     }
 }
 
+/// The board's **start-worker picker**: choose which agent to launch in the
+/// task's isolated worktree (or a plain shell). Opened by `s` on the board.
+pub struct OrchStart {
+    /// The task a worker is being started for.
+    pub task: String,
+    /// Selected row in [`crate::app::board::agent_choices`].
+    pub cursor: usize,
+}
+
 pub struct Workspace {
     pub name: String,
     pub cwd: PathBuf,
@@ -578,6 +588,13 @@ pub struct App {
     pub orch_cursor: usize,
     /// The in-TUI new-task form, when open (ORCH-7).
     pub orch_form: Option<OrchForm>,
+    /// The board's "start worker with…" agent picker, when open.
+    pub orch_start: Option<OrchStart>,
+    /// Task whose detail overlay is open on the board (`o`), plus its scroll.
+    pub orch_detail: Option<String>,
+    pub orch_detail_scroll: usize,
+    /// Last agent chosen in the start picker — the next picker opens on it.
+    pub orch_last_agent: usize,
     /// The board's content rect, for mouse-wheel hit-testing.
     pub orch_area: Rect,
     /// Cursor position from the last render (for headless frame streaming).
@@ -702,7 +719,7 @@ impl App {
         let mut status = HashMap::new();
         status.insert(id, PaneStatus::new(command));
 
-        Ok(App {
+        let mut app = App {
             panes,
             status,
             manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
@@ -748,6 +765,10 @@ impl App {
             orch_scroll: 0,
             orch_cursor: 0,
             orch_form: None,
+            orch_start: None,
+            orch_detail: None,
+            orch_detail_scroll: 0,
+            orch_last_agent: 0,
             orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
@@ -802,7 +823,11 @@ impl App {
             modules: crate::module::registry::load(),
             module_logs: Vec::new(),
             module_panes: HashMap::new(),
-        })
+        };
+        // A fresh start still loads `orch.json` — its pane bindings belong to a
+        // previous server run, so rebind/clear them (same as `from_snapshot`).
+        app.orch_reconcile();
+        Ok(app)
     }
 
     /// Restore the saved session, or start fresh if there is none / it fails.
@@ -987,7 +1012,7 @@ impl App {
         let catalog = crate::i18n::by_code(&config.language);
         let sidebars = Sidebars::from_config(&config.sidebars());
 
-        Some(App {
+        let mut app = App {
             panes,
             status,
             manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
@@ -1025,6 +1050,10 @@ impl App {
             orch_scroll: 0,
             orch_cursor: 0,
             orch_form: None,
+            orch_start: None,
+            orch_detail: None,
+            orch_detail_scroll: 0,
+            orch_last_agent: 0,
             orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
@@ -1079,7 +1108,12 @@ impl App {
             modules,
             module_logs: Vec::new(),
             module_panes,
-        })
+        };
+        // Pane ids are reallocated every run, so the ledger's pane bindings from
+        // the previous server are stale — rebind them to the restored panes (by
+        // worktree cwd) or clear them, so the board never lies (docs/22).
+        app.orch_reconcile();
+        Some(app)
     }
 
     /// Configure color output for the local terminal (downsample if no truecolor).
@@ -2038,6 +2072,10 @@ impl App {
                 serde_json::json!({ "pane": id.0.to_string(), "leases": released }),
             );
         }
+        // Unbind any task claimed by the dead pane so the board stays truthful:
+        // worktree-backed work stays Running (the branch persists — `s` reopens
+        // it), a pure claim with no worktree goes back to the queue.
+        self.orch_unbind_pane(id.0);
         self.session_dirty = true;
         if self.layout_mut().remove(id) {
             self.close_active_tab();
@@ -3571,6 +3609,11 @@ mod tests {
         ps.state = crate::ui::theme::State::Working;
         app.status.insert(pid, ps);
 
+        // Take the frame set from the theme rather than hardcoding glyphs, so
+        // changing the spinner's look never silently breaks this test.
+        let frames: Vec<&str> = (0..crate::ui::theme::SPINNER_FRAMES)
+            .map(crate::ui::theme::spinner_frame)
+            .collect();
         let frame_at = |app: &mut App, spin: u64| -> String {
             app.spinner = spin;
             let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -3580,7 +3623,7 @@ mod tests {
             (0..buf.area.height)
                 .flat_map(|r| (0..buf.area.width).map(move |c| (c, r)))
                 .filter_map(|(c, r)| buf.cell((c, r)).map(|x| x.symbol().to_string()))
-                .find(|s| ["◐", "◓", "◑", "◒"].contains(&s.as_str()))
+                .find(|s| frames.contains(&s.as_str()))
                 .unwrap_or_default()
         };
         let f0 = frame_at(&mut app, 0);

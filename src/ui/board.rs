@@ -48,12 +48,22 @@ fn status_dot(s: TaskStatus) -> &'static str {
     }
 }
 
+/// Live detection state of a task's worker pane (from `App.status`), shown on
+/// its board row so the board reflects what the agent is *actually* doing.
+pub struct RowLive {
+    pub agent: String,
+    pub state: State,
+}
+
 /// Renders the board; returns the (clamped) scroll offset to write back so `G` /
-/// wheel settle at the content's end.
+/// wheel settle at the content's end. `live` has one entry per task: the
+/// detection state of its worker pane, when it has a live one.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     f: &mut RenderTarget,
     area: Rect,
     orch: &OrchState,
+    live: &[Option<RowLive>],
     scroll: usize,
     cursor: usize,
     cat: &Catalog,
@@ -98,12 +108,13 @@ pub(super) fn render(
         Paragraph::new(super::hint_line(
             &[
                 ("a", cat.act_new),
-                ("j/k", cat.act_select),
                 ("s", cat.board_start),
                 ("d", cat.task_done),
                 ("m", cat.act_merge),
                 ("⏎", cat.pane),
+                ("o", cat.board_details),
                 ("x", cat.board_release),
+                ("D", cat.act_delete),
                 ("q", cat.act_close),
             ],
             t,
@@ -123,14 +134,32 @@ pub(super) fn render(
     }
 
     if orch.tasks.is_empty() {
+        // A tiny built-in tutorial: what the board is for and the four keys
+        // that drive the whole flow, composed from existing catalog labels.
+        let key =
+            |k: &'static str| Span::styled(format!(" {k} "), Style::new().fg(t.accent).bold());
+        let txt = |s: String| Span::styled(s, Style::new().fg(t.subtext0));
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     format!("  {}", cat.board_empty),
-                    Style::new().fg(t.subtext0),
+                    Style::new().fg(t.text),
                 )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  "),
+                    key("a"),
+                    txt(format!("{} · ", cat.act_new)),
+                    key("s"),
+                    txt(format!("{} · ", cat.board_start)),
+                    key("d"),
+                    txt(format!("{} ({}) · ", cat.task_done, cat.board_f_gate)),
+                    key("m"),
+                    txt(cat.act_merge.to_string()),
+                ]),
+                Line::from(""),
                 Line::from(Span::styled(
-                    "  (bohay task add \"…\" --paths … --gate …)",
+                    "  CLI: bohay task add \"…\" --paths src/x/** --gate \"cargo test\"",
                     Style::new().fg(t.overlay0),
                 )),
             ]),
@@ -140,9 +169,14 @@ pub(super) fn render(
     }
 
     let mut lines: Vec<Line> = Vec::new();
-    let title_w = (body.width as usize).saturating_sub(30).max(8);
-    for task in &orch.tasks {
-        lines.push(task_line(task, title_w, cat, t));
+    for (i, task) in orch.tasks.iter().enumerate() {
+        lines.push(task_line(
+            task,
+            live.get(i).and_then(|l| l.as_ref()),
+            body.width as usize,
+            cat,
+            t,
+        ));
     }
     // Leases section.
     lines.push(Line::from(""));
@@ -297,26 +331,65 @@ fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
     }
 }
 
-fn task_line<'a>(task: &'a Task, title_w: usize, cat: &Catalog, t: &Theme) -> Line<'a> {
+fn task_line<'a>(
+    task: &'a Task,
+    live: Option<&'a RowLive>,
+    body_w: usize,
+    cat: &Catalog,
+    t: &Theme,
+) -> Line<'a> {
     let sc = status_color(task.status, t);
     let deps = if task.deps.is_empty() {
         String::new()
     } else {
         format!("⟶{}", task.deps.join(","))
     };
-    let mut assignee = match (task.assignee, &task.branch) {
-        (Some(p), Some(b)) => format!("pane {p} · {b}"),
-        (Some(p), None) => format!("pane {p}"),
-        (None, _) => String::new(),
-    };
+    // The worker column (built first so the title yields it space): pane +
+    // branch when bound, the live agent's detection state when it has one, and
+    // a "no pane" hint for a detached worktree.
+    let mut tail: Vec<Span> = Vec::new();
+    match (task.assignee, &task.branch) {
+        (Some(p), b) => {
+            let mut s = format!("pane {p}");
+            if let Some(b) = b {
+                s.push_str(&format!(" · {b}"));
+            }
+            tail.push(Span::styled(s, Style::new().fg(t.subtext0)));
+            if let Some(l) = live {
+                tail.push(Span::styled(
+                    format!(" · {} ", l.agent),
+                    Style::new().fg(t.subtext0),
+                ));
+                tail.push(Span::styled(
+                    format!("{}{}", l.state.dot(), l.state.label()),
+                    Style::new().fg(l.state.color(t)),
+                ));
+            }
+        }
+        (None, Some(b)) if task.worktree.is_some() => {
+            tail.push(Span::styled(
+                format!("{b} · {}", cat.board_no_pane),
+                Style::new().fg(t.overlay1),
+            ));
+        }
+        _ => {}
+    }
     // Flag a context-saturated worker (ORCH-5): it must compact before finishing.
     if task
         .context
         .is_some_and(|c| c > crate::orch::COMPACTION_THRESHOLD)
     {
-        assignee.push_str(&format!(" ⚠{}", cat.board_compact));
+        tail.push(Span::styled(
+            format!(" ⚠{}", cat.board_compact),
+            Style::new().fg(t.amber),
+        ));
     }
-    Line::from(vec![
+    // Fixed columns: dot(2) + id(4) + status(9) + deps(10); the title takes
+    // what's left after the worker column so it's never clipped off-screen.
+    let tail_w: usize = tail.iter().map(|s| super::display_width(&s.content)).sum();
+    let deps_w = super::display_width(&deps).max(10);
+    let title_w = body_w.saturating_sub(2 + 4 + 9 + deps_w + tail_w).max(8);
+    let mut spans = vec![
         Span::styled(format!("{} ", status_dot(task.status)), Style::new().fg(sc)),
         Span::styled(
             format!("{:<4}", task.id),
@@ -327,9 +400,186 @@ fn task_line<'a>(task: &'a Task, title_w: usize, cat: &Catalog, t: &Theme) -> Li
             Style::new().fg(sc),
         ),
         Span::styled(pad(&task.title, title_w), Style::new().fg(t.text)),
-        Span::styled(format!("{:<10}", deps), Style::new().fg(t.overlay1)),
-        Span::styled(assignee, Style::new().fg(t.subtext0)),
-    ])
+        Span::styled(pad(&deps, deps_w), Style::new().fg(t.overlay1)),
+    ];
+    spans.extend(tail);
+    Line::from(spans)
+}
+
+/// The **start-worker picker** (board `s`): choose which agent to launch in the
+/// task's isolated worktree. `⏎` starts, `esc` cancels.
+pub(super) fn draw_start(
+    f: &mut RenderTarget,
+    area: Rect,
+    start: &crate::app::OrchStart,
+    cat: &Catalog,
+    t: &Theme,
+) {
+    dim_backdrop(f, area, t);
+    let choices = crate::app::agent_choices();
+    let h = (choices.len() as u16) + 4;
+    let modal = centered_rect(area, 44.min(area.width), h);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {} — {}", cat.board_start_with, start.task),
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    for (i, (label, cmd)) in choices.iter().enumerate() {
+        let selected = i == start.cursor;
+        let name = if cmd.is_some() {
+            (*label).to_string()
+        } else {
+            cat.board_shell_only.to_string()
+        };
+        let style = if selected {
+            Style::new().fg(t.text).bg(t.surface1).bold()
+        } else {
+            Style::new().fg(t.subtext0)
+        };
+        let rect = Rect::new(inner.x, inner.y + 1 + i as u16, inner.width, 1);
+        if selected {
+            fill_bg(f, rect, t.surface1);
+        }
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  {} {}", if selected { "▸" } else { " " }, name),
+                style,
+            )),
+            rect,
+        );
+    }
+    f.render_widget(
+        Paragraph::new(super::hint_line(
+            &[("⏎", cat.board_start), ("esc", cat.act_cancel)],
+            t,
+        )),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+/// The **task detail overlay** (board `o`): everything about one task — branch,
+/// worktree, paths, gate, and the captured gate output + notes (the things you
+/// need when a gate fails). `j/k`/wheel scroll, `esc`/`o` close. Returns the
+/// clamped scroll to write back.
+pub(super) fn draw_detail(
+    f: &mut RenderTarget,
+    area: Rect,
+    task: &Task,
+    scroll: usize,
+    cat: &Catalog,
+    t: &Theme,
+) -> usize {
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(44, 78).min(area.width);
+    let h = area.height.saturating_sub(4).clamp(8, 24).min(area.height);
+    let modal = centered_rect(area, w, h);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    let sc = status_color(task.status, t);
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(format!(" {} ", task.id), Style::new().fg(t.subtext1).bold()),
+            Span::styled(status_label(task.status, cat), Style::new().fg(sc)),
+            Span::styled(
+                format!(
+                    "  {}",
+                    pad(&task.title, (inner.width as usize).saturating_sub(14))
+                ),
+                Style::new().fg(t.text).bold(),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    let kv = |k: &'static str, v: String, lines: &mut Vec<Line>| {
+        if !v.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {k:<9}"), Style::new().fg(t.subtext0)),
+                Span::styled(v, Style::new().fg(t.text)),
+            ]));
+        }
+    };
+    if let Some(b) = &task.branch {
+        kv("branch", b.clone(), &mut lines);
+    }
+    if let Some(wt) = &task.worktree {
+        kv("worktree", wt.clone(), &mut lines);
+    }
+    kv(
+        "pane",
+        task.assignee.map(|p| p.to_string()).unwrap_or_default(),
+        &mut lines,
+    );
+    kv(cat.board_f_paths, task.paths.join(" "), &mut lines);
+    kv(cat.board_f_deps, task.deps.join(" "), &mut lines);
+    kv(
+        cat.board_f_gate,
+        task.gate.clone().unwrap_or_default(),
+        &mut lines,
+    );
+    if !task.outputs.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", cat.board_outputs),
+            Style::new().fg(t.subtext1).bold(),
+        )));
+        for o in task.outputs.iter().rev().take(5).rev() {
+            for l in o.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {l}"),
+                    Style::new().fg(t.subtext0),
+                )));
+            }
+        }
+    }
+    if !task.notes.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", cat.board_notes),
+            Style::new().fg(t.subtext1).bold(),
+        )));
+        for n in task.notes.iter().rev().take(5).rev() {
+            for l in n.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {l}"),
+                    Style::new().fg(t.subtext0),
+                )));
+            }
+        }
+    }
+
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    let vis = body.height as usize;
+    let scroll = scroll.min(lines.len().saturating_sub(vis));
+    f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), body);
+    f.render_widget(
+        Paragraph::new(super::hint_line(
+            &[("j/k", cat.act_select), ("esc", cat.act_close)],
+            t,
+        )),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+    scroll
 }
 
 fn fmt_count(label: &str, n: usize) -> String {
