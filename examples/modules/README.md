@@ -9,6 +9,7 @@ edited**, not installed as-is.
 | [`branch-dock`](branch-dock) | Bash | A sidebar **dock**, clickable rows with a `value` payload, a **startup hook**, `number` + `enum` **settings**, a `workspace` right-click action |
 | [`agent-ping`](agent-ping) | Python | An **event hook** on agent status, a **secret** setting, an `agent` right-click action, toasts |
 | [`scratch-pane`](scratch-pane) | Node | A **pane** entrypoint, `pane` right-click actions, reading the **selection**, **renaming a tab**, the state dir |
+| [`file-tree`](file-tree) | Bash | A **collapsible file tree** dock (per-row `toggle`/`open` actions, on-disk expand state), opening a file into a split **pane** via `pane split` + `pane run` — a no-core-edits prototype of docs/38 |
 
 Nothing here needs a build step or a dependency beyond the language runtime
 itself (`sh`, `python3`, `node`).
