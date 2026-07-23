@@ -26,7 +26,7 @@ command -v python3 >/dev/null 2>&1 || exit 0
 input="$(cat)"
 evt="$(printf '%s' "$input" | python3 -c 'import sys,json
 try:
-    d=json.load(sys.stdin); print(d.get("hook_event_name") or "")
+    d=json.load(sys.stdin); print(d.get("hook_event_name") or d.get("event") or "")
 except Exception: print("")' 2>/dev/null)"
 case "$evt" in
   Notification|Stop|SubagentStop)
@@ -144,6 +144,21 @@ fn kimi_config_dir() -> PathBuf {
 
 fn kimi_config_path() -> PathBuf {
     kimi_config_dir().join("config.toml")
+}
+
+/// Grok Build's home: `$GROK_HOME`, else `~/.grok` (docs/35). Unlike Kimi, grok
+/// reads hooks from a **directory of `*.json` files** at `<home>/hooks/`, not
+/// from the auth-bearing `config.toml`, so bohay drops a standalone `bohay.json`
+/// there — nothing of the user's is edited.
+fn grok_hooks_dir() -> PathBuf {
+    let home = std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".grok"));
+    home.join("hooks")
+}
+
+fn grok_hook_json_path() -> PathBuf {
+    grok_hooks_dir().join("bohay.json")
 }
 
 /// opencode's global plugin dir: `$XDG_CONFIG_HOME/opencode/plugin`, else
@@ -323,8 +338,38 @@ pub fn install_kimi() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Install the Grok Build hook (docs/35). grok discovers hooks from
+/// `<home>/hooks/*.json` in the Claude-compatible `{"hooks":{Event:[…]}}` shape,
+/// so bohay writes its own `bohay.json` there plus the shared `bohay-agent-hook.sh`.
+/// Because it is bohay's *own* file (not a shared config), install/uninstall is
+/// just write/remove — no merge, and the user's auth `config.toml` is never touched.
+/// grok's payload uses snake_case `session_id` + an `event` field, both of which
+/// the shared script already reads. Idempotent.
+pub fn install_grok() -> Result<PathBuf> {
+    let dir = grok_hooks_dir();
+    fs::create_dir_all(&dir)?;
+    let script = dir.join("bohay-agent-hook.sh");
+    fs::write(&script, agent_hook_script("grok"))?;
+    set_executable(&script)?;
+    let cmd = script.to_string_lossy();
+
+    // SessionStart resumes; Notification/Stop/SubagentStop feed the notch
+    // companion (docs/24), matching what install_claude registers.
+    let group = |c: &str| json!({ "hooks": [ { "type": "command", "command": c } ] });
+    let doc = json!({
+        "hooks": {
+            "SessionStart": [group(&cmd)],
+            "Notification": [group(&cmd)],
+            "Stop": [group(&cmd)],
+            "SubagentStop": [group(&cmd)],
+        }
+    });
+    fs::write(grok_hook_json_path(), serde_json::to_string_pretty(&doc)?)?;
+    Ok(dir)
+}
+
 /// Agents the integration hook supports (for the Settings UI + CLI).
-pub const AGENTS: &[&str] = &["claude", "copilot", "codex", "opencode", "kimi"];
+pub const AGENTS: &[&str] = &["claude", "copilot", "codex", "opencode", "kimi", "grok"];
 
 /// Install the integration for `agent` (used by the Settings tab + CLI).
 pub fn install(agent: &str) -> Result<()> {
@@ -334,6 +379,7 @@ pub fn install(agent: &str) -> Result<()> {
         "codex" => install_codex().map(|_| ()),
         "opencode" => install_opencode().map(|_| ()),
         "kimi" => install_kimi().map(|_| ()),
+        "grok" => install_grok().map(|_| ()),
         other => Err(anyhow!("no integration for {other}")),
     }
 }
@@ -345,6 +391,13 @@ pub fn install(agent: &str) -> Result<()> {
 pub fn uninstall(agent: &str) -> Result<()> {
     if agent == "opencode" {
         let _ = fs::remove_file(opencode_plugin_path());
+        return Ok(());
+    }
+    if agent == "grok" {
+        // Both are bohay's own files; removing them leaves grok's config and
+        // any user hooks in `<home>/hooks/` untouched.
+        let _ = fs::remove_file(grok_hook_json_path());
+        let _ = fs::remove_file(grok_hooks_dir().join("bohay-agent-hook.sh"));
         return Ok(());
     }
     if agent == "kimi" {
@@ -399,6 +452,9 @@ pub fn uninstall(agent: &str) -> Result<()> {
 pub fn is_installed(agent: &str) -> bool {
     if agent == "opencode" {
         return opencode_plugin_path().exists();
+    }
+    if agent == "grok" {
+        return grok_hook_json_path().exists();
     }
     if agent == "kimi" {
         let Ok(s) = fs::read_to_string(kimi_config_path()) else {
@@ -682,6 +738,51 @@ mod tests {
         uninstall("kimi").unwrap(); // idempotent
 
         std::env::remove_var("KIMI_CODE_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn grok_hook_is_a_standalone_json_file() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("bohay-grok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::set_var("GROK_HOME", &tmp);
+        // A pre-existing user hook in the same dir must survive install/uninstall.
+        let hooks = tmp.join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("mine.json"), r#"{"hooks":{}}"#).unwrap();
+        // And the auth config must never be touched.
+        fs::write(tmp.join("config.toml"), "[auth]\nkey = \"secret\"\n").unwrap();
+
+        install_grok().unwrap();
+        install_grok().unwrap(); // idempotent — it's our own file, just overwritten
+        assert!(is_installed("grok"));
+        assert!(hooks.join("bohay-agent-hook.sh").exists());
+
+        // Claude-compatible shape, our four events, the shared script.
+        let v: Value =
+            serde_json::from_str(&fs::read_to_string(hooks.join("bohay.json")).unwrap()).unwrap();
+        for evt in ["SessionStart", "Notification", "Stop", "SubagentStop"] {
+            let groups = v["hooks"][evt].as_array().unwrap();
+            assert!(groups.iter().any(group_mentions_bohay), "{evt} registered");
+        }
+
+        uninstall("grok").unwrap();
+        assert!(!is_installed("grok"), "bohay.json removed");
+        assert!(!hooks.join("bohay-agent-hook.sh").exists());
+        // The user's own hook and the auth config are untouched throughout.
+        assert!(hooks.join("mine.json").exists(), "user hook kept");
+        assert!(
+            fs::read_to_string(tmp.join("config.toml"))
+                .unwrap()
+                .contains("secret"),
+            "auth config never touched"
+        );
+        uninstall("grok").unwrap(); // idempotent
+
+        std::env::remove_var("GROK_HOME");
         let _ = fs::remove_dir_all(&tmp);
     }
 

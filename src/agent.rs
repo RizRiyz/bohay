@@ -84,6 +84,15 @@ static SOURCES: &[SessionSource] = &[
         }),
         resume: |q| format!("kimi --resume {q}\r"),
     },
+    SessionSource {
+        name: "grok",
+        discover: Some(Discovery {
+            base: grok_base,
+            recent: grok_recent,
+            latest: grok_latest,
+        }),
+        resume: |q| format!("grok --resume {q}\r"),
+    },
     // Resume-only (no readable session store): usable when a hook reports the id.
     SessionSource {
         name: "cursor",
@@ -649,6 +658,144 @@ fn kimi_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
     out
 }
 
+// ── Grok Build (xAI) ─────────────────────────────────────────────────────────
+// Sessions live in a Claude-shaped tree (docs/35): `<base>/sessions/
+// <encoded-cwd>/<session-id>/`, where each session is a *directory* (not a file)
+// holding `updates.jsonl` / `summary.json` / etc. The cwd directory name is
+// `urlencoding::encode(cwd)` for short paths, else a `{slug}-{blake3}` hash with
+// the real path in a sibling `.cwd` file. We never re-encode (that would need
+// blake3) — we scan the cwd dirs and decode each name back to its real path,
+// matching Claude's "read the real cwd" approach. Subagent sessions nest under
+// `<session>/subagents/<id>/` and must not appear as top-level resumable ones.
+
+fn grok_base() -> PathBuf {
+    if let Some(d) = std::env::var_os("GROK_HOME") {
+        return PathBuf::from(d);
+    }
+    home().join(".grok")
+}
+
+/// Percent-decode a URL-encoded string (no `+`-for-space; grok uses `%20`).
+/// Returns `None` on a malformed escape or non-UTF-8 result.
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    let hex = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            out.push(hex(b[i + 1])? * 16 + hex(b[i + 2])?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Resolve a grok cwd-directory back to its real working directory: URL-decode
+/// the name (short paths), else read the `.cwd` file grok writes for hashed
+/// long paths. `None` if neither yields a plausible absolute path.
+fn grok_decode_cwd(cwd_dir: &Path) -> Option<PathBuf> {
+    let name = cwd_dir.file_name()?.to_str()?;
+    if let Some(decoded) = percent_decode(name) {
+        // A real cwd is absolute; the slug-hash form never is, which tells the
+        // two encodings apart (same test grok's own decoder uses).
+        if decoded.starts_with('/') || (cfg!(windows) && decoded.chars().nth(1) == Some(':')) {
+            return Some(PathBuf::from(decoded));
+        }
+    }
+    let cwd = std::fs::read_to_string(cwd_dir.join(".cwd")).ok()?;
+    let cwd = cwd.trim();
+    (!cwd.is_empty()).then(|| PathBuf::from(cwd))
+}
+
+/// The newest session directory inside a grok cwd-dir as `(mtime, session-id)`.
+/// The directory name *is* the session id. Skips the `subagents/` nest and any
+/// non-directory entries (`.cwd`, stray files).
+fn grok_newest_session(cwd_dir: &Path) -> Option<(SystemTime, String)> {
+    let mut best: Option<(SystemTime, String)> = None;
+    for e in std::fs::read_dir(cwd_dir).ok()?.flatten() {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(id) = e.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if id == "subagents" {
+            continue; // nested child sessions, not top-level resumable
+        }
+        let Ok(mtime) = e.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+            best = Some((mtime, id));
+        }
+    }
+    best
+}
+
+/// `(mtime, path)` for every cwd-directory under `<base>/sessions/`, stat-only,
+/// so callers read only the newest few (the every-4s scan stays bounded).
+fn grok_cwd_dirs(base: &Path) -> Vec<(SystemTime, PathBuf)> {
+    let Ok(rd) = std::fs::read_dir(base.join("sessions")) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter_map(|e| {
+            let md = e.metadata().ok()?;
+            md.is_dir().then(|| Some((md.modified().ok()?, e.path())))?
+        })
+        .collect()
+}
+
+fn grok_latest(base: &Path, cwd: &Path) -> Option<String> {
+    let mut dirs = grok_cwd_dirs(base);
+    dirs.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    // Newest cwd-dir first; stop at the first whose real path matches.
+    for (_, dir) in dirs {
+        if grok_decode_cwd(&dir).as_deref() == Some(cwd) {
+            return grok_newest_session(&dir).map(|(_, id)| id);
+        }
+    }
+    None
+}
+
+fn grok_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    let mut dirs = grok_cwd_dirs(base);
+    dirs.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (_, dir) in dirs {
+        if out.len() >= limit {
+            break; // newest-first; read only the distinct projects we return
+        }
+        let Some(cwd) = grok_decode_cwd(&dir) else {
+            continue;
+        };
+        if !seen.insert(cwd.clone()) {
+            continue;
+        }
+        if let Some((updated, id)) = grok_newest_session(&dir) {
+            out.push(SessionInfo {
+                agent: "grok".to_string(),
+                session_id: id,
+                cwd,
+                updated,
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,6 +828,10 @@ mod tests {
             .unwrap()
             .contains("kimi --resume"));
         assert!(is_resumable("kimi"));
+        assert!(resume_command("grok", "20250921_143022")
+            .unwrap()
+            .contains("grok --resume"));
+        assert!(is_resumable("grok"));
         assert!(resume_command("cursor-agent", "z")
             .unwrap()
             .contains("cursor-agent --resume"));
@@ -809,6 +960,68 @@ mod tests {
                 .session_id,
             "s_new"
         );
+    }
+
+    #[test]
+    fn grok_discovers_session_by_cwd_dir() {
+        // sessions/<encoded-cwd>/<session-id>/ — the session-id is the dir name.
+        // Short cwds are URL-encoded in the dir name; long ones use a `.cwd` file.
+        // Subagent sessions nest under <session>/subagents/ and are skipped.
+        let base = tmp("grok");
+        let sessions = base.join("sessions");
+
+        // A short-path project: dir name is the percent-encoded cwd.
+        let short = sessions.join("%2Fwork%2Fapp");
+        fs::create_dir_all(short.join("20250101_090000")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newest = short.join("20250101_120000");
+        fs::create_dir_all(&newest).unwrap();
+        // A subagent nested under the newest session must not be resumable.
+        fs::create_dir_all(newest.join("subagents").join("child_1")).unwrap();
+
+        // A long-path project: hashed dir name + a `.cwd` metadata file.
+        let hashed = sessions.join("app-deadbeefcafe0000");
+        fs::create_dir_all(hashed.join("20250102_080000")).unwrap();
+        fs::write(hashed.join(".cwd"), "/very/long/path/to/api\n").unwrap();
+
+        // latest() resolves each dir's real cwd and returns the newest session id.
+        assert_eq!(
+            grok_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("20250101_120000"),
+            "newest session dir wins; subagents/ is skipped"
+        );
+        assert_eq!(
+            grok_latest(&base, Path::new("/very/long/path/to/api")).as_deref(),
+            Some("20250102_080000"),
+            "hashed dir resolves its cwd from the .cwd file"
+        );
+        assert!(grok_latest(&base, Path::new("/no/such")).is_none());
+
+        // recent() lists one entry per project.
+        let recent = grok_recent(&base, 10);
+        assert_eq!(recent.len(), 2, "one per cwd-dir");
+        assert!(recent.iter().all(|s| s.agent == "grok"));
+        assert!(recent
+            .iter()
+            .any(|s| s.cwd == Path::new("/work/app") && s.session_id == "20250101_120000"));
+        assert!(recent
+            .iter()
+            .any(|s| s.cwd == Path::new("/very/long/path/to/api")));
+    }
+
+    #[test]
+    fn percent_decode_handles_paths_and_bad_escapes() {
+        assert_eq!(
+            percent_decode("%2Fwork%2Fapp").as_deref(),
+            Some("/work/app")
+        );
+        assert_eq!(
+            percent_decode("%2FUsers%2Fx%2Fa%20b").as_deref(),
+            Some("/Users/x/a b"),
+            "%20 is a space"
+        );
+        assert_eq!(percent_decode("plain").as_deref(), Some("plain"));
+        assert_eq!(percent_decode("%zz").as_deref(), None, "bad hex → None");
     }
 
     #[test]

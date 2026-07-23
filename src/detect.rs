@@ -407,6 +407,34 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![all(&["select", "choose", "confirm"])],
         ),
+        // Grok Build's permission card (docs/35) always shows the two persistent
+        // option labels "Always allow" + "Never allow" together, for every tool
+        // (command, edit, MCP call). That pair is unmistakable and catches an
+        // "Allow Edit?" the generic prompt list would miss.
+        per(
+            "grok",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![all(&["always allow", "never allow"])],
+        ),
+        // Its bash-command card carries a distinct reject affordance.
+        per(
+            "grok",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![any(&["no, reject (type to add feedback)"])],
+        ),
+        // Grok's busy footer is `Ctrl+c:cancel` (its own punctuation, not the
+        // generic "ctrl+c to interrupt"), so give it a per-agent working hint.
+        per(
+            "grok",
+            State::Working,
+            105,
+            Region::Screen,
+            vec![any(&["ctrl+c:cancel"])],
+        ),
     ]
 }
 
@@ -945,6 +973,52 @@ mod tests {
             &Manifests::builtin(),
         );
         assert_eq!(d.state, State::Blocked);
+    }
+
+    #[test]
+    fn grok_permission_card_is_blocked() {
+        // Grok's permission card shows Always/Never allow together; that pair
+        // reads as Blocked even for an edit the generic prompt list wouldn't catch.
+        let d = classify(
+            Some("grok"),
+            "Allow Edit?\n  src/main.rs\n\n  Allow    Always allow: this file    Never allow:",
+            true,
+            false,
+            "grok",
+            "grok",
+            &[],
+            &Manifests::builtin(),
+        );
+        assert_eq!(d.state, State::Blocked);
+
+        // The reject affordance on a bash-command card is also Blocked.
+        let d = classify(
+            Some("grok"),
+            "Allow command?\n  cargo test\n\n  Yes    No, reject (type to add feedback)",
+            true,
+            false,
+            "grok",
+            "grok",
+            &[],
+            &Manifests::builtin(),
+        );
+        assert_eq!(d.state, State::Blocked);
+    }
+
+    #[test]
+    fn grok_busy_footer_is_working() {
+        // Grok's own interrupt hint uses `Ctrl+c:cancel` punctuation.
+        let d = classify(
+            Some("grok"),
+            "Editing files…\n  Ctrl+c:cancel",
+            true,
+            false,
+            "grok",
+            "grok",
+            &[],
+            &Manifests::builtin(),
+        );
+        assert_eq!(d.state, State::Working);
     }
 
     // An agent's UI does not print its own name on every frame. Switching tabs or

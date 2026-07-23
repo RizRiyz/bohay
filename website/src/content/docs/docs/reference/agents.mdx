@@ -10,12 +10,12 @@ description: What bohay supports per agent, covering live status, session resume
 | Codex | ✓ | ✓ | ✓ |
 | opencode | ✓ | ✓ | ✓ |
 | Kimi Code CLI | ✓ | ✓ | ✓ |
+| Grok Build | ✓ | ✓ | ✓ |
 | Cursor | ✓ | resume command | no |
 | Gemini | ✓ | no | no |
 | Aider | ✓ | no | no |
 | Amp | ✓ | no | no |
 | Droid | ✓ | no | no |
-| Grok | ✓ | no | no |
 | Qwen | ✓ | no | no |
 | Kiro | ✓ | no | no |
 
@@ -30,6 +30,8 @@ description: What bohay supports per agent, covering live status, session resume
   `bohay integration uninstall <agent>` touches only bohay's own entry. Kimi keeps
   its hooks in `~/.kimi-code/config.toml`, the same file as your API keys, so
   bohay edits it in place and leaves your keys, comments, and own hooks untouched.
+  Grok Build reads hooks from `~/.grok/hooks/*.json`, so bohay just adds its own
+  `bohay.json` there and never touches your `~/.grok/config.toml`.
 
 Missing your agent? You can add it yourself without waiting for a release: drop
 an `[identity]` block in `~/.bohay/manifests/<agent>.toml` and bohay will
