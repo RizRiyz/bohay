@@ -1,0 +1,76 @@
+id = "example.file-tree"
+name = "File Tree"
+version = "0.1.0"
+min_bohay_version = "0.8.3"
+description = "A collapsible file tree of the active node in the sidebar. Click a folder to expand, a file to open it in a pane. A no-core-edits prototype of docs/38."
+platforms = ["macos", "linux"]
+
+# The dock bohay reserves for this module. The scripts fill it over the socket
+# with `ui dock push`; bohay owns the rendering and the row geometry, and the
+# user can move it to the other sidebar from Settings -> Layout.
+[[docks]]
+id = "files"
+title = "FILES"
+placement = "sidebar.left"
+
+# Dock contents are deliberately not persisted, so this repaints after a restart.
+[[startup]]
+command = ["sh", "render.sh"]
+
+# Keep the tree pointed at wherever the user is working. There is no dedicated
+# "active node changed" event yet, so we repaint on the node/tab events that do
+# fire; the in-dock "⟳" row (and the workspace right-click item) cover the rest.
+[[events]]
+on = "workspace.created"
+command = ["sh", "render.sh"]
+
+[[events]]
+on = "tab.created"
+command = ["sh", "render.sh"]
+
+# Right-click a WORKSPACES row -> "Open file tree here" to re-root on demand.
+[[actions]]
+id = "reroot"
+title = "Open file tree here"
+contexts = ["workspace"]
+command = ["sh", "render.sh"]
+
+# Clicking a *folder* row invokes this (rows set action = "toggle").
+[[actions]]
+id = "toggle"
+title = "Expand or collapse a folder"
+command = ["sh", "toggle.sh"]
+
+# Clicking a *file* row invokes this (rows set action = "open").
+[[actions]]
+id = "open"
+title = "Open a file in a pane"
+command = ["sh", "open.sh"]
+
+# The top "⟳" row re-roots to the active node and repaints.
+[[actions]]
+id = "refresh"
+title = "Refresh the tree"
+command = ["sh", "render.sh"]
+
+[[settings]]
+key = "open_in"
+title = "Open files in"
+type = "enum"
+options = ["pane", "tab"]
+default = "pane"
+
+[[settings]]
+key = "show_hidden"
+title = "Show dotfiles"
+type = "bool"
+default = false
+
+[[settings]]
+key = "max_rows"
+title = "Max rows in the tree"
+type = "number"
+default = 400
+min = 50
+max = 2000
+step = 50

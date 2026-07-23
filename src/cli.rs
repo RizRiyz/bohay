@@ -23,6 +23,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "events"
                 | "module"
                 | "git"
+                | "files"
                 | "worktree"
                 | "task"
                 | "lease"
@@ -107,6 +108,10 @@ git:
   git branches               local branches with tracking
   git log [--limit N]        recent commits
   git open [<workspace>]     open the git tab for a workspace
+  files tree                 print the FILES tree of the active node
+  files open <path> [--target pane|tab|preview]   open a file in a view
+  files reveal <path>        expand the tree to a path
+  files refresh              re-read the tree from disk
 
 worktrees:
   worktree list              list the current repo's worktrees
@@ -917,6 +922,18 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("git.log".into(), Value::Object(obj))
         }
         ("git", "open") => ("git.open".into(), one("workspace", arg0())),
+        ("files", "open") => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("path".to_string(), json!(arg0().unwrap_or_default()));
+            if let Some(tg) = flag(args, "--target") {
+                obj.insert("target".to_string(), json!(tg));
+            }
+            ("files.open".into(), Value::Object(obj))
+        }
+        ("files", "tree") => ("files.tree".into(), json!({})),
+        ("files", "reveal") => ("files.reveal".into(), one("path", arg0())),
+        ("files", "refresh") => ("files.refresh".into(), json!({})),
+        ("files", _) => ("files.tree".into(), json!({})),
         ("git", _) => ("git.status".into(), json!({})),
 
         ("worktree", "create") => ("worktree.create".into(), one("branch", arg0())),

@@ -15,6 +15,8 @@
 pub struct Catalog {
     // ── sidebar ──
     pub workspaces: &'static str,
+    /// FILES dock header (docs/38).
+    pub files: &'static str,
     pub agents: &'static str,
     pub no_active_agents: &'static str,
     pub no_agents_or_sessions: &'static str,
@@ -229,6 +231,7 @@ pub struct Catalog {
     pub cmd_toggle_sidebar: &'static str,
     pub cmd_toggle_right_sidebar: &'static str,
     pub cmd_toggle_agents: &'static str,
+    pub cmd_toggle_files: &'static str,
     pub cmd_detach: &'static str,
     pub menu_resume: &'static str,
     pub menu_split_vertical: &'static str,
@@ -250,6 +253,7 @@ pub struct Catalog {
 pub static EN: Catalog = Catalog {
     workspaces: "WORKSPACES",
     agents: "AGENTS",
+    files: "FILES",
     no_active_agents: "no active agents",
     no_agents_or_sessions: "no agents or sessions",
     all: "All",
@@ -450,6 +454,7 @@ pub static EN: Catalog = Catalog {
     cmd_toggle_sidebar: "Toggle sidebar",
     cmd_toggle_right_sidebar: "Toggle right sidebar",
     cmd_toggle_agents: "Agents: all / active",
+    cmd_toggle_files: "Files: show / hide",
     cmd_detach: "Detach (leave server running)",
     menu_resume: "Resume",
     menu_split_vertical: "Split vertical",
@@ -470,6 +475,7 @@ pub static EN: Catalog = Catalog {
 static ES: Catalog = Catalog {
     workspaces: "ESPACIOS",
     agents: "AGENTES",
+    files: "ARCHIVOS",
     no_active_agents: "sin agentes activos",
     no_agents_or_sessions: "sin agentes ni sesiones",
     all: "Todos",
@@ -670,6 +676,7 @@ static ES: Catalog = Catalog {
     cmd_toggle_sidebar: "Alternar barra lateral",
     cmd_toggle_right_sidebar: "Alternar barra derecha",
     cmd_toggle_agents: "Agentes: todos / activos",
+    cmd_toggle_files: "Archivos: mostrar / ocultar",
     cmd_detach: "Desacoplar (servidor sigue activo)",
     menu_resume: "Reanudar",
     menu_split_vertical: "Dividir vertical",
@@ -690,6 +697,7 @@ static ES: Catalog = Catalog {
 static PT: Catalog = Catalog {
     workspaces: "ESPAÇOS",
     agents: "AGENTES",
+    files: "ARQUIVOS",
     no_active_agents: "nenhum agente ativo",
     no_agents_or_sessions: "nenhum agente ou sessão",
     all: "Todos",
@@ -890,6 +898,7 @@ static PT: Catalog = Catalog {
     cmd_toggle_sidebar: "Alternar barra lateral",
     cmd_toggle_right_sidebar: "Alternar barra direita",
     cmd_toggle_agents: "Agentes: todos / ativos",
+    cmd_toggle_files: "Arquivos: mostrar / ocultar",
     cmd_detach: "Desacoplar (servidor continua)",
     menu_resume: "Retomar",
     menu_split_vertical: "Dividir vertical",
@@ -910,6 +919,7 @@ static PT: Catalog = Catalog {
 static FR: Catalog = Catalog {
     workspaces: "ESPACES",
     agents: "AGENTS",
+    files: "FICHIERS",
     no_active_agents: "aucun agent actif",
     no_agents_or_sessions: "aucun agent ni session",
     all: "Tous",
@@ -1110,6 +1120,7 @@ static FR: Catalog = Catalog {
     cmd_toggle_sidebar: "Basculer la barre latérale",
     cmd_toggle_right_sidebar: "Basculer la barre de droite",
     cmd_toggle_agents: "Agents : tous / actifs",
+    cmd_toggle_files: "Fichiers : afficher / masquer",
     cmd_detach: "Détacher (serveur actif)",
     menu_resume: "Reprendre",
     menu_split_vertical: "Diviser verticalement",
@@ -1130,6 +1141,7 @@ static FR: Catalog = Catalog {
 static DE: Catalog = Catalog {
     workspaces: "BEREICHE",
     agents: "AGENTEN",
+    files: "DATEIEN",
     no_active_agents: "keine aktiven Agenten",
     no_agents_or_sessions: "keine Agenten oder Sitzungen",
     all: "Alle",
@@ -1330,6 +1342,7 @@ static DE: Catalog = Catalog {
     cmd_toggle_sidebar: "Seitenleiste umschalten",
     cmd_toggle_right_sidebar: "Rechte Seitenleiste umschalten",
     cmd_toggle_agents: "Agenten: alle / aktiv",
+    cmd_toggle_files: "Dateien: ein / aus",
     cmd_detach: "Abkoppeln (Server läuft weiter)",
     menu_resume: "Fortsetzen",
     menu_split_vertical: "Vertikal teilen",
@@ -1350,6 +1363,7 @@ static DE: Catalog = Catalog {
 static ID: Catalog = Catalog {
     workspaces: "RUANG KERJA",
     agents: "AGEN",
+    files: "BERKAS",
     no_active_agents: "tidak ada agen aktif",
     no_agents_or_sessions: "tidak ada agen atau sesi",
     all: "Semua",
@@ -1550,6 +1564,7 @@ static ID: Catalog = Catalog {
     cmd_toggle_sidebar: "Alihkan bilah sisi",
     cmd_toggle_right_sidebar: "Alihkan bilah kanan",
     cmd_toggle_agents: "Agen: semua / aktif",
+    cmd_toggle_files: "Berkas: tampil / sembunyi",
     cmd_detach: "Lepas (server tetap jalan)",
     menu_resume: "Lanjutkan",
     menu_split_vertical: "Bagi vertikal",
@@ -1570,6 +1585,7 @@ static ID: Catalog = Catalog {
 static ZH: Catalog = Catalog {
     workspaces: "工作区",
     agents: "代理",
+    files: "文件",
     no_active_agents: "无活动代理",
     no_agents_or_sessions: "无代理或会话",
     all: "全部",
@@ -1770,6 +1786,7 @@ static ZH: Catalog = Catalog {
     cmd_toggle_sidebar: "切换侧栏",
     cmd_toggle_right_sidebar: "切换右侧栏",
     cmd_toggle_agents: "代理：全部 / 活动",
+    cmd_toggle_files: "文件：显示 / 隐藏",
     cmd_detach: "分离（服务器继续运行）",
     menu_resume: "恢复",
     menu_split_vertical: "垂直拆分",
@@ -1790,6 +1807,7 @@ static ZH: Catalog = Catalog {
 static JA: Catalog = Catalog {
     workspaces: "ワークスペース",
     agents: "エージェント",
+    files: "ファイル",
     no_active_agents: "アクティブなエージェントなし",
     no_agents_or_sessions: "エージェント・セッションなし",
     all: "すべて",
@@ -1990,6 +2008,7 @@ static JA: Catalog = Catalog {
     cmd_toggle_sidebar: "サイドバー切替",
     cmd_toggle_right_sidebar: "右サイドバー切替",
     cmd_toggle_agents: "エージェント: 全部 / アクティブ",
+    cmd_toggle_files: "ファイル：表示 / 非表示",
     cmd_detach: "デタッチ（サーバーは継続）",
     menu_resume: "再開",
     menu_split_vertical: "垂直分割",

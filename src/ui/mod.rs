@@ -55,6 +55,7 @@ impl<'a> RenderTarget<'a> {
 mod board;
 mod borders;
 mod cmdinfo;
+mod files;
 mod git;
 mod help;
 mod menu;

@@ -59,6 +59,10 @@ pub struct PaneSnap {
     /// (module_id, entrypoint) for a module pane (MOD-2), re-spawned on restore.
     #[serde(default)]
     pub module: Option<(String, String)>,
+    /// A native file **view** leaf (docs/38 FILE-3): the file it shows. When set,
+    /// restore rebuilds the view (re-reads the file) instead of spawning a shell.
+    #[serde(default)]
+    pub file: Option<PathBuf>,
 }
 
 /// Serializes tests that mutate the global `$BOHAY_HOME` env + config files, so
@@ -257,6 +261,21 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                 .leaves()
                 .into_iter()
                 .filter_map(|id| {
+                    // A file-view leaf (docs/38 FILE-3) is saved by its path and
+                    // rebuilt on restore; it has no PTY.
+                    if let Some(crate::app::ViewKind::File(v)) = app.views.get(&id) {
+                        return Some((
+                            id.0,
+                            PaneSnap {
+                                cwd: PathBuf::new(),
+                                command: String::new(),
+                                agent_session: None,
+                                screen: None,
+                                module: None,
+                                file: Some(v.path.clone()),
+                            },
+                        ));
+                    }
                     app.panes.get(&id).map(|p| {
                         let agent_session = app.status.get(&id).and_then(|s| {
                             // A hook-reported session is precise; otherwise
@@ -289,6 +308,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                 agent_session,
                                 screen,
                                 module,
+                                file: None,
                             },
                         )
                     })

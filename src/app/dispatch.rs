@@ -19,9 +19,17 @@ impl App {
     /// silent agent's Working→Done transition even when no other event fires.
     pub fn detect_tick(&mut self, now: Instant) -> bool {
         // Refresh working directories ~once a second so spaces follow the user.
+        // The file-viewer upkeep rides the same 1s cadence — sub-second freshness
+        // buys nothing (a node switch or an on-disk edit showing within a second
+        // is fine) and 10x/s stats + allocs would be wasted work on the loop.
         if now.duration_since(self.last_cwd_at) >= Duration::from_secs(1) {
             self.last_cwd_at = now;
             self.refresh_cwds();
+            // Keep the FILES dock rooted at the active node and its open dirs
+            // read (docs/38). Off-loop: this only schedules reads, never blocks.
+            self.ensure_file_tree();
+            // Live-refresh open file views whose file changed on disk (FILE-5).
+            self.ensure_file_views();
         }
         // Rescan the agents' session stores a little less often. The scan is
         // filesystem work that grows with on-disk history, so it runs on a
@@ -915,6 +923,55 @@ impl App {
                     .unwrap_or(self.active_ws);
                 self.open_git_tab(i);
                 Ok(json!({"type":"ok","git": self.active_is_git()}))
+            }
+            // ── file viewer (docs/38) ──
+            "files.open" => {
+                let raw = p.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if raw.is_empty() {
+                    return Err(("bad_request".into(), "path required".into()));
+                }
+                let path = self.resolve_file_path(raw);
+                let target = match p.get("target").and_then(|v| v.as_str()) {
+                    Some("tab") => crate::app::files::OpenTarget::Tab,
+                    Some("pane") => crate::app::files::OpenTarget::Pane,
+                    _ => crate::app::files::OpenTarget::Preview,
+                };
+                self.open_file_view(path, target);
+                Ok(json!({"type":"ok"}))
+            }
+            "files.tree" => {
+                let rows: Vec<Value> = self
+                    .file_tree
+                    .visible_rows()
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "path": r.path.to_string_lossy(),
+                            "name": r.name,
+                            "depth": r.depth,
+                            "dir": r.is_dir,
+                            "expanded": r.expanded,
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "type": "file_tree",
+                    "root": self.file_tree.root().to_string_lossy(),
+                    "rows": rows,
+                }))
+            }
+            "files.reveal" => {
+                let raw = p.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if raw.is_empty() {
+                    return Err(("bad_request".into(), "path required".into()));
+                }
+                let path = self.resolve_file_path(raw);
+                self.file_tree.reveal(&path);
+                Ok(json!({"type":"ok"}))
+            }
+            "files.refresh" => {
+                self.file_tree.invalidate();
+                Ok(json!({"type":"ok"}))
             }
             // ── worktrees (docs/18 WT-3) ──
             "worktree.list" => {

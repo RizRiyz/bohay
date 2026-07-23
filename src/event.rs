@@ -39,6 +39,17 @@ pub enum AppEvent {
     /// thread — the scan walks agent session stores and must never block the
     /// event loop).
     SessionsScanned(Vec<crate::agent::SessionInfo>),
+    /// A FILES-dock directory read finished (docs/38): its sorted entries, run
+    /// on a worker thread so the tree never blocks a frame on `read_dir`.
+    DirRead {
+        path: std::path::PathBuf,
+        entries: Vec<crate::files::Entry>,
+    },
+    /// A file-view read finished (docs/38 FILE-3): applied to the view leaf `id`.
+    FileRead {
+        id: PaneId,
+        load: crate::files::FileLoad,
+    },
     /// The periodic process scan finished: command lines running under each
     /// pane's child pid, from one `ps`. `None` means the platform cannot tell
     /// (Windows) or `ps` failed — detection then falls back to text heuristics

@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod detect;
 mod event;
+mod files;
 mod git;
 mod i18n;
 mod ids;
@@ -1192,6 +1193,9 @@ mod tests {
     /// row, and the leases section into the off-screen buffer without panicking.
     #[test]
     fn renders_orch_board() {
+        // Isolate $BOHAY_HOME: orch mutations call `orch.save()`, so without this
+        // parallel orch tests race on a shared `orch.json`.
+        let _env = crate::persist::test_env("renders-orch-board");
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
         app.orch
@@ -1229,6 +1233,7 @@ mod tests {
     /// state, the start-worker picker, and the task detail overlay.
     #[test]
     fn renders_board_live_state_picker_and_detail() {
+        let _env = crate::persist::test_env("renders-board-live");
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
         let pane = *app.panes.keys().next().unwrap();
@@ -1540,5 +1545,79 @@ span{{white-space:pre}}</style><pre>{body}</pre>"
             let v = 8 + 10 * (i - 232);
             (v, v, v)
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_file_viewer_render() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use std::time::Instant;
+        let dir = std::env::temp_dir().join("bohay-perf-fv");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/app")).unwrap();
+        std::fs::create_dir_all(dir.join("src/ui")).unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("src/f{i}.rs")), b"x").unwrap();
+        }
+        for i in 0..20 {
+            std::fs::write(dir.join(format!("src/app/a{i}.rs")), b"x").unwrap();
+        }
+        let big: String = (1..=400)
+            .map(|i| format!("line {i} of a source file with some length to it\n"))
+            .collect();
+        let file = dir.join("code.rs");
+        std::fs::write(&file, big).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(160, 50, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = dir.clone();
+        app.sidebars.left.docks.push(crate::app::DockKind::Files);
+        app.ensure_file_tree();
+        app.file_tree
+            .apply_dir(dir.clone(), crate::files::read_dir_entries(&dir));
+        app.file_tree.toggle(&dir.join("src"));
+        app.file_tree.apply_dir(
+            dir.join("src"),
+            crate::files::read_dir_entries(&dir.join("src")),
+        );
+        app.file_tree.toggle(&dir.join("src/app"));
+        app.file_tree.apply_dir(
+            dir.join("src/app"),
+            crate::files::read_dir_entries(&dir.join("src/app")),
+        );
+        app.open_file_view(file.clone(), crate::app::files::OpenTarget::Pane);
+        let vid = app.layout().focus;
+        if let Some(crate::app::ViewKind::File(v)) = app.views.get_mut(&vid) {
+            v.apply(crate::files::read_file(&file));
+        }
+
+        let rows = app.file_tree.visible_rows().len();
+        let mut term = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        // warmup
+        for _ in 0..20 {
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+        let n = 2000;
+        let t = Instant::now();
+        for _ in 0..n {
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+        let per = t.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
+        println!(
+            "FVBENCH: {:.1}µs/frame  (files dock {} rows + 400-line view)",
+            per, rows
+        );
+
+        // isolate visible_rows() cost
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = app.file_tree.visible_rows();
+        }
+        let vr = t.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
+        println!(
+            "FVBENCH: visible_rows() alone: {:.2}µs ({} rows, allocs a Vec+clones/call)",
+            vr, rows
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

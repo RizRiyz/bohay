@@ -25,6 +25,7 @@ use crate::ui::theme::{State, Theme};
 mod board;
 pub use board::agent_choices;
 mod dispatch;
+pub(crate) mod files;
 mod git;
 mod input;
 mod keys;
@@ -63,6 +64,8 @@ pub const SIDEBAR_WIDTH_MAX: u16 = 44;
 pub enum DockKind {
     Workspaces,
     Agents,
+    /// The native file tree of the active node (docs/38).
+    Files,
     Module(String),
 }
 
@@ -72,6 +75,7 @@ impl DockKind {
         match self {
             DockKind::Workspaces => "workspaces",
             DockKind::Agents => "agents",
+            DockKind::Files => "files",
             DockKind::Module(id) => id,
         }
     }
@@ -82,9 +86,17 @@ impl DockKind {
         match id {
             "workspaces" => DockKind::Workspaces,
             "agents" => DockKind::Agents,
+            "files" => DockKind::Files,
             other => DockKind::Module(other.to_string()),
         }
     }
+}
+
+/// A non-PTY leaf renderer (docs/38 FILE-3). The tile tree holds the leaf id;
+/// this holds what to draw there. Deliberately an enum so the diff viewer
+/// (docs/30) can add its own variant later without another seam.
+pub enum ViewKind {
+    File(crate::files::FileView),
 }
 
 /// Which sidebar a dock lives in (docs/29).
@@ -529,7 +541,7 @@ const RESIZE_GRAB_TOL: u16 = 2;
 
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
-    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+    pub(crate) fn ordered(&self) -> ((u16, u16), (u16, u16)) {
         let key = |p: (u16, u16)| (p.1, p.0);
         if key(self.anchor) <= key(self.cursor) {
             (self.anchor, self.cursor)
@@ -707,6 +719,18 @@ pub struct App {
     pub agents_scroll: usize,
     pub workspaces_area: Rect,
     pub agents_area: Rect,
+    /// The FILES dock (docs/38): the tree model, its scroll region, and the
+    /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
+    pub file_tree: crate::files::FileTree,
+    pub files_area: Rect,
+    pub file_tree_rects: Vec<(usize, Rect)>,
+    /// Native **view panes** (docs/38 FILE-3): a leaf id maps to a non-PTY
+    /// renderer here instead of a `Pane` in `panes`. Invariant: a leaf is in
+    /// `panes` **xor** `views`.
+    pub views: HashMap<PaneId, ViewKind>,
+    /// The reused single-click **preview** file pane, if one is open — clicking
+    /// another file replaces its content instead of spawning a second pane.
+    pub preview_view: Option<PaneId>,
     /// AGENTS list filter: `true` (default) shows only live (active) agents;
     /// `false` also shows the resumable session history.
     pub agents_active_only: bool,
@@ -891,6 +915,13 @@ impl App {
             agents_active_only: true,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            // Rooted at nothing; the first detect tick re-roots it to the active
+            // node (set_root is a no-op when already correct).
+            file_tree: crate::files::FileTree::new(std::path::PathBuf::new()),
+            files_area: Rect::ZERO,
+            file_tree_rects: Vec::new(),
+            views: HashMap::new(),
+            preview_view: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,
@@ -953,6 +984,7 @@ impl App {
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
+        let mut views: HashMap<PaneId, ViewKind> = HashMap::new();
         let mut workspaces = Vec::new();
         for ws in snap.workspaces {
             let mut tabs = Vec::new();
@@ -988,6 +1020,22 @@ impl App {
                 let mut remap = HashMap::new();
                 for (raw, ps) in &tab.panes {
                     let id = PaneId::alloc();
+                    // A file-view leaf (docs/38 FILE-3): rebuild the view and
+                    // re-read the file off-loop; no PTY is spawned.
+                    if let Some(path) = &ps.file {
+                        views.insert(
+                            id,
+                            ViewKind::File(crate::files::FileView::new(path.clone())),
+                        );
+                        let tx = app_tx.clone();
+                        let p = path.clone();
+                        std::thread::spawn(move || {
+                            let load = crate::files::read_file(&p);
+                            let _ = tx.send(crate::event::AppEvent::FileRead { id, load });
+                        });
+                        remap.insert(*raw, id);
+                        continue;
+                    }
                     // Resume the native agent session captured at save time (a
                     // precise hook report, or one discovered from the agent's
                     // on-disk store keyed by cwd — see `persist::snapshot`).
@@ -1186,6 +1234,13 @@ impl App {
             agents_active_only: true,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            // Rooted at nothing; the first detect tick re-roots it to the active
+            // node (set_root is a no-op when already correct).
+            file_tree: crate::files::FileTree::new(std::path::PathBuf::new()),
+            files_area: Rect::ZERO,
+            file_tree_rects: Vec::new(),
+            views,
+            preview_view: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,
@@ -1293,6 +1348,7 @@ impl App {
         match kind {
             DockKind::Workspaces => self.catalog.workspaces.to_string(),
             DockKind::Agents => self.catalog.agents.to_string(),
+            DockKind::Files => self.catalog.files.to_string(),
             DockKind::Module(id) => self.module_dock_title(id),
         }
     }
@@ -1317,7 +1373,7 @@ impl App {
     /// entry). Deduplicated, built-ins first. Its current side is
     /// `sidebars.side_of(kind)` (`None` = not placed yet).
     pub fn available_docks(&self) -> Vec<DockKind> {
-        let mut v = vec![DockKind::Workspaces, DockKind::Agents];
+        let mut v = vec![DockKind::Workspaces, DockKind::Agents, DockKind::Files];
         for m in self.modules.modules.iter().filter(|m| m.is_runnable()) {
             for d in &m.manifest.docks {
                 let k = DockKind::Module(d.id.clone());
@@ -2313,6 +2369,12 @@ impl App {
     fn close_pane(&mut self, id: PaneId) {
         self.panes.remove(&id);
         self.status.remove(&id);
+        // A view leaf (docs/38) has no PTY; drop its renderer and forget it as
+        // the reused preview pane.
+        self.views.remove(&id);
+        if self.preview_view == Some(id) {
+            self.preview_view = None;
+        }
         if self.scroll_pane == Some(id) {
             self.scroll_pane = None; // don't leave scroll mode pointing at a dead pane
         }

@@ -187,6 +187,7 @@ pub(super) fn draw_sidebar(
                 agent_rects = a;
                 session_rects = s;
             }
+            DockKind::Files => super::files::draw_files_dock(f, slot, app, t),
             DockKind::Module(id) => draw_module_dock(f, slot, id, app, t),
         }
     }
@@ -207,7 +208,7 @@ fn draw_left_chrome(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     let cw = area.width.saturating_sub(3);
     let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
         if y < area.bottom() {
-            f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
+            f.buffer_mut().set_line(cx, y, &line, cw);
         }
     };
 
@@ -316,7 +317,7 @@ fn draw_workspaces_dock(
     let bar_col = area.right().saturating_sub(2);
     let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
         if y < area.bottom() {
-            f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
+            f.buffer_mut().set_line(cx, y, &line, cw);
         }
     };
     let mut ws_rects = Vec::new();
@@ -440,7 +441,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     let bar_col = area.right().saturating_sub(2);
     let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
         if y < area.bottom() {
-            f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
+            f.buffer_mut().set_line(cx, y, &line, cw);
         }
     };
     let mut agent_rects = Vec::new();
@@ -634,7 +635,7 @@ fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t
     let cw = area.width.saturating_sub(3);
     let line_at = |f: &mut RenderTarget, y: u16, line: Line| {
         if y < area.bottom() {
-            f.render_widget(Paragraph::new(line), Rect::new(cx, y, cw, 1));
+            f.buffer_mut().set_line(cx, y, &line, cw);
         }
     };
     let (title, rows) = match app.module_docks.get(id) {
