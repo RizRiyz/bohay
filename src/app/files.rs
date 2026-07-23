@@ -38,7 +38,33 @@ impl App {
         let cwd = self.ws().cwd.clone();
         self.file_tree.set_root(cwd);
         self.load_pending_dirs();
+        self.rescan_file_tree();
         self.refresh_git_status();
+    }
+
+    /// Re-read the directories currently on screen so files created or removed
+    /// outside bohay (by an agent, a terminal command, another process) appear.
+    /// Gated to ~1.5s and never descends into collapsed folders, so it stays
+    /// cheap even on a big repo; `apply_dir` drops an unchanged listing, so a
+    /// quiet tree costs one `read_dir` per open folder and no re-render.
+    fn rescan_file_tree(&mut self) {
+        if std::time::Instant::now().duration_since(self.last_file_scan_at)
+            < std::time::Duration::from_millis(1500)
+        {
+            return;
+        }
+        self.last_file_scan_at = std::time::Instant::now();
+        let dirs = self.file_tree.loaded_visible_dirs();
+        if dirs.is_empty() {
+            return;
+        }
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            for path in dirs {
+                let entries = crate::files::read_dir_entries(&path);
+                let _ = tx.send(AppEvent::DirRead { path, entries });
+            }
+        });
     }
 
     /// Refresh the FILES-dock git tint (docs/38 FILE-6) off the loop, at most
@@ -917,6 +943,100 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+    /// A line longer than the pane wraps onto the next row instead of being
+    /// clipped at the right edge, so no content is hidden (the reported bug).
+    #[test]
+    fn long_line_wraps_and_shows_its_tail() {
+        let _env = crate::persist::test_env("file-wrap");
+        let dir = std::env::temp_dir().join(format!("bohay-wrap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("long.md");
+        // One line far wider than a narrow pane; unique head and tail words.
+        let body = "HEADWORD ".to_string() + &"filler ".repeat(20) + "TAILWORD";
+        std::fs::write(&file, &body).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 20, tx).unwrap();
+        app.open_file_view(file.clone(), OpenTarget::Tab);
+        let vid = app.layout().focus;
+        let ev = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        app.handle_event(ev);
+        assert!(
+            matches!(
+                app.views.get(&vid),
+                Some(ViewKind::File(v)) if v.wrap
+            ),
+            "the view opened wrapped"
+        );
+
+        let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+        assert!(text.contains("HEADWORD"), "the head of the line renders");
+        assert!(
+            text.contains("TAILWORD"),
+            "the tail wraps onto a later row and is visible, not clipped:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file created outside bohay (agent, terminal, another process) appears in
+    /// the tree on the next rescan, and an unchanged rescan does not churn it.
+    #[test]
+    fn external_new_file_is_picked_up_by_rescan() {
+        let _env = crate::persist::test_env("file-external-add");
+        let root = std::env::temp_dir().join(format!("bohay-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("existing.rs"), b"x").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 30, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+        assert!(
+            app.file_tree
+                .visible_rows()
+                .iter()
+                .any(|r| r.name == "existing.rs"),
+            "the initial file is in the tree"
+        );
+        // Nothing changed on disk: a rescan (forced by resetting the gate) must not
+        // mark the tree dirty, so the cached rows are reused.
+        app.last_file_scan_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap();
+        app.ensure_file_tree();
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+
+        // A new file appears WITHOUT going through bohay's own CRUD.
+        std::fs::write(root.join("dropped.rs"), b"y").unwrap();
+        // Force the rescan gate open and tick again.
+        app.last_file_scan_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap();
+        app.ensure_file_tree();
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+        assert!(
+            app.file_tree
+                .visible_rows()
+                .iter()
+                .any(|r| r.name == "dropped.rs"),
+            "the externally-created file showed up after a rescan"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The right-click menu creates, renames, and deletes on disk (docs/38 FILE-6).
     #[test]
     fn file_menu_crud_creates_renames_deletes() {

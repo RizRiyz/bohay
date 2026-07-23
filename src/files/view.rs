@@ -64,7 +64,9 @@ impl FileView {
             load: FileLoad::Loading,
             scroll: 0,
             hscroll: 0,
-            wrap: false,
+            // Soft-wrap on by default: a reader should never hide content off the
+            // right edge. `w` toggles to no-wrap + horizontal scroll for code.
+            wrap: true,
             mtime: None,
             search: None,
         }
@@ -233,6 +235,54 @@ pub fn gutter_width(line_count: usize) -> u16 {
     (line_count.max(1).to_string().len() as u16 + 1).max(4)
 }
 
+/// Character ranges `(start, end)` of each visual segment when `line` is
+/// soft-wrapped to `width` columns. Breaks on the last space inside the window
+/// when there is one (word wrap), else hard-splits at the width. Always returns
+/// at least one range, so an empty line still occupies a row. Shared by the
+/// renderer and mouse-selection so a wrapped view maps screen rows to file
+/// columns identically in both.
+pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    if width == 0 || n <= width {
+        return vec![(0, n)];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < n {
+        if n - start <= width {
+            out.push((start, n));
+            break;
+        }
+        let hard_end = start + width;
+        let mut brk = hard_end;
+        // Prefer a word boundary: the last space in the window, if it isn't the
+        // very first column (which would make an empty segment).
+        if let Some(pos) = chars[start..hard_end].iter().rposition(|&c| c == ' ') {
+            let abs = start + pos;
+            if abs > start {
+                brk = abs;
+            }
+        }
+        out.push((start, brk));
+        // Swallow the space we broke on so it doesn't lead the next row.
+        start = if brk < n && chars[brk] == ' ' {
+            brk + 1
+        } else {
+            brk
+        };
+    }
+    if out.is_empty() {
+        out.push((0, n));
+    }
+    out
+}
+
+/// Slice the `(start, end)` char range out of `line`.
+pub fn seg_text(line: &str, range: (usize, usize)) -> String {
+    line.chars().skip(range.0).take(range.1 - range.0).collect()
+}
+
 /// Extract the text under a mouse selection over a file view (docs/38), so
 /// drag-to-copy works like a pane. `content` is the view's content rect and
 /// `((sx,sy),(ex,ey))` the selection in reading order (terminal cells).
@@ -252,36 +302,67 @@ pub fn selection_text(
     let ((sx, sy), (ex, ey)) = ordered;
     let gutter = gutter_width(lines.len());
     let text_x = content.x + gutter + 1;
+
+    // Build the same screen-row → (file line, segment char range) map the
+    // renderer draws, so a drag maps to the right columns in both wrap modes.
+    // No-wrap is one full-width segment per line (with horizontal scroll);
+    // wrap breaks each line into its visual segments.
+    let text_w = content.width.saturating_sub(gutter + 1) as usize;
+    let rows = content.height as usize;
+    let mut rowmap: Vec<(usize, usize, usize)> = Vec::new(); // (line, seg_start, seg_end)
+    let mut li = v.scroll;
+    'build: while li < lines.len() {
+        if v.wrap {
+            for (s, e) in wrap_ranges(&lines[li], text_w) {
+                rowmap.push((li, s, e));
+                if rowmap.len() >= rows {
+                    break 'build;
+                }
+            }
+        } else {
+            let n = lines[li].chars().count();
+            rowmap.push((li, 0, n));
+            if rowmap.len() >= rows {
+                break 'build;
+            }
+        }
+        li += 1;
+    }
+
     let mut out = String::new();
+    let mut first = true;
     for ty in sy..=ey {
-        let li = v.scroll + (ty.saturating_sub(content.y)) as usize;
+        let vi = (ty.saturating_sub(content.y)) as usize;
+        let Some(&(line, seg_s, seg_e)) = rowmap.get(vi) else {
+            continue;
+        };
         let chars: Vec<char> = lines
-            .get(li)
+            .get(line)
             .map(|l| l.chars().collect())
             .unwrap_or_default();
-        // Column range in the file line. In wrap mode the on-screen column does
-        // not map to a text column, so take the whole line.
-        let (start, end) = if v.wrap {
-            (0, chars.len())
-        } else {
-            let to_col =
-                |screen_x: u16| (screen_x.saturating_sub(text_x)) as usize + v.hscroll as usize;
-            let s = if ty == sy { to_col(sx) } else { 0 };
-            let e = if ty == ey {
-                to_col(ex) + 1
-            } else {
-                chars.len()
-            };
-            (s.min(chars.len()), e.min(chars.len()))
+        // Screen column → char within this segment. No-wrap adds horizontal scroll.
+        let to_col = |screen_x: u16| {
+            (screen_x.saturating_sub(text_x)) as usize + if v.wrap { 0 } else { v.hscroll as usize }
         };
+        let start = seg_s + if ty == sy { to_col(sx) } else { 0 };
+        let end = if ty == ey {
+            seg_s + to_col(ex) + 1
+        } else {
+            seg_e
+        };
+        let (start, end) = (
+            start.min(seg_e).min(chars.len()),
+            end.min(seg_e).min(chars.len()),
+        );
         let seg: String = if start < end {
             chars[start..end].iter().collect()
         } else {
             String::new()
         };
-        if ty != sy {
+        if !first {
             out.push('\n');
         }
+        first = false;
         out.push_str(seg.trim_end());
     }
     let out = out.trim_end_matches('\n').to_string();
@@ -348,6 +429,37 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wrap_ranges_word_wraps_and_hard_splits() {
+        // Word wrap: breaks on the last space in the window, swallowing it.
+        let r = wrap_ranges("the quick brown fox", 10);
+        let segs: Vec<String> = r
+            .iter()
+            .map(|&rg| seg_text("the quick brown fox", rg))
+            .collect();
+        assert_eq!(segs, vec!["the quick", "brown fox"]);
+        // No spaces (e.g. a long token / code): hard split at the width, nothing lost.
+        let r = wrap_ranges("abcdefghijk", 4);
+        let segs: Vec<String> = r.iter().map(|&rg| seg_text("abcdefghijk", rg)).collect();
+        assert_eq!(segs, vec!["abcd", "efgh", "ijk"]);
+        assert_eq!(
+            segs.concat(),
+            "abcdefghijk",
+            "every character survives the wrap"
+        );
+        // Short line and empty line each stay a single row.
+        assert_eq!(wrap_ranges("hi", 10), vec![(0, 2)]);
+        assert_eq!(wrap_ranges("", 10), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn wrap_is_the_default() {
+        assert!(
+            FileView::new(PathBuf::from("/x")).wrap,
+            "a file opens wrapped"
+        );
     }
 
     #[test]

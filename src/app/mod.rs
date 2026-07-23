@@ -818,6 +818,10 @@ pub struct App {
     pub file_git_status: HashMap<PathBuf, crate::git::local::FileStatus>,
     git_status_inflight: bool,
     last_git_status_at: Instant,
+    /// When the FILES tree last re-read its on-screen directories, to catch files
+    /// created or deleted outside bohay (docs/38). Gated so a huge repo isn't
+    /// re-scanned every tick.
+    last_file_scan_at: Instant,
     /// FILES-dock right-click menu + its modals (docs/38 FILE-6).
     pub file_menu: Option<FileMenu>,
     pub file_prompt: Option<FilePrompt>,
@@ -1038,6 +1042,9 @@ impl App {
             file_git_status: HashMap::new(),
             git_status_inflight: false,
             last_git_status_at: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or_else(Instant::now),
+            last_file_scan_at: Instant::now()
                 .checked_sub(Duration::from_secs(10))
                 .unwrap_or_else(Instant::now),
             file_menu: None,
@@ -1371,6 +1378,9 @@ impl App {
             file_git_status: HashMap::new(),
             git_status_inflight: false,
             last_git_status_at: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or_else(Instant::now),
+            last_file_scan_at: Instant::now()
                 .checked_sub(Duration::from_secs(10))
                 .unwrap_or_else(Instant::now),
             file_menu: None,

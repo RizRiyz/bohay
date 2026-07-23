@@ -202,34 +202,62 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     let gutter = crate::files::gutter_width(lines.len());
     let text_x = body.x + gutter + 1;
     let text_w = body.width.saturating_sub(gutter + 1);
-
-    for (i, line) in lines.iter().enumerate().skip(v.scroll).take(rows) {
-        let y = body.y + (i - v.scroll) as u16;
-        // Line-number gutter.
+    if text_w == 0 {
+        return;
+    }
+    let gutter_cell = |f: &mut RenderTarget, y: u16, num: Option<usize>| {
+        let s = match num {
+            Some(n) => format!("{:>w$} ", n, w = gutter as usize),
+            // Continuation rows leave the gutter blank so a wrapped line reads as
+            // one paragraph, not many numbered lines.
+            None => " ".repeat(gutter as usize + 1),
+        };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("{:>w$} ", i + 1, w = gutter as usize),
-                Style::new().fg(t.overlay0),
-            ))),
+            Paragraph::new(Line::from(Span::styled(s, Style::new().fg(t.overlay0)))),
             Rect::new(body.x, y, gutter + 1, 1),
         );
-        if text_w == 0 {
-            continue;
+    };
+
+    if v.wrap {
+        // Soft-wrap: each file line occupies as many screen rows as it needs.
+        // Scroll stays line-based (top row = file line `scroll`), so vertical
+        // scroll, goto, and search reveal are unchanged.
+        let mut y = body.y;
+        let bottom = body.y + body.height;
+        let mut i = v.scroll;
+        while y < bottom && i < lines.len() {
+            let line = &lines[i];
+            for (si, range) in crate::files::wrap_ranges(line, text_w as usize)
+                .into_iter()
+                .enumerate()
+            {
+                if y >= bottom {
+                    break;
+                }
+                gutter_cell(f, y, (si == 0).then_some(i + 1));
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        crate::files::seg_text(line, range),
+                        Style::new().fg(t.text),
+                    )),
+                    Rect::new(text_x, y, text_w, 1),
+                );
+                y += 1;
+            }
+            i += 1;
         }
-        if v.wrap {
-            f.render_widget(
-                Paragraph::new(line.clone())
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .style(Style::new().fg(t.text)),
-                Rect::new(text_x, y, text_w, 1),
-            );
-        } else {
-            let line_ui = search_line(v, i, line, t);
-            f.render_widget(
-                Paragraph::new(line_ui).scroll((0, v.hscroll)),
-                Rect::new(text_x, y, text_w, 1),
-            );
-        }
+        return;
+    }
+
+    // No-wrap: one file line per row, clipped, with horizontal scroll.
+    for (i, line) in lines.iter().enumerate().skip(v.scroll).take(rows) {
+        let y = body.y + (i - v.scroll) as u16;
+        gutter_cell(f, y, Some(i + 1));
+        let line_ui = search_line(v, i, line, t);
+        f.render_widget(
+            Paragraph::new(line_ui).scroll((0, v.hscroll)),
+            Rect::new(text_x, y, text_w, 1),
+        );
     }
 }
 

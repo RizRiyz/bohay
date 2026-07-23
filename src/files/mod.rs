@@ -15,7 +15,9 @@
 //! directories on a worker thread and feeds them back via [`FileTree::apply_dir`].
 
 mod view;
-pub use view::{gutter_width, read_file, selection_text, FileLoad, FileView, SIZE_CAP};
+pub use view::{
+    gutter_width, read_file, seg_text, selection_text, wrap_ranges, FileLoad, FileView, SIZE_CAP,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -136,8 +138,18 @@ impl FileTree {
 
     /// Fold a finished directory read into the cache. `entries` is stored as
     /// given, so the reader is responsible for the sort order (dirs first).
+    ///
+    /// A read that matches the cached listing byte-for-byte is dropped without
+    /// marking the tree dirty, so the periodic rescan (which catches files
+    /// created or removed outside bohay) costs nothing on screen when a folder
+    /// hasn't changed.
     pub fn apply_dir(&mut self, path: PathBuf, entries: Vec<Entry>) {
         self.pending.remove(&path);
+        if let Some(d) = self.dirs.get(&path) {
+            if d.loaded && d.entries == entries {
+                return;
+            }
+        }
         self.dirty = true;
         self.dirs.insert(
             path,
@@ -146,6 +158,23 @@ impl FileTree {
                 loaded: true,
             },
         );
+    }
+
+    /// Directories that are on screen right now and already read — the root plus
+    /// every expanded, loaded directory. A periodic rescan re-reads exactly these
+    /// to notice files created or deleted outside bohay, without ever descending
+    /// into folders the user has collapsed (still O(what you can see)).
+    pub fn loaded_visible_dirs(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if self.is_loaded(&self.root) {
+            out.push(self.root.clone());
+        }
+        for p in &self.expanded {
+            if self.is_loaded(p) {
+                out.push(p.clone());
+            }
+        }
+        out
     }
 
     /// Expand or collapse a directory. Collapsing also forgets its open
