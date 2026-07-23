@@ -2517,21 +2517,29 @@ impl App {
         self.show_toast(msg);
     }
 
-    fn close_pane(&mut self, id: PaneId) {
+    /// Tear down the per-leaf runtime state that every close path shares: the PTY
+    /// pane **or** file view (docs/38), its detection status, module-pane tracking,
+    /// and any bookkeeping that must not be left pointing at a dead id. Does not
+    /// touch the layout/tab — the caller owns that. Centralized so a new close
+    /// path can never again forget one map (e.g. leaking a `views` entry, which
+    /// made a closed file un-reopenable).
+    fn drop_leaf_runtime(&mut self, id: PaneId) {
         self.panes.remove(&id);
         self.status.remove(&id);
-        // A view leaf (docs/38) has no PTY; drop its renderer and forget it as
-        // the reused preview pane.
         self.views.remove(&id);
+        self.module_panes.remove(&id); // untrack a module pane (MOD-2)
         if self.preview_view == Some(id) {
-            self.preview_view = None;
+            self.preview_view = None; // forget it as the reused preview pane
         }
         if self.scroll_pane == Some(id) {
             self.scroll_pane = None; // don't leave scroll mode pointing at a dead pane
         }
-        self.module_panes.remove(&id); // untrack a module pane (MOD-2)
-                                       // Auto-release any orchestration leases the dead pane held (ORCH-2), so a
-                                       // crashed/closed worker can't hold file paths forever.
+    }
+
+    fn close_pane(&mut self, id: PaneId) {
+        self.drop_leaf_runtime(id);
+        // Auto-release any orchestration leases the dead pane held (ORCH-2), so a
+        // crashed/closed worker can't hold file paths forever.
         let released = self.orch.release_pane_leases(id.0);
         if !released.is_empty() {
             self.orch.save();
@@ -2604,9 +2612,7 @@ impl App {
             .flat_map(|t| t.layout.leaves())
             .collect();
         for id in ids {
-            self.panes.remove(&id);
-            self.status.remove(&id);
-            self.module_panes.remove(&id);
+            self.drop_leaf_runtime(id);
         }
         self.workspaces.remove(index);
         if self.workspaces.is_empty() {
@@ -2631,9 +2637,7 @@ impl App {
             ws.tabs[index].layout.leaves()
         };
         for id in ids {
-            self.panes.remove(&id);
-            self.status.remove(&id);
-            self.module_panes.remove(&id);
+            self.drop_leaf_runtime(id);
         }
         let ws = &mut self.workspaces[self.active_ws];
         ws.tabs.remove(index);

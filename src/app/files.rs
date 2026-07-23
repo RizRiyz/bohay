@@ -943,6 +943,107 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+    /// Closing a file tab via the ✕ / prefix-X path (`close_tab`, not `close_pane`)
+    /// must forget its view, so the same file can be opened again. Regression for
+    /// the reported bug: after open → close → the row became un-clickable because a
+    /// stale `views` entry made `open_file_view` focus a tab that no longer existed.
+    #[test]
+    fn closing_a_file_tab_lets_it_reopen() {
+        let _env = crate::persist::test_env("file-reopen");
+        let dir = std::env::temp_dir().join(format!("bohay-reopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("r.txt");
+        std::fs::write(&file, b"body\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        // Open in a tab (the plain-click default).
+        app.open_file_view(file.clone(), OpenTarget::Tab);
+        let vid = app.layout().focus;
+        assert!(app.views.contains_key(&vid), "the file view is open");
+        let file_tab = app.workspaces[app.active_ws].active_tab;
+
+        // Close it the way the ✕ / prefix-X does — NOT through close_pane.
+        app.close_tab(file_tab);
+        assert!(
+            !app.views.contains_key(&vid),
+            "the view is forgotten when its tab is closed (no orphan)"
+        );
+
+        // Reopen the same file: a brand-new view leaf is created and focused,
+        // rather than silently focusing the dead one (which read as un-clickable).
+        app.open_file_view(file.clone(), OpenTarget::Tab);
+        let vid2 = app.layout().focus;
+        assert!(app.views.contains_key(&vid2), "reopened into a fresh view");
+        assert_ne!(vid, vid2, "a new leaf, not the stale id");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End-to-end through the real mouse path: click a file row to open it, close
+    /// its tab, then click the row again — it must reopen. Reproduces the reported
+    /// "won't open the second time" via `handle_event(Mouse)`, not direct calls.
+    #[test]
+    fn clicking_a_file_reopens_after_its_tab_is_closed() {
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let _env = crate::persist::test_env("file-click-reopen");
+        let root = std::env::temp_dir().join(format!("bohay-cr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("hello.txt"), b"hi\n").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let click_file = |app: &mut App, term: &mut Terminal<TestBackend>| {
+            term.draw(|f| crate::ui::render(f, app)).unwrap();
+            let (_, rect) = app
+                .file_tree_rects
+                .iter()
+                .find(|(i, _)| app.file_tree.visible_rows()[*i].name == "hello.txt")
+                .cloned()
+                .expect("hello.txt has a clickable rect");
+            let down = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 3,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            app.handle_event(AppEvent::Mouse(down));
+        };
+
+        // First click: opens a file view.
+        click_file(&mut app, &mut term);
+        assert_eq!(app.views.len(), 1, "first click opened the file");
+        let first = app.layout().focus;
+
+        // Close its tab the way the tab ✕ does.
+        let file_tab = app.workspaces[app.active_ws].active_tab;
+        app.close_tab(file_tab);
+        assert_eq!(app.views.len(), 0, "closing the tab forgot the view");
+
+        // Second click on the same row: must reopen (a fresh view leaf).
+        click_file(&mut app, &mut term);
+        assert_eq!(
+            app.views.len(),
+            1,
+            "clicking the file again reopened it (the reported bug)"
+        );
+        assert_ne!(app.layout().focus, first, "reopened into a new leaf");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A line longer than the pane wraps onto the next row instead of being
     /// clipped at the right edge, so no content is hidden (the reported bug).
     #[test]
