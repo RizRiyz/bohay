@@ -30,7 +30,12 @@ impl App {
                 self.mark_user_input(); // so the echo isn't misread as agent work
                 false // goes to the pane; its echo (PtyData) renders it
             }
-            AppEvent::Resize(_, _) => true,
+            AppEvent::Resize(_, _) => {
+                // A resize (or a same-size resize event a terminal emits on a
+                // move/expose) may have damaged the screen — force a full repaint.
+                self.force_redraw = true;
+                true
+            }
             AppEvent::PtyData(id) => {
                 // The reader's coalescing flag is deliberately NOT cleared here
                 // — it re-arms on the frame/detect cadence (`rearm_pty_notify`),
@@ -1392,6 +1397,22 @@ fn csi(final_byte: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resize event forces the next frame to be a full repaint, so a terminal
+    /// damaged by a window move/resize/expose heals instead of keeping stale cells
+    /// (the reported glitch). The render loop consumes `force_redraw`.
+    #[test]
+    fn resize_forces_a_full_repaint() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        assert!(!app.force_redraw, "starts off");
+        let dirty = app.handle_event(AppEvent::Resize(100, 30));
+        assert!(dirty, "a resize warrants a redraw");
+        assert!(
+            app.force_redraw,
+            "resize requests a full repaint, not just a diff"
+        );
+    }
 
     // Agents treat Enter as "submit" and Shift+Enter as "new line". A terminal
     // sends a bare CR for both, so bohay asks for the disambiguating keyboard

@@ -759,6 +759,11 @@ pub struct App {
     pub last_cursor: Option<(u16, u16)>,
     /// Foreground client asked to detach (prefix+q). Distinct from quit.
     pub detach_requested: bool,
+    /// Force the next frame to be a **full** repaint (not a diff), so a terminal
+    /// whose screen was damaged outside bohay's knowledge — a window move/resize,
+    /// regaining focus, another program's output — repaints cleanly. The render
+    /// loop consumes and clears it. Set on any resize and on focus-regained.
+    pub force_redraw: bool,
     /// Notification messages queued by detection; the loop flushes them to the
     /// terminal (bell + desktop) and clears.
     pub pending_notify: Vec<String>,
@@ -1009,6 +1014,7 @@ impl App {
             orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
+            force_redraw: false,
             pending_notify: Vec::new(),
             pending_sound: false,
             selection: None,
@@ -1345,6 +1351,7 @@ impl App {
             orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
+            force_redraw: false,
             pending_notify: Vec::new(),
             pending_sound: false,
             selection: None,

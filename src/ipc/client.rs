@@ -9,8 +9,8 @@ use anyhow::{anyhow, Result};
 use ratatui::backend::Backend;
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
-    read as read_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-    EnableMouseCapture, Event,
+    read as read_event, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
+    EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Position;
@@ -41,6 +41,10 @@ where
         std::io::stdout(),
         EnableBracketedPaste,
         EnableMouseCapture,
+        // Focus reporting: regaining focus (e.g. after moving the window or tabbing
+        // back) is our cue that the terminal may have been repainted underneath us,
+        // so we ask the server for a full frame (see the input loop).
+        EnableFocusChange,
         crossterm::terminal::SetTitle(crate::window_title())
     );
     // Let the terminal report Shift+Enter et al. as distinct keys, so agents get
@@ -51,6 +55,7 @@ where
     let _ = execute!(
         std::io::stdout(),
         crossterm::event::PopKeyboardEnhancementFlags,
+        DisableFocusChange,
         DisableMouseCapture,
         DisableBracketedPaste
     );
@@ -134,6 +139,13 @@ fn input_loop<W: Write>(mut writer: W) {
             Ok(Event::Mouse(m)) => ClientMessage::Mouse(m),
             Ok(Event::Resize(w, h)) => ClientMessage::Resize { cols: w, rows: h },
             Ok(Event::Paste(s)) => ClientMessage::Paste(s),
+            // Regained focus: the window may have moved or been repainted while we
+            // were away, and bohay never saw it. Re-send the current size, which the
+            // server treats as a forced full repaint, healing any stale cells.
+            Ok(Event::FocusGained) => match crossterm::terminal::size() {
+                Ok((cols, rows)) => ClientMessage::Resize { cols, rows },
+                Err(_) => continue,
+            },
             Ok(_) => continue,
             Err(_) => break,
         };

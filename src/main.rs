@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use ratatui::crossterm::event::{
-    read as read_event, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-    EnableMouseCapture, Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    read as read_event, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
+    EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::DefaultTerminal;
@@ -335,6 +335,7 @@ fn run_local() -> Result<()> {
         std::io::stdout(),
         EnableBracketedPaste,
         EnableMouseCapture,
+        EnableFocusChange,
         crossterm::terminal::SetTitle(window_title())
     );
     push_key_protocol();
@@ -343,6 +344,7 @@ fn run_local() -> Result<()> {
     let _ = execute!(
         std::io::stdout(),
         PopKeyboardEnhancementFlags,
+        DisableFocusChange,
         DisableMouseCapture,
         DisableBracketedPaste
     );
@@ -694,6 +696,11 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             emit_clipboard(&text);
         }
         app.tick_toast(Instant::now());
+        // A forced redraw (resize / regained focus) wipes the terminal so the next
+        // draw repaints every cell, healing damage ratatui's own diff can't see.
+        if std::mem::take(&mut app.force_redraw) {
+            terminal.clear()?;
+        }
         // Don't touch the cursor here — ratatui shows + positions it once per
         // draw. A per-frame `Hide` flickered it on any activity.
         terminal.draw(|f| ui::render(f, &mut app))?;
@@ -714,6 +721,12 @@ fn input_loop(tx: Sender<AppEvent>) {
             Ok(Event::Mouse(m)) => tx.send(AppEvent::Mouse(m)),
             Ok(Event::Resize(w, h)) => tx.send(AppEvent::Resize(w, h)),
             Ok(Event::Paste(s)) => tx.send(AppEvent::Paste(s)),
+            // Regained focus: treat like a resize to the current size, which forces
+            // a full repaint and clears any stale cells from a move/expose.
+            Ok(Event::FocusGained) => match crossterm::terminal::size() {
+                Ok((w, h)) => tx.send(AppEvent::Resize(w, h)),
+                Err(_) => Ok(()),
+            },
             Ok(_) => Ok(()),
             Err(_) => break,
         };

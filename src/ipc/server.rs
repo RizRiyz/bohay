@@ -189,6 +189,10 @@ pub fn run() -> Result<()> {
             dirty |= app.rearm_pty_notify();
         }
 
+        // A forced redraw (resize / focus-regained / external damage) must render
+        // even if nothing else changed this tick.
+        dirty |= app.force_redraw;
+
         if dirty && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
             let area = Rect::new(0, 0, size.0, size.1);
             if size != backend_size {
@@ -207,9 +211,13 @@ pub fn run() -> Result<()> {
             // straight against `last_frame` and update it in place — no per-frame
             // clone or per-cell `String` (the old hot-path allocation that made
             // panes lag under load).
-            let full_for_all = last_frame
-                .as_ref()
-                .is_none_or(|p| p.width != buf.area.width || p.height != buf.area.height);
+            // A forced redraw sends everyone a full frame (clears the terminal
+            // and repaints), the only way to fix damage bohay never saw.
+            let forced = std::mem::take(&mut app.force_redraw);
+            let full_for_all = forced
+                || last_frame
+                    .as_ref()
+                    .is_none_or(|p| p.width != buf.area.width || p.height != buf.area.height);
             let diff_msg = if full_for_all {
                 last_frame = Some(protocol::frame_from_buffer(buf, cursor));
                 None
@@ -281,6 +289,10 @@ fn apply(
         }
         AppEvent::Resize(c, r) => {
             *size = (c.max(1), r.max(1));
+            // A resize event (real size change, or a same-size event the terminal
+            // sends on a move/expose) means the screen may be damaged — force a
+            // full repaint, not a diff, even when the dimensions are unchanged.
+            app.force_redraw = true;
             true
         }
         // Redraw only if the event actually changed the UI — a plain keystroke
