@@ -1189,6 +1189,45 @@ mod tests {
         );
     }
 
+    /// Remote from a phone SSH app (docs/18): the client renders bohay over the
+    /// ssh PTY at whatever the phone terminal reports. Validate the viewport range
+    /// a phone presents — portrait/narrow and landscape — renders without panic or
+    /// garbage, dropping the sidebar when the content would fall below its minimum.
+    #[test]
+    fn renders_across_phone_viewports() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+
+        let full_row = |term: &Terminal<TestBackend>, r: u16| -> String {
+            let buf = term.backend().buffer();
+            (0..buf.area.width)
+                .map(|c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" "))
+                .collect()
+        };
+
+        // Common phone SSH sizes: landscape ~90x24, portrait ~40x60, cramped ~34x50.
+        for (w, h) in [(90u16, 24u16), (40, 60), (34, 50), (50, 40)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| ui::render(f, &mut app)).unwrap(); // must never panic
+                                                             // Not the too-small guard at these sizes: real chrome renders.
+            let all: String = (0..h).map(|r| full_row(&term, r)).collect();
+            assert!(
+                !all.contains("enlarge terminal"),
+                "{w}x{h} is usable, not the guard"
+            );
+        }
+
+        // A genuinely tiny phone-keyboard-open viewport shows the guard, not garbage.
+        let mut term = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        term.draw(|f| ui::render(f, &mut app)).unwrap();
+        let all: String = (0..4).map(|r| full_row(&term, r)).collect();
+        assert!(
+            all.contains("enlarge terminal"),
+            "a tiny viewport gets the friendly guard"
+        );
+    }
+
     /// The orchestration board tab (docs/22, ORCH-7) renders its header, a task
     /// row, and the leases section into the off-screen buffer without panicking.
     #[test]

@@ -32,6 +32,7 @@ mod keys;
 mod modules;
 mod picker;
 mod settings;
+mod switcher;
 
 pub use keys::Cmd;
 pub use modules::ModuleMenuAction;
@@ -306,6 +307,41 @@ pub enum WsMenuItem {
     OpenGit,
     OpenOrch,
     Module(usize),
+}
+
+/// Below this many columns the UI switches to **compact (touch) mode** (docs/18):
+/// one full-screen pane instead of tiling + sidebars, with a `≡` switcher button.
+/// A phone in portrait is ~30–45 cols; landscape and desktops sit well above.
+pub const COMPACT_WIDTH: u16 = 50;
+
+/// A destination in the touch **switcher** overlay (docs/18): jump to a pane,
+/// switch nodes, or make a new one. Big tap targets for a phone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SwitcherTarget {
+    Pane(PaneId),
+    Workspace(usize),
+    NewWorkspace,
+}
+
+/// One rendered row of the switcher — a section header or a tappable item.
+pub enum SwitcherRow {
+    Header(String),
+    Agent {
+        target: SwitcherTarget,
+        state: State,
+        title: String,
+        location: String,
+    },
+    Node {
+        target: SwitcherTarget,
+        name: String,
+        branch: Option<String>,
+        active: bool,
+    },
+    Action {
+        target: SwitcherTarget,
+        label: String,
+    },
 }
 
 /// A right-click context menu on a FILES-dock row (docs/38 FILE-6): file/folder
@@ -787,6 +823,20 @@ pub struct App {
     pub file_prompt: Option<FilePrompt>,
     /// The path a delete-confirm modal is asking about.
     pub file_delete: Option<PathBuf>,
+    /// Compact (touch) mode is active — recomputed each frame from the width
+    /// (docs/18). Drives the single-pane layout and the `≡` switcher button.
+    pub compact: bool,
+    /// The touch **switcher** overlay is open (docs/18).
+    pub switcher: bool,
+    /// Keyboard cursor into the switcher's tappable rows.
+    pub switcher_cursor: usize,
+    /// Scroll offset (in item rows) so the switcher works with more
+    /// agents/nodes than fit on a phone screen.
+    pub switcher_scroll: usize,
+    /// Each switcher row's target + clickable rect, set by the renderer.
+    pub switcher_rects: Vec<(SwitcherTarget, Rect)>,
+    /// The `≡` switcher button's rect (compact mode), for tap hit-testing.
+    pub switcher_button_rect: Option<Rect>,
     /// Native **view panes** (docs/38 FILE-3): a leaf id maps to a non-PTY
     /// renderer here instead of a `Pane` in `panes`. Invariant: a leaf is in
     /// `panes` **xor** `views`.
@@ -993,6 +1043,12 @@ impl App {
             file_menu: None,
             file_prompt: None,
             file_delete: None,
+            compact: false,
+            switcher: false,
+            switcher_cursor: 0,
+            switcher_scroll: 0,
+            switcher_rects: Vec::new(),
+            switcher_button_rect: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,
@@ -1320,6 +1376,12 @@ impl App {
             file_menu: None,
             file_prompt: None,
             file_delete: None,
+            compact: false,
+            switcher: false,
+            switcher_cursor: 0,
+            switcher_scroll: 0,
+            switcher_rects: Vec::new(),
+            switcher_button_rect: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,

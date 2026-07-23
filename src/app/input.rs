@@ -246,6 +246,26 @@ impl App {
             }
             return;
         }
+        // The touch switcher overlay (docs/18): tap a row to jump, wheel scrolls
+        // (by moving the cursor, which the renderer keeps in view), else dismiss.
+        if self.switcher {
+            match m.kind {
+                MouseEventKind::Down(_) => self.switcher_click(m.column, m.row),
+                MouseEventKind::ScrollUp => self.switcher_move(-1),
+                MouseEventKind::ScrollDown => self.switcher_move(1),
+                _ => {}
+            }
+            return;
+        }
+        // Tapping the compact-mode `≡` button opens the switcher.
+        if let (MouseEventKind::Down(MouseButton::Left), Some(r)) =
+            (m.kind, self.switcher_button_rect)
+        {
+            if m.column >= r.x && m.column < r.right() && m.row >= r.y && m.row < r.bottom() {
+                self.open_switcher();
+                return;
+            }
+        }
         // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
         // any other click is swallowed (the centered modal owns the screen).
         if self.worktree_prompt.is_some() {
@@ -1099,6 +1119,11 @@ impl App {
             if key.code == KeyCode::Esc {
                 self.file_menu = None;
             }
+            return true;
+        }
+        // The touch switcher overlay (docs/18) owns input while open.
+        if self.switcher {
+            self.switcher_key(key);
             return true;
         }
         if self.ws_rename.is_some() {

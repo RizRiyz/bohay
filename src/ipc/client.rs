@@ -312,6 +312,108 @@ mod tests {
         assert_eq!(&srv.join().unwrap(), b"hello", "input forwarded to server");
         assert_eq!(output, b"world", "server reply forwarded to output");
     }
+
+    /// Faithful end-to-end remote path (docs/18 RA) minus the transparent ssh
+    /// transport: a real `bohay server` + `bohay remote-client-bridge`, driven
+    /// with the actual Hello handshake, must relay back a real server Frame.
+    /// Ignored: spawns processes and needs the built binary.
+    #[test]
+    #[ignore]
+    fn remote_bridge_relays_a_real_server_frame() {
+        use crate::ipc::protocol::{self, ClientMessage, ServerMessage, PROTOCOL_VERSION};
+        use std::process::{Command, Stdio};
+
+        let bin = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .join("bohay");
+        assert!(bin.exists(), "build the binary first: {}", bin.display());
+        let home = std::env::temp_dir().join(format!("bohay-remote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        // A real server on a scratch home.
+        let mut server = Command::new(&bin)
+            .arg("server")
+            .env("BOHAY_HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let sock = home.join("bohay-client.sock");
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(sock.exists(), "server never created its client socket");
+
+        // The bridge, exactly as ssh runs it on the remote host.
+        let mut bridge = Command::new(&bin)
+            .arg("remote-client-bridge")
+            .env("BOHAY_HOME", &home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut bstdin = bridge.stdin.take().unwrap();
+        let mut bstdout = bridge.stdout.take().unwrap();
+
+        // Drive the client handshake through the bridge.
+        protocol::write_message(
+            &mut bstdin,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+        bstdin.flush().unwrap();
+
+        // Welcome first, then a full Frame — relayed from the remote socket.
+        match protocol::read_message::<_, ServerMessage>(&mut bstdout).unwrap() {
+            ServerMessage::Welcome { version, error } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert!(error.is_none(), "handshake error: {error:?}");
+            }
+            other => panic!(
+                "expected Welcome, got a different message: {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+        let mut got_frame = false;
+        for _ in 0..8 {
+            match protocol::read_message::<_, ServerMessage>(&mut bstdout) {
+                Ok(ServerMessage::Frame(fr)) => {
+                    assert!(fr.width > 0 && fr.height > 0, "frame has real dimensions");
+                    got_frame = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            got_frame,
+            "the bridge relayed a real server frame end to end"
+        );
+
+        let _ = bridge.kill();
+        let _ = Command::new(&bin)
+            .arg("server")
+            .arg("stop")
+            .env("BOHAY_HOME", &home)
+            .output();
+        let _ = server.wait();
+        let _ = bridge.wait();
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
 
 #[cfg(test)]

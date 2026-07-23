@@ -36,6 +36,7 @@ pub enum Cmd {
     ToggleRightSidebar,
     ToggleAgents,
     ToggleFiles,
+    Switcher,
     Detach,
 }
 
@@ -66,6 +67,7 @@ impl Cmd {
         Cmd::ToggleRightSidebar,
         Cmd::ToggleAgents,
         Cmd::ToggleFiles,
+        Cmd::Switcher,
         Cmd::Detach,
     ];
 
@@ -96,6 +98,7 @@ impl Cmd {
             Cmd::ToggleRightSidebar => "toggle_right_sidebar",
             Cmd::ToggleAgents => "toggle_agents",
             Cmd::ToggleFiles => "toggle_files",
+            Cmd::Switcher => "switcher",
             Cmd::Detach => "detach",
         }
     }
@@ -129,6 +132,7 @@ impl Cmd {
             Cmd::ToggleRightSidebar => cat.cmd_toggle_right_sidebar,
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
             Cmd::ToggleFiles => cat.cmd_toggle_files,
+            Cmd::Switcher => cat.cmd_switcher,
             Cmd::Detach => cat.cmd_detach,
         }
     }
@@ -160,6 +164,7 @@ impl Cmd {
             Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
             Cmd::ToggleFiles => "e",
+            Cmd::Switcher => "m",
             Cmd::Detach => "d",
         }
     }
@@ -285,6 +290,7 @@ impl App {
             Cmd::ToggleRightSidebar => self.toggle_side(crate::app::Side::Right),
             Cmd::ToggleAgents => self.agents_active_only = !self.agents_active_only,
             Cmd::ToggleFiles => self.toggle_files_dock(),
+            Cmd::Switcher => self.toggle_switcher(),
             Cmd::Detach => self.detach_requested = true,
         }
     }

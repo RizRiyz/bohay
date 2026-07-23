@@ -22,8 +22,24 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     // The left sidebar's `«` collapse lives in its header; when it's hidden but
     // still has docks to restore, surface a `»` (expand) at the tab-bar's left
     // edge. (The right sidebar reopens via ⌃Space B or Settings.)
+    app.switcher_button_rect = None;
     let left_hidden = !app.sidebars.left.visible && !app.sidebars.left.docks.is_empty();
-    let tog_w = if !left_hidden {
+    // In compact (touch) mode a `≡` switcher button replaces the sidebar toggle —
+    // it's the primary navigation on a phone (docs/18).
+    let tog_w = if app.compact {
+        let r = Rect::new(area.x, area.y, 3, 1);
+        let hov = app
+            .hover
+            .is_some_and(|(c, rr)| c >= r.x && c < r.right() && rr == r.y);
+        let style = if hov {
+            Style::new().fg(t.crust).bg(t.accent).bold()
+        } else {
+            Style::new().fg(t.accent).bg(t.surface0).bold()
+        };
+        f.render_widget(Paragraph::new(Span::styled(" ≡ ", style)), r);
+        app.switcher_button_rect = Some(r);
+        3u16
+    } else if !left_hidden {
         0
     } else {
         let r = Rect::new(area.x, area.y, 3, 1);
@@ -60,6 +76,23 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         3u16
     };
 
+    // In compact mode, an at-a-glance agent-state summary rides the right edge of
+    // the tab bar (before the right toggle): colored state dots + counts, urgency
+    // ordered, so a phone user sees "something needs me" without opening the
+    // switcher (docs/18). It drops the least-urgent states first when space is short.
+    let summary_w = if app.compact {
+        let budget = area.width.saturating_sub(tog_w + right_tog_w + 12).min(16);
+        let line = super::switcher::compact_agent_summary(app, budget);
+        let w = line.width() as u16;
+        if w > 0 {
+            let sx = area.right().saturating_sub(right_tog_w + w);
+            f.render_widget(Paragraph::new(line), Rect::new(sx, area.y, w, 1));
+        }
+        w
+    } else {
+        0
+    };
+
     let ws = app.ws();
     let n = ws.tabs.len();
     let active = ws.active_tab;
@@ -74,7 +107,9 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     let plus_w: u16 = 3;
     let unit = CELL + GAP;
     let left = area.x + 1 + tog_w;
-    let right = area.right().saturating_sub(right_tog_w);
+    let right = area
+        .right()
+        .saturating_sub(right_tog_w + summary_w + if summary_w > 0 { 1 } else { 0 });
     let total = right.saturating_sub(left);
 
     // Do all tabs fit without scroll arrows (leaving room for the "+")?

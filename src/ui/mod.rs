@@ -64,6 +64,7 @@ mod picker;
 mod settings;
 mod sidebar;
 mod status;
+pub(crate) mod switcher;
 mod tabbar;
 
 /// Frame-based entry (used by `--local` and tests): wrap the terminal's buffer in a
@@ -124,15 +125,18 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
             0
         }
     };
-    let lw = if app.sidebars.left.shown() {
+    // Compact (touch) mode on a narrow phone screen (docs/18): no sidebars, one
+    // full-screen pane, a `≡` switcher for navigation. Recomputed each frame.
+    app.compact = main.width < crate::app::COMPACT_WIDTH;
+    let lw = if app.compact || !app.sidebars.left.shown() {
+        0
+    } else {
         fit(app.sidebars.left.width, main.width)
-    } else {
-        0
     };
-    let rw = if app.sidebars.right.shown() {
-        fit(app.sidebars.right.width, main.width.saturating_sub(lw))
-    } else {
+    let rw = if app.compact || !app.sidebars.right.shown() {
         0
+    } else {
+        fit(app.sidebars.right.width, main.width.saturating_sub(lw))
     };
     let [left_area, content, right_area] = Layout::horizontal([
         Constraint::Length(lw),
@@ -149,7 +153,9 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     app.last_pane_area = pane_area;
 
     let focus = app.layout().focus;
-    let rects: Vec<(PaneId, Rect)> = if app.zoomed {
+    // Compact mode shows a single full-screen pane (like zoom) — tiling is
+    // useless on a phone; the switcher handles navigation.
+    let rects: Vec<(PaneId, Rect)> = if app.zoomed || app.compact {
         vec![(focus, pane_area)]
     } else {
         app.layout()
@@ -376,6 +382,12 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
             app.orch_detail_scroll = s;
         }
     }
+    // The touch switcher overlay (docs/18), above the chrome but below a toast.
+    if app.switcher {
+        switcher::draw_switcher(f, area, app, &t);
+    } else {
+        app.switcher_rects.clear();
+    }
     // A transient toast (e.g. "Copied") flashes on top of everything.
     if let Some((text, _)) = &app.toast {
         draw_toast(f, area, text, &t);
@@ -393,6 +405,7 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         || app.file_menu.is_some()
         || app.file_prompt.is_some()
         || app.file_delete.is_some()
+        || app.switcher
         || app.orch_form.is_some()
         || app.orch_start.is_some()
         || app.orch_detail.is_some()
