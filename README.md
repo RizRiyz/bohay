@@ -11,7 +11,7 @@ One place to run, watch, resume, and orchestrate every coding agent.
 [![crates.io](https://img.shields.io/crates/v/bohay.svg)](https://crates.io/crates/bohay)
 [![ci](https://github.com/RizRiyz/bohay/actions/workflows/ci.yml/badge.svg)](https://github.com/RizRiyz/bohay/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-bohay.dev-c6ff1a.svg)](https://bohay.dev/docs/)
-![license](https://img.shields.io/badge/license-MIT-blue.svg)
+![license](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)
 ![platforms](https://img.shields.io/badge/platforms-macOS%20·%20Linux%20·%20Windows-lightgrey.svg)
 
 **[Website](https://bohay.dev)** · **[Documentation](https://bohay.dev/docs/)** · **[Releases](https://github.com/RizRiyz/bohay/releases)**
@@ -138,4 +138,6 @@ Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Security repor
 
 ## License
 
-[MIT](LICENSE)
+[GNU AGPL v3](LICENSE) (`AGPL-3.0-or-later`).
+
+bohay is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License. If you run a modified bohay as a network service, the AGPL requires you to offer its source to that service's users. See the [LICENSE](LICENSE) for the full terms.
