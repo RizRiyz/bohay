@@ -29,6 +29,28 @@ pub fn is_repo(cwd: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The GitHub `owner/repo` slug from the `origin` remote, if it's a GitHub URL.
+/// Used to pin `gh pr/issue list --repo <slug>` to the repo you're actually in,
+/// rather than relying on `gh`'s base-repo resolution (which picks the wrong repo
+/// with a fork + upstream, or a `gh repo set-default`).
+pub fn origin_slug(cwd: &Path) -> Option<String> {
+    let url = run(cwd, &["remote", "get-url", "origin"]).ok()?;
+    parse_github_slug(url.trim())
+}
+
+/// Parse `owner/repo` out of a GitHub remote URL (ssh or https, with or without a
+/// trailing `.git`). Returns `None` for non-GitHub hosts.
+fn parse_github_slug(url: &str) -> Option<String> {
+    // git@github.com:owner/repo.git  |  https://github.com/owner/repo(.git)
+    let (_, rest) = url.split_once("github.com")?;
+    let path = rest.trim_start_matches([':', '/']);
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.splitn(3, '/');
+    let owner = parts.next().filter(|s| !s.is_empty())?;
+    let repo = parts.next().filter(|s| !s.is_empty())?;
+    Some(format!("{owner}/{repo}"))
+}
+
 // ── worktrees (docs/18 WT-1) ────────────────────────────────────────────────
 
 /// The git **common dir** for `cwd` (the shared `.git`), absolute. All worktrees
@@ -264,17 +286,8 @@ pub fn commit_show(cwd: &Path, sha: &str) -> Result<CommitShow, String> {
             sha,
         ],
     )?;
-    // "Pushed" = some remote-tracking branch contains it. Empty output (or no
-    // remotes) means it lives only locally, so the detail view offers a push.
-    let pushed = run(
-        cwd,
-        &["branch", "-r", "--contains", "--end-of-options", sha],
-    )
-    .map(|s| !s.trim().is_empty())
-    .unwrap_or(false);
     Ok(CommitShow {
         lines: out.replace('\r', "").lines().map(str::to_string).collect(),
-        pushed,
     })
 }
 
@@ -462,6 +475,28 @@ fn parse_contributors(out: &str) -> Vec<Contributor> {
 
 #[cfg(test)]
 mod tests {
+    /// The origin slug parser accepts ssh + https GitHub URLs and rejects others,
+    /// so PRs/Issues pin to the repo you're in (not gh's default base repo).
+    #[test]
+    fn github_slug_parses_ssh_and_https() {
+        use super::parse_github_slug;
+        assert_eq!(
+            parse_github_slug("git@github.com:RizRiyz/bohay.git").as_deref(),
+            Some("RizRiyz/bohay")
+        );
+        assert_eq!(
+            parse_github_slug("https://github.com/RizRiyz/bohay.git").as_deref(),
+            Some("RizRiyz/bohay")
+        );
+        assert_eq!(
+            parse_github_slug("https://github.com/RizRiyz/bohay").as_deref(),
+            Some("RizRiyz/bohay")
+        );
+        // Non-GitHub host → None (fall back to gh's cwd resolution).
+        assert_eq!(parse_github_slug("git@gitlab.com:me/proj.git"), None);
+        assert_eq!(parse_github_slug("https://github.com/"), None);
+    }
+
     #[test]
     fn tree_status_maps_changes_and_dirties_parents() {
         // A throwaway repo with a modified + an untracked file in a subdir.

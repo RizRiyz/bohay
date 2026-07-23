@@ -793,15 +793,13 @@ fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: 
         f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
         return;
     }
-    // The commit detail view owns the footer while it's open (docs/17). The push
-    // hint appears only while the commit hasn't reached the remote.
+    // The commit detail view owns the footer while it's open (docs/17).
     if g.open_commit.is_some() {
-        let unpushed = matches!(&g.commit_detail, Load::Loaded(d) if !d.pushed);
-        let mut pairs = vec![("esc", cat.act_back), ("j/k", cat.act_scroll)];
-        if unpushed {
-            pairs.push(("p", cat.act_push));
-        }
-        pairs.push(("o", cat.act_open));
+        let pairs = [
+            ("esc", cat.act_back),
+            ("j/k", cat.act_scroll),
+            ("o", cat.act_open),
+        ];
         f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
         return;
     }
@@ -818,8 +816,13 @@ fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: 
     // Per-section hints as (key, label) pairs — the shared `hint_line` colors
     // the keys with the theme accent and the labels in light text.
     let scope = scope_label(g.scope, cat);
-    // Current open/closed/all filter, shown on the `s` hint (like `m` shows scope).
-    let state = g.state_filter.gh_arg();
+    // Current state filter, shown on the `s` hint (like `m` shows scope). Issues
+    // display "merged" as "all" since they can't be merged.
+    let state = if g.section == Section::Issues {
+        g.state_filter.issue_arg()
+    } else {
+        g.state_filter.gh_arg()
+    };
     let pairs: Vec<(&str, &str)> = match g.section {
         Section::Prs => vec![
             ("j/k", cat.act_move),

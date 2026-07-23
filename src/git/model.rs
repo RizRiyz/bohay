@@ -174,9 +174,6 @@ pub struct Commit {
 #[derive(Clone)]
 pub struct CommitShow {
     pub lines: Vec<String>,
-    /// Whether any remote branch already contains this commit. When false, the
-    /// detail view offers a `push` action (docs/17).
-    pub pushed: bool,
 }
 
 /// A git worktree — one checkout of a repo (docs/18 WT). `is_main` marks the

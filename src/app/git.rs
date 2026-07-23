@@ -320,7 +320,7 @@ impl App {
     }
 
     /// Keys while the commit detail is open: `esc`/`q` back, `j`/`k` scroll,
-    /// `o` open the commit on GitHub, `p` push it (when unpushed).
+    /// `o` open the commit on GitHub.
     fn handle_commit_detail_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_commit_detail(),
@@ -337,7 +337,6 @@ impl App {
                 }
             }
             KeyCode::Char('o') => self.commit_open_web(),
-            KeyCode::Char('p') => self.commit_push(),
             _ => {}
         }
     }
@@ -359,22 +358,6 @@ impl App {
         std::thread::spawn(move || {
             let _ = github::browse_commit(&root, &sha);
         });
-    }
-
-    /// `p` in the commit detail: push the current branch so the commit reaches
-    /// the remote. Runs in a real terminal pane (git_run_in_pane) so credential
-    /// prompts and progress are visible. A no-op-safe hint: it only shows when
-    /// the commit is unpushed, but pushing an up-to-date branch is harmless.
-    fn commit_push(&mut self) {
-        let already = matches!(
-            self.active_git().map(|g| &g.commit_detail),
-            Some(Load::Loaded(d)) if d.pushed
-        );
-        if already {
-            self.show_toast("commit already pushed");
-            return;
-        }
-        self.git_run_in_pane("git push".to_string());
     }
 
     // ── issue detail view (docs/17): mirrors the PR detail, in-tab ────────────
@@ -464,10 +447,12 @@ impl App {
         }
     }
 
-    /// `s`: cycle the PR/Issue state filter (open → closed → all) and re-fetch.
+    /// `s`: cycle the PR/Issue state filter and re-fetch. PRs cycle open → closed
+    /// → merged → all; issues skip merged.
     fn git_toggle_state(&mut self) {
+        let is_prs = self.active_git().map(|g| g.section) == Some(Section::Prs);
         if let Some(g) = self.active_git_mut() {
-            g.state_filter = g.state_filter.next();
+            g.state_filter = g.state_filter.next(is_prs);
             g.cursor = 0;
         }
         self.git_refresh();
@@ -981,7 +966,6 @@ mod tests {
             vid,
             GitPayload::CommitDetail(Box::new(Ok(CommitShow {
                 lines: vec!["commit abc123".into(), "+added line".into()],
-                pushed: false,
             }))),
         );
         assert!(
@@ -998,57 +982,32 @@ mod tests {
         assert!(app.active_is_git(), "still on the git tab, not closed");
     }
 
-    /// `p` only offers to push an unpushed commit; on an already-pushed one it
-    /// toasts instead of running anything, and `git_run_in_pane` never lands on
-    /// the orch board (the "opens the orch tab" bug).
+    /// A git pane action (`c` = create PR) runs in a REAL terminal pane, never the
+    /// orch board (the "opens the orch tab" bug).
     #[test]
-    fn push_gates_on_pushed_and_run_in_pane_skips_orch() {
-        use crate::git::model::CommitShow;
-
+    fn git_run_in_pane_skips_the_orch_board() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         // App::new gives a real pane tab at index 0. Add an orch board (index 1)
         // right before the git tab, so the old code would have jumped to it.
         let real_pane_tab = 0usize;
-        let orch_leaf = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
-            layout: TileLayout::new(orch_leaf),
+            layout: TileLayout::new(PaneId::alloc()),
             git: None,
             orch: true,
             name: None,
         });
         let orch_tab = 1usize;
-        let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
-        view.section = Section::Commits;
-        view.open_commit = Some("abc123".into());
-        view.commit_detail = Load::Loaded(CommitShow {
-            lines: vec!["commit abc123".into()],
-            pushed: true, // already on the remote
-        });
-        let placeholder = PaneId::alloc();
         app.workspaces[0].tabs.push(Tab {
-            layout: TileLayout::new(placeholder),
-            git: Some(Box::new(view)),
+            layout: TileLayout::new(PaneId::alloc()),
+            git: Some(Box::new(GitView::new(std::path::PathBuf::from("/tmp")))),
             orch: false,
             name: None,
         });
-        let git_tab = app.workspaces[0].tabs.len() - 1;
-        app.workspaces[0].active_tab = git_tab;
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
-        // Pushed commit → toast, no tab switch.
-        app.commit_push();
-        assert_eq!(app.ws().active_tab, git_tab, "stayed on the git tab");
-        assert!(app.toast.is_some(), "toasted 'already pushed'");
-
-        // An unpushed commit runs `git push` in a REAL pane tab (index 0), never
-        // the orch board (index 1) — the "opens the orch tab" bug.
-        if let Some(g) = app.active_git_mut() {
-            g.commit_detail = Load::Loaded(CommitShow {
-                lines: vec!["commit abc123".into()],
-                pushed: false,
-            });
-        }
-        app.commit_push();
+        // `c` (create PR) runs a git command in a pane.
+        app.handle_git_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert_ne!(
             app.ws().active_tab,
             orch_tab,
@@ -1118,15 +1077,20 @@ mod tests {
         assert!(app.active_git().unwrap().open_issue.is_none(), "esc → list");
     }
 
-    /// `s` cycles the PR/Issue state filter open → closed → all → open.
+    /// The default filter is Open; `s` cycles PRs open → closed → merged → all,
+    /// while issues skip merged (open → closed → all).
     #[test]
-    fn state_filter_cycles() {
+    fn state_filter_cycles_per_section() {
         use crate::git::StateFilter;
-        assert_eq!(StateFilter::Open.next(), StateFilter::Closed);
-        assert_eq!(StateFilter::Closed.next(), StateFilter::All);
-        assert_eq!(StateFilter::All.next(), StateFilter::Open);
-        assert_eq!(StateFilter::Open.gh_arg(), "open");
-        assert_eq!(StateFilter::All.gh_arg(), "all");
+        // PRs include merged.
+        assert_eq!(StateFilter::Open.next(true), StateFilter::Closed);
+        assert_eq!(StateFilter::Closed.next(true), StateFilter::Merged);
+        assert_eq!(StateFilter::Merged.next(true), StateFilter::All);
+        assert_eq!(StateFilter::All.next(true), StateFilter::Open);
+        // Issues skip merged.
+        assert_eq!(StateFilter::Closed.next(false), StateFilter::All);
+        assert_eq!(StateFilter::Merged.issue_arg(), "all");
+        assert_eq!(StateFilter::Merged.gh_arg(), "merged");
 
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -1140,6 +1104,7 @@ mod tests {
             name: None,
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+        // Default is Open (open PRs/issues, like before).
         assert_eq!(app.active_git().unwrap().state_filter, StateFilter::Open);
         app.handle_git_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(

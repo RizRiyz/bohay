@@ -67,12 +67,18 @@ pub fn pull_requests(
 ) -> Result<Vec<PullRequest>, String> {
     let st = state.gh_arg();
     let raw = match scope {
-        Scope::ThisRepo => run_gh(
-            cwd,
-            &[
+        Scope::ThisRepo => {
+            // Pin to the origin repo so gh can't resolve a different base repo.
+            let slug = super::local::origin_slug(cwd);
+            let mut args = vec![
                 "pr", "list", "--state", st, "--json", PR_FIELDS, "--limit", "50",
-            ],
-        )?,
+            ];
+            if let Some(s) = &slug {
+                args.push("--repo");
+                args.push(s);
+            }
+            run_gh(cwd, &args)?
+        }
         Scope::MyWork => run_gh(
             cwd,
             &[
@@ -97,11 +103,11 @@ const ISSUE_FIELDS: &str = "number,title,author,labels,assignees";
 
 /// Issues for `scope`, filtered by `state` (open / closed / all).
 pub fn issues(cwd: &Path, scope: Scope, state: StateFilter) -> Result<Vec<Issue>, String> {
-    let st = state.gh_arg();
+    let st = state.issue_arg();
     let raw = match scope {
-        Scope::ThisRepo => run_gh(
-            cwd,
-            &[
+        Scope::ThisRepo => {
+            let slug = super::local::origin_slug(cwd);
+            let mut args = vec![
                 "issue",
                 "list",
                 "--state",
@@ -110,8 +116,13 @@ pub fn issues(cwd: &Path, scope: Scope, state: StateFilter) -> Result<Vec<Issue>
                 ISSUE_FIELDS,
                 "--limit",
                 "50",
-            ],
-        )?,
+            ];
+            if let Some(s) = &slug {
+                args.push("--repo");
+                args.push(s);
+            }
+            run_gh(cwd, &args)?
+        }
         Scope::MyWork => run_gh(
             cwd,
             &[

@@ -80,21 +80,35 @@ impl Scope {
 }
 
 /// Which PRs/issues to list by state — cycled with `s` in the git tab (docs/17).
+/// The default is `Open`, so a git tab opens on open PRs/issues like before.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum StateFilter {
     #[default]
     Open,
     Closed,
+    /// PRs only — issues can't be merged (they skip this in the cycle).
+    Merged,
     All,
 }
 
 impl StateFilter {
-    /// Open → Closed → All → Open.
-    pub fn next(self) -> StateFilter {
-        match self {
-            StateFilter::Open => StateFilter::Closed,
-            StateFilter::Closed => StateFilter::All,
-            StateFilter::All => StateFilter::Open,
+    /// Advance the filter with `s`. PRs cycle Open → Closed → Merged → All; issues
+    /// skip Merged (Open → Closed → All), since GitHub issues are never "merged".
+    pub fn next(self, is_prs: bool) -> StateFilter {
+        if is_prs {
+            match self {
+                StateFilter::Open => StateFilter::Closed,
+                StateFilter::Closed => StateFilter::Merged,
+                StateFilter::Merged => StateFilter::All,
+                StateFilter::All => StateFilter::Open,
+            }
+        } else {
+            match self {
+                StateFilter::Open => StateFilter::Closed,
+                StateFilter::Closed => StateFilter::All,
+                // Merged is meaningless for issues; treat it as All and move on.
+                StateFilter::Merged | StateFilter::All => StateFilter::Open,
+            }
         }
     }
     /// The `gh … --state <v>` value.
@@ -102,7 +116,16 @@ impl StateFilter {
         match self {
             StateFilter::Open => "open",
             StateFilter::Closed => "closed",
+            StateFilter::Merged => "merged",
             StateFilter::All => "all",
+        }
+    }
+    /// The value valid for **issues** (which have no "merged" state) — Merged maps
+    /// to All so a filter carried over from the PRs list still fetches cleanly.
+    pub fn issue_arg(self) -> &'static str {
+        match self {
+            StateFilter::Merged => "all",
+            other => other.gh_arg(),
         }
     }
 }
