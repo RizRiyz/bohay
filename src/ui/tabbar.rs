@@ -114,16 +114,27 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         // A user-named pane tab (docs/28) shows its name; git/orch tabs are never
         // named, so they keep their fixed label.
         let name = ws.tabs.get(i).and_then(|tb| tb.name.as_deref());
+        // A tab that is a single file-view leaf (docs/38) is labeled `■ name`.
+        let file_name = ws.tabs.get(i).and_then(|tb| file_tab_name(tb, app));
         let title = |w: usize| {
+            let fit = |s: &str, w: usize| -> String {
+                if s.chars().count() > w {
+                    s.chars().take(w.saturating_sub(1)).chain(['…']).collect()
+                } else {
+                    s.to_string()
+                }
+            };
             if let Some(nm) = name {
                 // Truncate with an ellipsis to fit the cell, then center it (like
                 // the number) so the name has even padding instead of hugging the
                 // left edge.
-                let label: String = if nm.chars().count() > w {
-                    nm.chars().take(w.saturating_sub(1)).chain(['…']).collect()
-                } else {
-                    nm.to_string()
-                };
+                let label = fit(nm, w);
+                format!("{label:^w$}")
+            } else if let Some(fl) = &file_name {
+                // Cap to `w-2` so centering always leaves at least one space on
+                // each side — the `■` glyph never touches the tab's edge, the
+                // way the short git/orch labels never do.
+                let label = fit(fl, w.saturating_sub(2));
                 format!("{label:^w$}")
             } else if is_git {
                 format!("{:^w$}", "⎇ git", w = w)
@@ -187,4 +198,17 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         tab_rects.push((n, rect));
     }
     (tab_rects, close_rects, prev_rect, next_rect)
+}
+
+/// If `tab` is a single file-view leaf (docs/38), its `■ name` label (a plain
+/// square glyph, no emoji).
+fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
+    let leaves = tab.layout.leaves();
+    if leaves.len() == 1 {
+        if let Some(crate::app::ViewKind::File(v)) = app.views.get(&leaves[0]) {
+            let name = v.path.file_name()?.to_string_lossy().into_owned();
+            return Some(format!("■ {name}"));
+        }
+    }
+    None
 }

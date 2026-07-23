@@ -1,0 +1,399 @@
+//! The file-view model (docs/38 FILE-3): one open file rendered natively inside
+//! a pane or a tab. Pure state; the bytes are read on a worker thread and folded
+//! in via [`FileView::apply`]. Rendering is O(visible rows) — the renderer slices
+//! `lines` to the viewport.
+
+use std::path::{Path, PathBuf};
+
+/// Files larger than this are not read into memory — a viewer is not an excuse
+/// to allocate hundreds of MB on a whim.
+pub const SIZE_CAP: u64 = 5 * 1024 * 1024;
+
+/// How many leading bytes decide "binary": a NUL in here means don't try to
+/// render it as text.
+const SNIFF: usize = 8192;
+
+/// The outcome of reading a file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileLoad {
+    /// The read is in flight.
+    Loading,
+    /// Decoded text, one entry per line (tabs already expanded).
+    Text(Vec<String>),
+    /// Binary content (a NUL byte was found); carries the byte size.
+    Binary(u64),
+    /// Over [`SIZE_CAP`]; carries the byte size.
+    TooLarge(u64),
+    /// The read failed; carries a human-readable reason.
+    Error(String),
+}
+
+/// A live in-file search over the loaded text.
+#[derive(Clone, Debug, Default)]
+pub struct Search {
+    /// The query being typed / active (lowercased match is case-insensitive).
+    pub query: String,
+    /// True while the user is still typing the query (before Enter).
+    pub editing: bool,
+    /// `(line, start_col)` of every match, in document order.
+    pub matches: Vec<(usize, usize)>,
+    /// Index into `matches` of the current hit.
+    pub current: usize,
+}
+
+/// One open file: what it is, and where the viewport sits.
+pub struct FileView {
+    pub path: PathBuf,
+    pub load: FileLoad,
+    /// First visible line.
+    pub scroll: usize,
+    /// Horizontal scroll (columns), ignored when `wrap`.
+    pub hscroll: u16,
+    /// Soft-wrap long lines instead of clipping + horizontal scroll.
+    pub wrap: bool,
+    /// The file's mtime at the last read — drives live refresh (docs/38 FILE-5).
+    pub mtime: Option<std::time::SystemTime>,
+    /// In-file search state (docs/38 FILE-6), `None` when not searching.
+    pub search: Option<Search>,
+}
+
+impl FileView {
+    pub fn new(path: PathBuf) -> Self {
+        FileView {
+            path,
+            load: FileLoad::Loading,
+            scroll: 0,
+            hscroll: 0,
+            wrap: false,
+            mtime: None,
+            search: None,
+        }
+    }
+
+    /// Fold a finished read in. Scroll is **kept** (clamped to the new content),
+    /// so a live refresh (docs/38 FILE-5) doesn't yank the reader back to the
+    /// top; a fresh open already has scroll at 0. An active search is
+    /// re-evaluated against the new text.
+    pub fn apply(&mut self, load: FileLoad) {
+        self.load = load;
+        let max = self.line_count().saturating_sub(1);
+        self.scroll = self.scroll.min(max);
+        self.hscroll = 0;
+        if let Some(s) = self.search.take() {
+            if !s.query.is_empty() {
+                self.run_search(&s.query);
+            }
+        }
+    }
+
+    pub fn line_count(&self) -> usize {
+        match &self.load {
+            FileLoad::Text(lines) => lines.len(),
+            _ => 0,
+        }
+    }
+
+    /// Scroll vertically by `delta` lines, clamped so at least one line stays on
+    /// screen. `viewport` is the number of text rows currently visible.
+    pub fn scroll_by(&mut self, delta: i32, viewport: usize) {
+        let max = self.line_count().saturating_sub(1);
+        let next = (self.scroll as i32 + delta).clamp(0, max as i32) as usize;
+        self.scroll = next;
+        // Also clamp so the last page doesn't scroll into empty space.
+        let last_top = self.line_count().saturating_sub(viewport.max(1));
+        if self.scroll > last_top {
+            self.scroll = last_top;
+        }
+    }
+
+    pub fn goto_top(&mut self) {
+        self.scroll = 0;
+    }
+
+    pub fn goto_bottom(&mut self, viewport: usize) {
+        self.scroll = self.line_count().saturating_sub(viewport.max(1));
+    }
+
+    pub fn scroll_right(&mut self, delta: i16) {
+        if self.wrap {
+            return;
+        }
+        self.hscroll = (self.hscroll as i16 + delta).max(0) as u16;
+    }
+
+    // ── search (docs/38 FILE-6) ──────────────────────────────────────────────
+
+    /// Begin typing a query.
+    pub fn search_begin(&mut self) {
+        self.search = Some(Search {
+            editing: true,
+            ..Default::default()
+        });
+    }
+
+    /// A char typed into the active query.
+    pub fn search_push(&mut self, c: char) {
+        if let Some(s) = self.search.as_mut().filter(|s| s.editing) {
+            s.query.push(c);
+        }
+    }
+
+    /// Backspace in the active query.
+    pub fn search_backspace(&mut self) {
+        if let Some(s) = self.search.as_mut().filter(|s| s.editing) {
+            s.query.pop();
+        }
+    }
+
+    /// Commit the query: compute matches and jump to the first at/after the
+    /// current scroll position.
+    pub fn search_commit(&mut self) {
+        let Some(query) = self.search.as_ref().map(|s| s.query.clone()) else {
+            return;
+        };
+        if query.is_empty() {
+            self.search = None;
+            return;
+        }
+        self.run_search(&query);
+    }
+
+    /// Cancel search entirely.
+    pub fn search_cancel(&mut self) {
+        self.search = None;
+    }
+
+    /// Step to the next (`forward`) / previous match, wrapping, and scroll it
+    /// into view.
+    pub fn search_step(&mut self, forward: bool, viewport: usize) {
+        let (len, next) = match self.search.as_ref() {
+            Some(s) if !s.matches.is_empty() => {
+                let n = s.matches.len();
+                let cur = s.current;
+                (
+                    n,
+                    if forward {
+                        (cur + 1) % n
+                    } else {
+                        (cur + n - 1) % n
+                    },
+                )
+            }
+            _ => return,
+        };
+        if let Some(s) = self.search.as_mut() {
+            s.current = next;
+        }
+        let _ = len;
+        self.reveal_current_match(viewport);
+    }
+
+    fn run_search(&mut self, query: &str) {
+        let needle = query.to_lowercase();
+        let mut matches = Vec::new();
+        if let FileLoad::Text(lines) = &self.load {
+            for (li, line) in lines.iter().enumerate() {
+                let hay = line.to_lowercase();
+                let mut from = 0;
+                while let Some(rel) = hay[from..].find(&needle) {
+                    let col = from + rel;
+                    matches.push((li, col));
+                    from = col + needle.len().max(1);
+                }
+            }
+        }
+        // Jump to the first match at/after the current viewport top.
+        let current = matches
+            .iter()
+            .position(|(l, _)| *l >= self.scroll)
+            .unwrap_or(0);
+        self.search = Some(Search {
+            query: query.to_string(),
+            editing: false,
+            matches,
+            current,
+        });
+    }
+
+    fn reveal_current_match(&mut self, viewport: usize) {
+        if let Some(s) = &self.search {
+            if let Some((line, _)) = s.matches.get(s.current).copied() {
+                // Center-ish: keep the match on screen.
+                if line < self.scroll || line >= self.scroll + viewport.max(1) {
+                    self.scroll = line.saturating_sub(viewport / 2);
+                }
+            }
+        }
+    }
+}
+
+/// The line-number gutter width for a file of `line_count` lines. Shared by the
+/// renderer and mouse-selection extraction so their column math agrees.
+pub fn gutter_width(line_count: usize) -> u16 {
+    (line_count.max(1).to_string().len() as u16 + 1).max(4)
+}
+
+/// Extract the text under a mouse selection over a file view (docs/38), so
+/// drag-to-copy works like a pane. `content` is the view's content rect and
+/// `((sx,sy),(ex,ey))` the selection in reading order (terminal cells).
+///
+/// Maps each selected screen row to a file line (via `scroll`) and each column
+/// past the line-number gutter to a text column (via `hscroll`). Soft-wrap makes
+/// the row→line mapping non-linear, so a wrapped view copies whole lines in the
+/// row range rather than a precise sub-range.
+pub fn selection_text(
+    v: &FileView,
+    content: ratatui::layout::Rect,
+    ordered: ((u16, u16), (u16, u16)),
+) -> Option<String> {
+    let FileLoad::Text(lines) = &v.load else {
+        return None;
+    };
+    let ((sx, sy), (ex, ey)) = ordered;
+    let gutter = gutter_width(lines.len());
+    let text_x = content.x + gutter + 1;
+    let mut out = String::new();
+    for ty in sy..=ey {
+        let li = v.scroll + (ty.saturating_sub(content.y)) as usize;
+        let chars: Vec<char> = lines
+            .get(li)
+            .map(|l| l.chars().collect())
+            .unwrap_or_default();
+        // Column range in the file line. In wrap mode the on-screen column does
+        // not map to a text column, so take the whole line.
+        let (start, end) = if v.wrap {
+            (0, chars.len())
+        } else {
+            let to_col =
+                |screen_x: u16| (screen_x.saturating_sub(text_x)) as usize + v.hscroll as usize;
+            let s = if ty == sy { to_col(sx) } else { 0 };
+            let e = if ty == ey {
+                to_col(ex) + 1
+            } else {
+                chars.len()
+            };
+            (s.min(chars.len()), e.min(chars.len()))
+        };
+        let seg: String = if start < end {
+            chars[start..end].iter().collect()
+        } else {
+            String::new()
+        };
+        if ty != sy {
+            out.push('\n');
+        }
+        out.push_str(seg.trim_end());
+    }
+    let out = out.trim_end_matches('\n').to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Read `path` off the loop into a [`FileLoad`]. Never panics: a missing file,
+/// permission error, oversize file, or binary content each becomes a variant.
+pub fn read_file(path: &Path) -> FileLoad {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return FileLoad::Error(e.to_string()),
+    };
+    if meta.len() > SIZE_CAP {
+        return FileLoad::TooLarge(meta.len());
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return FileLoad::Error(e.to_string()),
+    };
+    if bytes.iter().take(SNIFF).any(|&b| b == 0) {
+        return FileLoad::Binary(meta.len());
+    }
+    // Lossy UTF-8, split on \n, strip a trailing \r, expand tabs to 4 columns so
+    // horizontal scroll and width math stay simple.
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).replace('\t', "    "))
+        .collect();
+    // A trailing newline yields a final empty element; drop it so the line count
+    // matches what an editor shows.
+    let lines = if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) {
+        lines[..lines.len() - 1].to_vec()
+    } else {
+        lines
+    };
+    FileLoad::Text(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_text_binary_and_oversize() {
+        let dir = std::env::temp_dir().join(format!("bohay-fv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("t.txt"), b"a\nb\tc\n").unwrap();
+        assert_eq!(
+            read_file(&dir.join("t.txt")),
+            FileLoad::Text(vec!["a".into(), "b    c".into()]),
+            "tabs expanded, trailing newline dropped"
+        );
+
+        std::fs::write(dir.join("b.bin"), [0u8, 1, 2, 3]).unwrap();
+        assert!(matches!(read_file(&dir.join("b.bin")), FileLoad::Binary(4)));
+
+        assert!(matches!(
+            read_file(&dir.join("missing")),
+            FileLoad::Error(_)
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scroll_clamps_to_content() {
+        let mut v = FileView::new(PathBuf::from("/x"));
+        v.apply(FileLoad::Text((0..10).map(|i| i.to_string()).collect()));
+        v.scroll_by(100, 4); // viewport 4 rows, 10 lines → last top is 6
+        assert_eq!(v.scroll, 6);
+        v.scroll_by(-100, 4);
+        assert_eq!(v.scroll, 0);
+    }
+
+    #[test]
+    fn search_finds_navigates_and_reveals() {
+        let mut v = FileView::new(PathBuf::from("/x"));
+        v.apply(FileLoad::Text(vec![
+            "let foo = 1;".into(),
+            "// nothing here".into(),
+            "foo(foo, FOO);".into(), // 3 hits (case-insensitive) on line 2
+        ]));
+        v.search_begin();
+        for c in "foo".chars() {
+            v.search_push(c);
+        }
+        v.search_commit();
+        let s = v.search.as_ref().unwrap();
+        // 1 on line 0, 3 on line 2 (foo, foo, FOO) = 4 total.
+        assert_eq!(s.matches.len(), 4);
+        assert_eq!(s.current, 0);
+
+        // Next wraps through all four; N goes back.
+        v.search_step(true, 2);
+        assert_eq!(v.search.as_ref().unwrap().current, 1);
+        v.search_step(false, 2);
+        assert_eq!(v.search.as_ref().unwrap().current, 0);
+
+        // Stepping to a match far down scrolls it into view.
+        v.goto_top();
+        v.search_step(true, 1); // current -> 1, which is on line 2
+        assert!(v.scroll >= 1, "the match line was revealed");
+
+        // A refreshed read re-evaluates the query against new text.
+        v.apply(FileLoad::Text(vec!["only foo".into()]));
+        assert_eq!(v.search.as_ref().unwrap().matches.len(), 1);
+
+        v.search_cancel();
+        assert!(v.search.is_none());
+    }
+}

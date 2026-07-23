@@ -61,6 +61,18 @@ impl App {
                 self.apply_proc_scan(found);
                 false
             }
+            AppEvent::DirRead { path, entries } => {
+                self.file_tree.apply_dir(path, entries);
+                true
+            }
+            AppEvent::FileRead { id, load } => {
+                if let Some(crate::app::ViewKind::File(v)) = self.views.get_mut(&id) {
+                    v.apply(load);
+                    true
+                } else {
+                    false // the view leaf was closed before its read landed
+                }
+            }
             AppEvent::GitData { view, payload } => {
                 self.git_data(view, payload);
                 true
@@ -392,6 +404,10 @@ impl App {
                 self.agents_scroll = step(self.agents_scroll);
                 return;
             }
+            if hit(self.files_area) {
+                self.file_tree.scroll = step(self.file_tree.scroll);
+                return;
+            }
             // Wheel over a git tab scrolls its active view (docs/17).
             if self.active_is_git() && hit(self.last_pane_area) {
                 self.git_scroll(scroll);
@@ -400,6 +416,19 @@ impl App {
             // Wheel over the orchestration board scrolls its list (docs/22).
             if self.active_is_orch() && hit(self.orch_area) {
                 self.orch_scroll_by(scroll);
+                return;
+            }
+            // Wheel over a file view (docs/38) scrolls its content.
+            if let Some((id, rect)) = self
+                .pane_content_rects
+                .iter()
+                .find(|(id, rect)| self.views.contains_key(id) && hit(*rect))
+                .map(|(id, rect)| (*id, *rect))
+            {
+                let viewport = rect.height.saturating_sub(1) as usize;
+                if let Some(crate::app::ViewKind::File(v)) = self.views.get_mut(&id) {
+                    v.scroll_by(scroll, viewport);
+                }
                 return;
             }
             // Otherwise the wheel scrolls the pane under the cursor.
@@ -547,6 +576,19 @@ impl App {
         if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
             self.resume_session(i);
+            return;
+        }
+        // Clicking a FILES row expands/collapses a folder or opens a file (docs/38).
+        // A plain click opens the file in a full tab (the native default); Shift
+        // opens it in a pane split beside the focus.
+        if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
+            let i = *i;
+            let target = if m.modifiers.contains(KeyModifiers::SHIFT) {
+                crate::app::files::OpenTarget::Pane
+            } else {
+                crate::app::files::OpenTarget::Tab
+            };
+            self.file_row_activate(i, target);
             return;
         }
         // Clicking a module dock row with an action invokes it (docs/29, DOCK-4).
@@ -830,6 +872,11 @@ impl App {
         if !sel.has_range() {
             return None;
         }
+        // A file-view leaf (docs/38) has no VT grid — pull the selected text from
+        // its rendered lines instead, so drag-to-copy works just like a pane.
+        if let Some(crate::app::ViewKind::File(v)) = self.views.get(&sel.pane) {
+            return crate::files::selection_text(v, sel.content, sel.ordered());
+        }
         let rows = self
             .panes
             .get(&sel.pane)?
@@ -1104,6 +1151,12 @@ impl App {
                 if is_prefix(&key) {
                     self.mode = Mode::Prefix;
                     return true; // entered prefix mode → the status bar updates
+                }
+                // A focused file view (docs/38 FILE-3) consumes keys itself
+                // (scroll / wrap / close) — they never reach a PTY.
+                let focus = self.layout().focus;
+                if self.views.contains_key(&focus) {
+                    return self.handle_file_key(focus, key);
                 }
                 // `Shift+↑` / `Shift+PageUp` enter keyboard scroll mode (no prefix,
                 // works on a stock Mac keyboard). From there plain keys navigate.

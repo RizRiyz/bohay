@@ -17,6 +17,46 @@ pub(super) fn draw_pane_titles(
         if rect.width < 8 || rect.height < 2 {
             continue;
         }
+        // A view leaf's title is its file path + a state dot placeholder.
+        if let Some(crate::app::ViewKind::File(v)) = app.views.get(id) {
+            let focused = *id == focus;
+            let bg = t.mantle;
+            let inner_w = rect.width - 2;
+            let close_w: u16 = if focused { 3 } else { 0 };
+            let title_w = inner_w.saturating_sub(close_w);
+            let name = v
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let path_fg = if focused { t.accent } else { t.subtext0 };
+            // A plain small-square glyph (no emoji), neutral marker.
+            let dot = Span::styled(" ■ ", Style::new().fg(t.overlay1).bg(bg));
+            let label: String = name
+                .chars()
+                .take(title_w.saturating_sub(3) as usize)
+                .collect();
+            let text_w = (3 + label.chars().count() as u16).min(title_w);
+            let title_rect = Rect::new(rect.x + 1, rect.y, text_w, 1);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    dot,
+                    Span::styled(label, Style::new().fg(path_fg).bg(bg)),
+                ])),
+                title_rect,
+            );
+            title_rects.push((*id, title_rect));
+            if focused {
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        " × ",
+                        Style::new().fg(t.subtext1).bg(bg).bold(),
+                    )),
+                    Rect::new(rect.x + 1 + title_w, rect.y, close_w, 1),
+                );
+            }
+            continue;
+        }
         let Some(pane) = app.panes.get(id) else {
             continue;
         };
@@ -84,6 +124,13 @@ fn draw_one_pane(
     app: &App,
     t: &Theme,
 ) -> Option<(u16, u16)> {
+    // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
+    if let Some(crate::app::ViewKind::File(v)) = app.views.get(&id) {
+        let content = pane_content(area, bordered)?;
+        let sel = app.selection.filter(|s| s.pane == id);
+        super::files::draw_file_view(f, content, v, sel.as_ref(), t);
+        return None; // views own no terminal cursor
+    }
     let pane = app.panes.get(&id)?;
     let st = pane_state(app, id);
     let content = pane_content(area, bordered)?;
