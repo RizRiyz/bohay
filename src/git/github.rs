@@ -7,8 +7,8 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::model::{Check, Checks, Issue, PrDetail, PullRequest, Review};
-use super::Scope;
+use super::model::{Check, Checks, Issue, IssueDetail, PrDetail, PullRequest, Review};
+use super::{Scope, StateFilter};
 
 /// Availability of the `gh` CLI for this session.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,17 +58,28 @@ const PR_FIELDS: &str = "number,title,author,isDraft,state,reviewDecision,review
 const SEARCH_PR_FIELDS: &str = "number,title,author,isDraft,state,repository";
 const SEARCH_ISSUE_FIELDS: &str = "number,title,author,labels,repository";
 
-/// Open pull requests for `scope` (this repo, or everything you're involved in).
-pub fn pull_requests(cwd: &Path, scope: Scope) -> Result<Vec<PullRequest>, String> {
+/// Pull requests for `scope` (this repo, or everything you're involved in),
+/// filtered by `state` (open / closed / all).
+pub fn pull_requests(
+    cwd: &Path,
+    scope: Scope,
+    state: StateFilter,
+) -> Result<Vec<PullRequest>, String> {
+    let st = state.gh_arg();
     let raw = match scope {
-        Scope::ThisRepo => run_gh(cwd, &["pr", "list", "--json", PR_FIELDS, "--limit", "50"])?,
+        Scope::ThisRepo => run_gh(
+            cwd,
+            &[
+                "pr", "list", "--state", st, "--json", PR_FIELDS, "--limit", "50",
+            ],
+        )?,
         Scope::MyWork => run_gh(
             cwd,
             &[
                 "search",
                 "prs",
                 "--involves=@me",
-                "--state=open",
+                &format!("--state={st}"),
                 "--json",
                 SEARCH_PR_FIELDS,
                 "--limit",
@@ -84,12 +95,22 @@ pub fn pull_requests(cwd: &Path, scope: Scope) -> Result<Vec<PullRequest>, Strin
 
 const ISSUE_FIELDS: &str = "number,title,author,labels,assignees";
 
-/// Open issues for `scope`.
-pub fn issues(cwd: &Path, scope: Scope) -> Result<Vec<Issue>, String> {
+/// Issues for `scope`, filtered by `state` (open / closed / all).
+pub fn issues(cwd: &Path, scope: Scope, state: StateFilter) -> Result<Vec<Issue>, String> {
+    let st = state.gh_arg();
     let raw = match scope {
         Scope::ThisRepo => run_gh(
             cwd,
-            &["issue", "list", "--json", ISSUE_FIELDS, "--limit", "50"],
+            &[
+                "issue",
+                "list",
+                "--state",
+                st,
+                "--json",
+                ISSUE_FIELDS,
+                "--limit",
+                "50",
+            ],
         )?,
         Scope::MyWork => run_gh(
             cwd,
@@ -97,7 +118,7 @@ pub fn issues(cwd: &Path, scope: Scope) -> Result<Vec<Issue>, String> {
                 "search",
                 "issues",
                 "--involves=@me",
-                "--state=open",
+                &format!("--state={st}"),
                 "--json",
                 SEARCH_ISSUE_FIELDS,
                 "--limit",
@@ -282,6 +303,39 @@ fn parse_pr_detail(v: &Value) -> PrDetail {
     }
 }
 
+const ISSUE_DETAIL_FIELDS: &str =
+    "number,title,state,author,body,labels,assignees,comments,updatedAt";
+
+/// Full detail for one issue — the in-tab issue detail (`gh issue view <n>`).
+pub fn issue_detail(cwd: &Path, number: u64) -> Result<IssueDetail, String> {
+    let raw = run_gh(
+        cwd,
+        &[
+            "issue",
+            "view",
+            &number.to_string(),
+            "--json",
+            ISSUE_DETAIL_FIELDS,
+        ],
+    )?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("parse gh: {e}"))?;
+    Ok(IssueDetail {
+        number: v.get("number").and_then(Value::as_u64).unwrap_or(0),
+        title: str_at(&v, "title"),
+        state: str_at(&v, "state"),
+        author: login(v.get("author")),
+        body: str_at(&v, "body"),
+        labels: names(v.get("labels"), "name"),
+        assignees: logins(v.get("assignees")),
+        comments: v
+            .get("comments")
+            .and_then(Value::as_array)
+            .map(|a| a.len() as u64)
+            .unwrap_or(0),
+        updated_at: str_at(&v, "updatedAt"),
+    })
+}
+
 /// Latest decision per reviewer (gh returns reviews chronologically, so a later
 /// review supersedes an earlier one).
 fn parse_reviews(v: Option<&Value>) -> Vec<Review> {
@@ -325,6 +379,12 @@ fn parse_checks(v: Option<&Value>) -> Vec<Check> {
 /// Open a PR (or issue) in the browser.
 pub fn view_web(cwd: &Path, kind: &str, number: u64) -> Result<(), String> {
     run_gh(cwd, &[kind, "view", &number.to_string(), "--web"]).map(|_| ())
+}
+
+/// Open a commit's page on GitHub in the browser (`gh browse <sha>`), for the
+/// commit-detail view's `o` action (docs/17).
+pub fn browse_commit(cwd: &Path, sha: &str) -> Result<(), String> {
+    run_gh(cwd, &["browse", sha]).map(|_| ())
 }
 
 #[cfg(test)]

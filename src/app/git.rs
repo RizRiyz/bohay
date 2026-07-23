@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use super::*;
 use crate::git::{
     filtered_branches, filtered_commits, filtered_issues, filtered_prs, github, local, GhState,
-    GitPayload, GitView, Load, Scope, Section,
+    GitPayload, GitView, Load, Scope, Section, StateFilter,
 };
 
 impl App {
@@ -39,7 +39,7 @@ impl App {
         ws.active_tab = ws.tabs.len() - 1;
         self.zoomed = false;
         self.session_dirty = true;
-        self.git_fetch(view_id, root, Scope::ThisRepo);
+        self.git_fetch(view_id, root, Scope::ThisRepo, StateFilter::Open);
     }
 
     /// Open the git tab for the currently active workspace.
@@ -106,22 +106,24 @@ impl App {
     /// Kick off the async fetch for every open git tab. Called after a session
     /// restore so restored git tabs load their data (docs/17).
     pub fn refetch_git_tabs(&mut self) {
-        let targets: Vec<(u64, PathBuf, Scope)> = self
+        let targets: Vec<(u64, PathBuf, Scope, StateFilter)> = self
             .workspaces
             .iter()
             .flat_map(|ws| {
-                ws.tabs
-                    .iter()
-                    .filter_map(|t| t.git.as_ref().map(|g| (g.id, g.repo_root.clone(), g.scope)))
+                ws.tabs.iter().filter_map(|t| {
+                    t.git
+                        .as_ref()
+                        .map(|g| (g.id, g.repo_root.clone(), g.scope, g.state_filter))
+                })
             })
             .collect();
-        for (id, root, scope) in targets {
-            self.git_fetch(id, root, scope);
+        for (id, root, scope, state) in targets {
+            self.git_fetch(id, root, scope, state);
         }
     }
 
-    /// Run the local-git fetches + GitHub (per `scope`) on a detached thread.
-    fn git_fetch(&self, view_id: u64, root: PathBuf, scope: Scope) {
+    /// Run the local-git fetches + GitHub (per `scope`/`state`) on a detached thread.
+    fn git_fetch(&self, view_id: u64, root: PathBuf, scope: Scope, state: StateFilter) {
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
             let send = |p: GitPayload| {
@@ -138,22 +140,22 @@ impl App {
             let gh = github::detect();
             send(GitPayload::Gh(gh));
             if gh == GhState::Ready {
-                send(GitPayload::Prs(github::pull_requests(&root, scope)));
-                send(GitPayload::Issues(github::issues(&root, scope)));
+                send(GitPayload::Prs(github::pull_requests(&root, scope, state)));
+                send(GitPayload::Issues(github::issues(&root, scope, state)));
             }
         });
     }
 
     pub fn git_refresh(&mut self) {
         if let Some(g) = self.active_git_mut() {
-            let (id, root, scope) = (g.id, g.repo_root.clone(), g.scope);
+            let (id, root, scope, state) = (g.id, g.repo_root.clone(), g.scope, g.state_filter);
             g.status = Load::Loading;
             g.info = Load::Loading;
             g.branches = Load::Loading;
             g.commits = Load::Loading;
             g.prs = Load::Idle;
             g.issues = Load::Idle;
-            self.git_fetch(id, root, scope);
+            self.git_fetch(id, root, scope, state);
         }
     }
 
@@ -263,14 +265,276 @@ impl App {
         }
     }
 
-    /// Switch the active git tab to a clicked view-selector section.
+    // ── commit detail view (docs/17): `git show` in-tab, not in a pane ────────
+
+    /// The short sha under the cursor in the Commits list (only in that section).
+    fn git_selected_sha(&self) -> Option<String> {
+        let g = self.active_git()?;
+        if g.section != Section::Commits {
+            return None;
+        }
+        match &g.commits {
+            Load::Loaded(v) => filtered_commits(v, &g.filter)
+                .nth(g.cursor)
+                .map(|c| c.sha.clone()),
+            _ => None,
+        }
+    }
+
+    /// Fetch `git show <sha>` on a thread and show the in-tab detail view. The
+    /// whole point of the git tab: read a commit without spawning a pane or
+    /// handing it to an agent, and `esc` back to the list.
+    fn fetch_commit_detail(&mut self, sha: String) {
+        let Some(g) = self.active_git() else {
+            return;
+        };
+        let (id, root) = (g.id, g.repo_root.clone());
+        if let Some(g) = self.active_git_mut() {
+            g.open_commit = Some(sha.clone());
+            g.commit_detail = Load::Loading;
+            g.scroll = 0;
+        }
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(AppEvent::GitData {
+                view: id,
+                payload: GitPayload::CommitDetail(Box::new(local::commit_show(&root, &sha))),
+            });
+        });
+    }
+
+    /// `⏎`/click on a commit row: open its `git show` detail in-tab.
+    fn git_open_commit_detail(&mut self) {
+        if let Some(sha) = self.git_selected_sha() {
+            self.fetch_commit_detail(sha);
+        }
+    }
+
+    /// Close the commit detail (back to the list).
+    fn git_close_commit_detail(&mut self) {
+        if let Some(g) = self.active_git_mut() {
+            g.open_commit = None;
+            g.commit_detail = Load::Idle;
+            g.scroll = 0;
+        }
+    }
+
+    /// Keys while the commit detail is open: `esc`/`q` back, `j`/`k` scroll,
+    /// `o` open the commit on GitHub, `p` push it (when unpushed).
+    fn handle_commit_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.git_close_commit_detail(),
+            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
+            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
+            KeyCode::Char('g') | KeyCode::Home => {
+                if let Some(g) = self.active_git_mut() {
+                    g.scroll = 0;
+                }
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                if let Some(g) = self.active_git_mut() {
+                    g.scroll = usize::MAX; // clamped in render
+                }
+            }
+            KeyCode::Char('o') => self.commit_open_web(),
+            KeyCode::Char('p') => self.commit_push(),
+            _ => {}
+        }
+    }
+
+    /// `o` in the commit detail: open the commit's page on GitHub. Only meaningful
+    /// with a GitHub remote (`gh` ready); otherwise a toast says so.
+    fn commit_open_web(&mut self) {
+        let Some(g) = self.active_git() else {
+            return;
+        };
+        if g.gh != GhState::Ready {
+            self.show_toast("no GitHub remote for this repo");
+            return;
+        }
+        let Some(sha) = g.open_commit.clone() else {
+            return;
+        };
+        let root = g.repo_root.clone();
+        std::thread::spawn(move || {
+            let _ = github::browse_commit(&root, &sha);
+        });
+    }
+
+    /// `p` in the commit detail: push the current branch so the commit reaches
+    /// the remote. Runs in a real terminal pane (git_run_in_pane) so credential
+    /// prompts and progress are visible. A no-op-safe hint: it only shows when
+    /// the commit is unpushed, but pushing an up-to-date branch is harmless.
+    fn commit_push(&mut self) {
+        let already = matches!(
+            self.active_git().map(|g| &g.commit_detail),
+            Some(Load::Loaded(d)) if d.pushed
+        );
+        if already {
+            self.show_toast("commit already pushed");
+            return;
+        }
+        self.git_run_in_pane("git push".to_string());
+    }
+
+    // ── issue detail view (docs/17): mirrors the PR detail, in-tab ────────────
+
+    /// The issue number under the cursor in the Issues list (only that section).
+    fn git_selected_issue(&self) -> Option<u64> {
+        let g = self.active_git()?;
+        if g.section != Section::Issues {
+            return None;
+        }
+        match &g.issues {
+            Load::Loaded(v) => filtered_issues(v, &g.filter)
+                .nth(g.cursor)
+                .map(|i| i.number),
+            _ => None,
+        }
+    }
+
+    /// Fetch full detail for `number` and show the in-tab issue detail.
+    fn fetch_issue_detail(&mut self, number: u64) {
+        let Some(g) = self.active_git() else {
+            return;
+        };
+        let (id, root) = (g.id, g.repo_root.clone());
+        if let Some(g) = self.active_git_mut() {
+            g.open_issue = Some(number);
+            g.issue_detail = Load::Loading;
+            g.scroll = 0;
+        }
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(AppEvent::GitData {
+                view: id,
+                payload: GitPayload::IssueDetail(Box::new(github::issue_detail(&root, number))),
+            });
+        });
+    }
+
+    /// `⏎`/click on an issue row: open its detail in-tab.
+    fn git_open_issue_detail(&mut self) {
+        if let Some(n) = self.git_selected_issue() {
+            self.fetch_issue_detail(n);
+        }
+    }
+
+    /// Close the issue detail (back to the list).
+    fn git_close_issue_detail(&mut self) {
+        if let Some(g) = self.active_git_mut() {
+            g.open_issue = None;
+            g.issue_detail = Load::Idle;
+            g.scroll = 0;
+        }
+    }
+
+    /// `o` in the issue detail: open the issue on GitHub.
+    fn issue_detail_web(&self) {
+        let Some(g) = self.active_git() else {
+            return;
+        };
+        let Some(n) = g.open_issue else {
+            return;
+        };
+        let root = g.repo_root.clone();
+        std::thread::spawn(move || {
+            let _ = github::view_web(&root, "issue", n);
+        });
+    }
+
+    /// Keys while the issue detail is open: `esc`/`q` back, `j`/`k` scroll, `o` web.
+    fn handle_issue_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.git_close_issue_detail(),
+            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
+            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
+            KeyCode::Char('g') | KeyCode::Home => {
+                if let Some(g) = self.active_git_mut() {
+                    g.scroll = 0;
+                }
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                if let Some(g) = self.active_git_mut() {
+                    g.scroll = usize::MAX;
+                }
+            }
+            KeyCode::Char('o') => self.issue_detail_web(),
+            _ => {}
+        }
+    }
+
+    /// `s`: cycle the PR/Issue state filter (open → closed → all) and re-fetch.
+    fn git_toggle_state(&mut self) {
+        if let Some(g) = self.active_git_mut() {
+            g.state_filter = g.state_filter.next();
+            g.cursor = 0;
+        }
+        self.git_refresh();
+    }
+
+    /// Switch the active git tab to a clicked view-selector section. Also closes
+    /// any open detail view (PR or commit), so a tab click always lands on a list.
     pub fn git_click_section(&mut self, section: Section) {
         if let Some(g) = self.active_git_mut() {
-            if g.section != section {
+            let had_detail =
+                g.open_pr.is_some() || g.open_commit.is_some() || g.open_issue.is_some();
+            g.open_pr = None;
+            g.detail = Load::Idle;
+            g.open_commit = None;
+            g.commit_detail = Load::Idle;
+            g.open_issue = None;
+            g.issue_detail = Load::Idle;
+            if g.section != section || had_detail {
                 g.section = section;
                 g.cursor = 0;
                 g.scroll = 0;
             }
+        }
+    }
+
+    /// The list-row index at screen `(col, row)`, if the click lands on a row of
+    /// the current cursor list (Commits / PRs / Issues / Branches), no detail is
+    /// open, and we're not filtering. Uses the list body rect recorded at render
+    /// and the same scroll math as `draw_list`.
+    pub fn git_list_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let g = self.active_git()?;
+        let is_list = matches!(
+            g.section,
+            Section::Commits | Section::Prs | Section::Issues | Section::Branches
+        );
+        let detail_open = g.open_pr.is_some() || g.open_commit.is_some() || g.open_issue.is_some();
+        if !is_list || detail_open || g.filtering {
+            return None;
+        }
+        let la = g.list_area;
+        if la.height == 0 || col < la.x || col >= la.right() || row < la.y || row >= la.bottom() {
+            return None;
+        }
+        let len = self.git_list_len();
+        if len == 0 {
+            return None;
+        }
+        let avail = la.height as usize;
+        let cursor = g.cursor.min(len - 1);
+        // draw_list keeps the cursor on screen: first visible row = this scroll.
+        let scroll = cursor.saturating_sub(avail.saturating_sub(1));
+        let idx = scroll + (row - la.y) as usize;
+        (idx < len).then_some(idx)
+    }
+
+    /// A click on list row `idx`: select it, then open its detail — commit `git
+    /// show`, PR panel, or issue detail. A branch row only selects (no surprise
+    /// checkout on a click).
+    pub fn git_click_row(&mut self, idx: usize) {
+        if let Some(g) = self.active_git_mut() {
+            g.cursor = idx;
+        }
+        match self.active_git().map(|g| g.section) {
+            Some(Section::Commits) => self.git_open_commit_detail(),
+            Some(Section::Prs) => self.git_open_pr_detail(),
+            Some(Section::Issues) => self.git_open_issue_detail(),
+            _ => {}
         }
     }
 
@@ -324,6 +588,16 @@ impl App {
             self.handle_pr_detail_key(key);
             return;
         }
+        // The commit detail view captures keys while open (docs/17).
+        if self.active_git().is_some_and(|g| g.open_commit.is_some()) {
+            self.handle_commit_detail_key(key);
+            return;
+        }
+        // The issue detail view captures keys while open (docs/17).
+        if self.active_git().is_some_and(|g| g.open_issue.is_some()) {
+            self.handle_issue_detail_key(key);
+            return;
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
             KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
@@ -342,6 +616,8 @@ impl App {
             KeyCode::Char('o') => self.git_open_web(),
             KeyCode::Char('d') => self.git_diff(),
             KeyCode::Char('m') => self.git_toggle_scope(),
+            // `s` cycles the open/closed/all filter (PRs + Issues).
+            KeyCode::Char('s') => self.git_toggle_state(),
             KeyCode::Char('c') => self.git_run_in_pane("gh pr create".to_string()),
             KeyCode::Enter => self.git_activate(),
             KeyCode::Esc | KeyCode::Char('q') => self.close_git_tab(),
@@ -354,8 +630,16 @@ impl App {
     /// handle any prompt or dirty-tree refusal.
     fn git_run_in_pane(&mut self, cmd: String) {
         let wsi = self.active_ws;
-        let Some(ti) = self.workspaces[wsi].tabs.iter().position(|t| !t.is_git()) else {
-            return; // no terminal tab to run in
+        // A real terminal tab — not the git tab and not the orch board (both are
+        // placeholder-leaf tabs with no pane). Landing on the orch board was the
+        // "it just opens the orch tab" bug.
+        let Some(ti) = self.workspaces[wsi]
+            .tabs
+            .iter()
+            .position(|t| !t.is_git() && !t.is_orch())
+        else {
+            self.show_toast("no terminal pane to run in");
+            return;
         };
         self.workspaces[wsi].active_tab = ti;
         let focus = self.layout().focus;
@@ -406,8 +690,10 @@ impl App {
     /// or the scroll offset in Flow/Status (clamped to content during render).
     /// Drives both `j`/`k` and the mouse wheel.
     pub fn git_scroll(&mut self, delta: i32) {
-        // The PR detail panel scrolls as a block.
-        if self.active_git().is_some_and(|g| g.open_pr.is_some()) {
+        // The PR / commit / issue detail views all scroll as a block.
+        if self.active_git().is_some_and(|g| {
+            g.open_pr.is_some() || g.open_commit.is_some() || g.open_issue.is_some()
+        }) {
             if let Some(g) = self.active_git_mut() {
                 g.scroll = (g.scroll as i64 + delta as i64).max(0) as usize;
             }
@@ -494,6 +780,16 @@ impl App {
         // A PR row opens the rich detail panel (GIT-6).
         if self.active_git().map(|g| g.section) == Some(Section::Prs) {
             self.git_open_pr_detail();
+            return;
+        }
+        // A commit row opens its `git show` in-tab (docs/17) — not in a pane.
+        if self.active_git().map(|g| g.section) == Some(Section::Commits) {
+            self.git_open_commit_detail();
+            return;
+        }
+        // An issue row opens its detail in-tab (docs/17) — not in a pane.
+        if self.active_git().map(|g| g.section) == Some(Section::Issues) {
+            self.git_open_issue_detail();
             return;
         }
         // Branch checkout is handled directly so we can refresh in place.
@@ -634,6 +930,275 @@ mod tests {
         for i in 1..5 {
             assert_eq!(cmd_at(&mut app, i), None, "hostile branch {i} is refused");
         }
+    }
+
+    /// Enter (and a click) on a commit opens its `git show` in-tab — setting
+    /// `open_commit` + a Loading detail — instead of running in a pane. A detail
+    /// result loads, and `esc` returns to the list (docs/17).
+    #[test]
+    fn commit_enter_opens_in_tab_detail_and_esc_returns() {
+        use crate::git::model::{Commit, CommitShow};
+        use crate::git::GitPayload;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+        let vid = view.id;
+        view.section = Section::Commits;
+        view.commits = Load::Loaded(vec![Commit {
+            sha: "abc123".into(),
+            subject: "fix things".into(),
+            author: "me".into(),
+            when: "now".into(),
+            refs: String::new(),
+            graph: String::new(),
+        }]);
+        let placeholder = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(placeholder),
+            git: Some(Box::new(view)),
+            orch: false,
+            name: None,
+        });
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+        let tabs_before = app.ws().tabs.len();
+
+        // Enter opens the in-tab detail (no new tab/pane).
+        app.handle_git_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_git().unwrap().open_commit.as_deref(),
+            Some("abc123"),
+            "the commit detail opened in-tab"
+        );
+        assert!(
+            matches!(app.active_git().unwrap().commit_detail, Load::Loading),
+            "its git show is loading"
+        );
+        assert_eq!(app.ws().tabs.len(), tabs_before, "no pane/tab was spawned");
+
+        // A result loads into the detail.
+        app.git_data(
+            vid,
+            GitPayload::CommitDetail(Box::new(Ok(CommitShow {
+                lines: vec!["commit abc123".into(), "+added line".into()],
+                pushed: false,
+            }))),
+        );
+        assert!(
+            matches!(app.active_git().unwrap().commit_detail, Load::Loaded(_)),
+            "the git show output loaded"
+        );
+
+        // Esc goes back to the commit list.
+        app.handle_git_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            app.active_git().unwrap().open_commit.is_none(),
+            "esc returned to the list"
+        );
+        assert!(app.active_is_git(), "still on the git tab, not closed");
+    }
+
+    /// `p` only offers to push an unpushed commit; on an already-pushed one it
+    /// toasts instead of running anything, and `git_run_in_pane` never lands on
+    /// the orch board (the "opens the orch tab" bug).
+    #[test]
+    fn push_gates_on_pushed_and_run_in_pane_skips_orch() {
+        use crate::git::model::CommitShow;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // App::new gives a real pane tab at index 0. Add an orch board (index 1)
+        // right before the git tab, so the old code would have jumped to it.
+        let real_pane_tab = 0usize;
+        let orch_leaf = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(orch_leaf),
+            git: None,
+            orch: true,
+            name: None,
+        });
+        let orch_tab = 1usize;
+        let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+        view.section = Section::Commits;
+        view.open_commit = Some("abc123".into());
+        view.commit_detail = Load::Loaded(CommitShow {
+            lines: vec!["commit abc123".into()],
+            pushed: true, // already on the remote
+        });
+        let placeholder = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(placeholder),
+            git: Some(Box::new(view)),
+            orch: false,
+            name: None,
+        });
+        let git_tab = app.workspaces[0].tabs.len() - 1;
+        app.workspaces[0].active_tab = git_tab;
+
+        // Pushed commit → toast, no tab switch.
+        app.commit_push();
+        assert_eq!(app.ws().active_tab, git_tab, "stayed on the git tab");
+        assert!(app.toast.is_some(), "toasted 'already pushed'");
+
+        // An unpushed commit runs `git push` in a REAL pane tab (index 0), never
+        // the orch board (index 1) — the "opens the orch tab" bug.
+        if let Some(g) = app.active_git_mut() {
+            g.commit_detail = Load::Loaded(CommitShow {
+                lines: vec!["commit abc123".into()],
+                pushed: false,
+            });
+        }
+        app.commit_push();
+        assert_ne!(
+            app.ws().active_tab,
+            orch_tab,
+            "did not jump to the orch board"
+        );
+        assert_eq!(
+            app.ws().active_tab,
+            real_pane_tab,
+            "ran in the real terminal pane"
+        );
+    }
+
+    /// Enter on an issue opens its detail in-tab (like PRs/commits), and `esc`
+    /// returns to the list (docs/17).
+    #[test]
+    fn issue_enter_opens_in_tab_detail() {
+        use crate::git::model::{Issue, IssueDetail};
+        use crate::git::GitPayload;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+        let vid = view.id;
+        view.section = Section::Issues;
+        view.issues = Load::Loaded(vec![Issue {
+            number: 7,
+            title: "a bug".into(),
+            author: "me".into(),
+            labels: vec![],
+            assignees: vec![],
+            repo: String::new(),
+        }]);
+        let placeholder = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(placeholder),
+            git: Some(Box::new(view)),
+            orch: false,
+            name: None,
+        });
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+
+        app.handle_git_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.active_git().unwrap().open_issue,
+            Some(7),
+            "the issue detail opened in-tab"
+        );
+        app.git_data(
+            vid,
+            GitPayload::IssueDetail(Box::new(Ok(IssueDetail {
+                number: 7,
+                title: "a bug".into(),
+                state: "OPEN".into(),
+                author: "me".into(),
+                body: "steps to reproduce".into(),
+                labels: vec!["bug".into()],
+                assignees: vec![],
+                comments: 2,
+                updated_at: "2026-07-23T00:00:00Z".into(),
+            }))),
+        );
+        assert!(matches!(
+            app.active_git().unwrap().issue_detail,
+            Load::Loaded(_)
+        ));
+        app.handle_git_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.active_git().unwrap().open_issue.is_none(), "esc → list");
+    }
+
+    /// `s` cycles the PR/Issue state filter open → closed → all → open.
+    #[test]
+    fn state_filter_cycles() {
+        use crate::git::StateFilter;
+        assert_eq!(StateFilter::Open.next(), StateFilter::Closed);
+        assert_eq!(StateFilter::Closed.next(), StateFilter::All);
+        assert_eq!(StateFilter::All.next(), StateFilter::Open);
+        assert_eq!(StateFilter::Open.gh_arg(), "open");
+        assert_eq!(StateFilter::All.gh_arg(), "all");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+        view.section = Section::Prs;
+        let placeholder = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(placeholder),
+            git: Some(Box::new(view)),
+            orch: false,
+            name: None,
+        });
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+        assert_eq!(app.active_git().unwrap().state_filter, StateFilter::Open);
+        app.handle_git_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(
+            app.active_git().unwrap().state_filter,
+            StateFilter::Closed,
+            "s cycled to closed"
+        );
+    }
+
+    /// End-to-end through the real mouse path + render: rendering sets the list
+    /// area, and a click on a commit row opens its in-tab detail (docs/17).
+    #[test]
+    fn clicking_a_commit_row_opens_detail() {
+        use crate::event::AppEvent;
+        use crate::git::model::Commit;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mk = |sha: &str| Commit {
+            sha: sha.into(),
+            subject: format!("subject {sha}"),
+            author: "me".into(),
+            when: "now".into(),
+            refs: String::new(),
+            graph: String::new(),
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+        view.section = Section::Commits;
+        view.commits = Load::Loaded(vec![mk("aaa111"), mk("bbb222"), mk("ccc333")]);
+        let placeholder = PaneId::alloc();
+        app.workspaces[0].tabs.push(Tab {
+            layout: TileLayout::new(placeholder),
+            git: Some(Box::new(view)),
+            orch: false,
+            name: None,
+        });
+        app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
+
+        // Render so the git tab records its commit-list body rect.
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let la = app.active_git().unwrap().list_area;
+        assert!(la.height >= 2, "the list body has rows");
+
+        // Click the second visible commit row.
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: la.x + 2,
+            row: la.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_event(AppEvent::Mouse(down));
+        assert_eq!(
+            app.active_git().unwrap().open_commit.as_deref(),
+            Some("bbb222"),
+            "clicking the 2nd commit row opened that commit's detail in-tab"
+        );
     }
 
     #[test]

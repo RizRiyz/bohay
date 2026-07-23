@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::model::{BranchInfo, Commit, Contributor, FileChange, RepoInfo, RepoStatus, Worktree};
+use super::model::{
+    BranchInfo, Commit, CommitShow, Contributor, FileChange, RepoInfo, RepoStatus, Worktree,
+};
 
 /// Run `git <args>` in `cwd`, returning stdout (trimmed of a trailing newline).
 fn run(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -244,6 +246,36 @@ pub fn commits(cwd: &Path, n: usize, all: bool) -> Result<Vec<Commit>, String> {
 /// Checkout a branch (mutating). Used by the Branches view's `enter`.
 pub fn checkout(cwd: &Path, branch: &str) -> Result<(), String> {
     run(cwd, &["switch", branch]).map(|_| ())
+}
+
+/// The `git show` output for one commit — header, stat, and patch — for the git
+/// tab's in-tab commit-detail view (docs/17). `--no-color` keeps it plain (we
+/// color per-line ourselves); `--end-of-options` means a `sha` can never be read
+/// as a flag. Runs on a fetch thread like every other git call.
+pub fn commit_show(cwd: &Path, sha: &str) -> Result<CommitShow, String> {
+    let out = run(
+        cwd,
+        &[
+            "show",
+            "--no-color",
+            "--stat",
+            "--patch",
+            "--end-of-options",
+            sha,
+        ],
+    )?;
+    // "Pushed" = some remote-tracking branch contains it. Empty output (or no
+    // remotes) means it lives only locally, so the detail view offers a push.
+    let pushed = run(
+        cwd,
+        &["branch", "-r", "--contains", "--end-of-options", sha],
+    )
+    .map(|s| !s.trim().is_empty())
+    .unwrap_or(false);
+    Ok(CommitShow {
+        lines: out.replace('\r', "").lines().map(str::to_string).collect(),
+        pushed,
+    })
 }
 
 // ── merge gate (docs/22, ORCH-6) ────────────────────────────────────────────

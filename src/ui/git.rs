@@ -4,7 +4,7 @@
 //! ratatui, themed with the existing palette.
 
 use super::*;
-use crate::git::model::{Checks, PrDetail, PullRequest};
+use crate::git::model::{Checks, IssueDetail, PrDetail, PullRequest};
 use crate::git::{
     filtered_branches, filtered_commits, filtered_issues, filtered_prs, GitView, Load, Scope,
     Section,
@@ -56,10 +56,22 @@ pub(super) fn render(
         area.width.saturating_sub(2),
         footer_y.saturating_sub(area.y + 3),
     );
+    // Record the list body so a mouse click can map to a commit row (docs/17).
+    g.list_area = body;
     // The PR detail panel (GIT-6) overlays the section body when open; it scrolls
     // as a block like Flow/Status.
     if g.open_pr.is_some() {
         g.scroll = draw_pr_detail(f, body, g, cat, t);
+        return tab_rects;
+    }
+    // The commit detail view (docs/17): `git show` in-tab, scrolls as a block.
+    if g.open_commit.is_some() {
+        g.scroll = draw_commit_detail(f, body, g, t);
+        return tab_rects;
+    }
+    // The issue detail view (docs/17): in-tab, scrolls as a block.
+    if g.open_issue.is_some() {
+        g.scroll = draw_issue_detail(f, body, g, cat, t);
         return tab_rects;
     }
     // Flow / Status scroll as a block: they return the clamped scroll offset,
@@ -322,6 +334,153 @@ fn draw_pr_detail(
     }
 
     // Render from the top with the scroll offset.
+    let avail = area.height as usize;
+    let scroll = g.scroll.min(rows.len().saturating_sub(avail));
+    for (y, line) in (area.y..).zip(rows.into_iter().skip(scroll).take(avail)) {
+        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+    }
+    scroll
+}
+
+/// The in-tab commit detail (docs/17): the `git show` output, per-line colored
+/// like a diff, scrolling as a block. Returns the clamped scroll offset.
+fn draw_commit_detail(f: &mut RenderTarget, area: Rect, g: &GitView, t: &Theme) -> usize {
+    let d = match &g.commit_detail {
+        Load::Loading => {
+            message(f, area, "loading…", t.overlay0);
+            return 0;
+        }
+        Load::Error(e) => {
+            message(f, area, &format!("git: {e}"), t.coral);
+            return 0;
+        }
+        Load::Loaded(d) => d,
+        Load::Idle => return 0,
+    };
+    let style = |line: &str| -> Style {
+        if line.starts_with("commit ") {
+            Style::new().fg(t.amber).bold()
+        } else if line.starts_with("diff --git") || line.starts_with("index ") {
+            Style::new().fg(t.subtext1).bold()
+        } else if line.starts_with("@@") {
+            Style::new().fg(t.mint)
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            Style::new().fg(t.subtext0)
+        } else if line.starts_with('+') {
+            Style::new().fg(t.green)
+        } else if line.starts_with('-') {
+            Style::new().fg(t.coral)
+        } else if line.starts_with("Author:")
+            || line.starts_with("Date:")
+            || line.starts_with("Merge:")
+            || line.starts_with("Author")
+        {
+            Style::new().fg(t.subtext0)
+        } else {
+            Style::new().fg(t.text)
+        }
+    };
+    let avail = area.height as usize;
+    let scroll = g.scroll.min(d.lines.len().saturating_sub(avail));
+    for (y, line) in (area.y..).zip(d.lines.iter().skip(scroll).take(avail)) {
+        f.render_widget(
+            Paragraph::new(Span::styled(line.clone(), style(line))),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    }
+    scroll
+}
+
+/// The in-tab issue detail (docs/17): state, author, labels, and the body,
+/// scrolling as a block. The issue-side mirror of `draw_pr_detail`. Returns the
+/// clamped scroll offset.
+fn draw_issue_detail(
+    f: &mut RenderTarget,
+    area: Rect,
+    g: &GitView,
+    cat: &Catalog,
+    t: &Theme,
+) -> usize {
+    let d: &IssueDetail = match &g.issue_detail {
+        Load::Loading => {
+            message(f, area, "loading…", t.overlay0);
+            return 0;
+        }
+        Load::Error(e) => {
+            message(f, area, &format!("gh: {e}"), t.coral);
+            return 0;
+        }
+        Load::Loaded(d) => d,
+        Load::Idle => return 0,
+    };
+    let mut rows: Vec<Line> = Vec::new();
+    rows.push(Line::from(vec![
+        Span::styled(format!("#{}  ", d.number), Style::new().fg(t.subtext0)),
+        Span::styled(d.title.clone(), Style::new().fg(t.text).bold()),
+    ]));
+    let (badge, bcol) = if d.state.eq_ignore_ascii_case("CLOSED") {
+        (cat.badge_closed, t.coral)
+    } else {
+        (cat.badge_open, t.green)
+    };
+    let updated = d.updated_at.split('T').next().unwrap_or("");
+    let mut byline = vec![
+        Span::styled(format!("[{badge}]"), Style::new().fg(bcol).bold()),
+        Span::styled(
+            format!("  {} {}", cat.detail_by, d.author),
+            Style::new().fg(t.subtext0),
+        ),
+        Span::styled(
+            format!("  · {} {}", d.comments, cat.detail_comments),
+            Style::new().fg(t.subtext0),
+        ),
+    ];
+    if !updated.is_empty() {
+        byline.push(Span::styled(
+            format!("  · {} {updated}", cat.detail_updated),
+            Style::new().fg(t.subtext0),
+        ));
+    }
+    rows.push(Line::from(byline));
+    rows.push(Line::from(""));
+    if !d.labels.is_empty() {
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("{}  ", cat.detail_labels),
+                Style::new().fg(t.subtext1).bold(),
+            ),
+            Span::styled(d.labels.join(", "), Style::new().fg(t.amber)),
+        ]));
+    }
+    if !d.assignees.is_empty() {
+        rows.push(Line::from(vec![
+            Span::styled("assignees  ", Style::new().fg(t.subtext1).bold()),
+            Span::styled(d.assignees.join(", "), Style::new().fg(t.subtext0)),
+        ]));
+    }
+    if !d.labels.is_empty() || !d.assignees.is_empty() {
+        rows.push(Line::from(""));
+    }
+    rows.push(Line::from(Span::styled(
+        cat.detail_description.to_string(),
+        Style::new().fg(t.subtext1).bold(),
+    )));
+    if d.body.trim().is_empty() {
+        rows.push(Line::from(Span::styled(
+            format!("   {}", cat.detail_no_description),
+            Style::new().fg(t.overlay0),
+        )));
+    } else {
+        let wrap_w = area.width.saturating_sub(6) as usize;
+        for raw in d.body.replace('\r', "").lines() {
+            for wl in wrap(raw, wrap_w) {
+                rows.push(Line::from(Span::styled(
+                    format!("   {wl}"),
+                    Style::new().fg(t.subtext0),
+                )));
+            }
+        }
+    }
     let avail = area.height as usize;
     let scroll = g.scroll.min(rows.len().saturating_sub(avail));
     for (y, line) in (area.y..).zip(rows.into_iter().skip(scroll).take(avail)) {
@@ -634,15 +793,39 @@ fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: 
         f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
         return;
     }
+    // The commit detail view owns the footer while it's open (docs/17). The push
+    // hint appears only while the commit hasn't reached the remote.
+    if g.open_commit.is_some() {
+        let unpushed = matches!(&g.commit_detail, Load::Loaded(d) if !d.pushed);
+        let mut pairs = vec![("esc", cat.act_back), ("j/k", cat.act_scroll)];
+        if unpushed {
+            pairs.push(("p", cat.act_push));
+        }
+        pairs.push(("o", cat.act_open));
+        f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
+        return;
+    }
+    // The issue detail view owns the footer while it's open (docs/17).
+    if g.open_issue.is_some() {
+        let pairs = [
+            ("esc", cat.act_back),
+            ("j/k", cat.act_scroll),
+            ("o", cat.act_open),
+        ];
+        f.render_widget(Paragraph::new(hint_line(&pairs, t)), area);
+        return;
+    }
     // Per-section hints as (key, label) pairs — the shared `hint_line` colors
     // the keys with the theme accent and the labels in light text.
     let scope = scope_label(g.scope, cat);
+    // Current open/closed/all filter, shown on the `s` hint (like `m` shows scope).
+    let state = g.state_filter.gh_arg();
     let pairs: Vec<(&str, &str)> = match g.section {
         Section::Prs => vec![
             ("j/k", cat.act_move),
             ("⏎", cat.act_details),
-            ("d", cat.act_diff),
             ("o", cat.act_open),
+            ("s", state),
             ("m", scope),
             ("c", cat.act_new),
             ("/", cat.act_filter),
@@ -652,9 +835,9 @@ fn draw_footer(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: 
             ("j/k", cat.act_move),
             ("⏎", cat.act_view),
             ("o", cat.act_open),
+            ("s", state),
             ("m", scope),
             ("/", cat.act_filter),
-            ("r", cat.act_refresh),
             ("q", cat.act_close),
         ],
         Section::Branches => vec![

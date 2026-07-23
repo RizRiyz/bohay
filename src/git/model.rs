@@ -141,6 +141,21 @@ pub struct Issue {
     pub repo: String,
 }
 
+/// Full detail for one issue — the in-tab issue detail view (docs/17), the
+/// issue-side mirror of [`PrDetail`]. Fetched via `gh issue view <n> --json …`.
+#[derive(Clone)]
+pub struct IssueDetail {
+    pub number: u64,
+    pub title: String,
+    pub state: String, // OPEN / CLOSED
+    pub author: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub comments: u64,
+    pub updated_at: String, // ISO timestamp (we show the date)
+}
+
 /// A commit in the log / flow view.
 #[derive(Clone)]
 pub struct Commit {
@@ -150,6 +165,18 @@ pub struct Commit {
     pub when: String,  // relative date
     pub refs: String,  // decorations (HEAD -> main, tag: …)
     pub graph: String, // graph prefix from `git log --graph`, if any
+}
+
+/// The `git show` output for one commit (docs/17): the header, stat, and patch
+/// split into lines for scrolling and per-line diff coloring in the git tab's
+/// in-tab commit-detail view. No pane or shell involved. The sha is tracked by
+/// the view's `open_commit`, so it isn't repeated here.
+#[derive(Clone)]
+pub struct CommitShow {
+    pub lines: Vec<String>,
+    /// Whether any remote branch already contains this commit. When false, the
+    /// detail view offers a `push` action (docs/17).
+    pub pushed: bool,
 }
 
 /// A git worktree — one checkout of a repo (docs/18 WT). `is_main` marks the

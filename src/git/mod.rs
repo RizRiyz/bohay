@@ -15,10 +15,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use ratatui::layout::Rect;
+
 pub use github::GhState;
 pub use model::Checks;
 pub use model::WorktreeMembership;
-use model::{BranchInfo, Commit, Issue, PrDetail, PullRequest, RepoInfo, RepoStatus};
+use model::{
+    BranchInfo, Commit, CommitShow, Issue, IssueDetail, PrDetail, PullRequest, RepoInfo, RepoStatus,
+};
 
 /// Which section of the git tab is shown.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,6 +79,34 @@ impl Scope {
     }
 }
 
+/// Which PRs/issues to list by state — cycled with `s` in the git tab (docs/17).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum StateFilter {
+    #[default]
+    Open,
+    Closed,
+    All,
+}
+
+impl StateFilter {
+    /// Open → Closed → All → Open.
+    pub fn next(self) -> StateFilter {
+        match self {
+            StateFilter::Open => StateFilter::Closed,
+            StateFilter::Closed => StateFilter::All,
+            StateFilter::All => StateFilter::Open,
+        }
+    }
+    /// The `gh … --state <v>` value.
+    pub fn gh_arg(self) -> &'static str {
+        match self {
+            StateFilter::Open => "open",
+            StateFilter::Closed => "closed",
+            StateFilter::All => "all",
+        }
+    }
+}
+
 /// Load state of a fetched section.
 #[derive(Clone, Default)]
 pub enum Load<T> {
@@ -96,6 +128,10 @@ pub enum GitPayload {
     Issues(Result<Vec<Issue>, String>),
     // Boxed: `PrDetail` is large and would bloat every `AppEvent`.
     PrDetail(Box<Result<PrDetail, String>>),
+    // The `git show` output for a clicked commit (docs/17), shown in-tab.
+    CommitDetail(Box<Result<CommitShow, String>>),
+    // Full detail for a clicked issue (docs/17), shown in-tab.
+    IssueDetail(Box<Result<IssueDetail, String>>),
 }
 
 fn next_id() -> u64 {
@@ -116,6 +152,8 @@ pub struct GitView {
     pub filter: String,
     pub filtering: bool,
     pub scope: Scope,
+    /// Open/Closed/All filter for the PRs and Issues lists (docs/17).
+    pub state_filter: StateFilter,
     pub gh: GhState,
     pub status: Load<RepoStatus>,
     pub info: Load<RepoInfo>,
@@ -128,6 +166,17 @@ pub struct GitView {
     /// The open PR detail panel (`Some(number)` ⇒ the panel is showing that PR).
     pub open_pr: Option<u64>,
     pub detail: Load<PrDetail>,
+    /// The open commit-detail view (`Some(sha)` ⇒ showing that commit's `git
+    /// show`, in-tab, back with esc). Mirrors `open_pr` (docs/17).
+    pub open_commit: Option<String>,
+    pub commit_detail: Load<CommitShow>,
+    /// The open issue-detail view (`Some(number)` ⇒ showing that issue in-tab,
+    /// back with esc). Mirrors `open_pr` (docs/17).
+    pub open_issue: Option<u64>,
+    pub issue_detail: Load<IssueDetail>,
+    /// The list body rect from the last render, so a click maps to the row under
+    /// it. Transient (GitView is rebuilt on restore, never serialized).
+    pub list_area: Rect,
 }
 
 impl GitView {
@@ -148,6 +197,7 @@ impl GitView {
             filter: String::new(),
             filtering: false,
             scope: Scope::ThisRepo,
+            state_filter: StateFilter::Open,
             gh: GhState::Missing,
             status: Load::Loading,
             info: Load::Loading,
@@ -158,6 +208,11 @@ impl GitView {
             prev_pr_checks: HashMap::new(),
             open_pr: None,
             detail: Load::Idle,
+            open_commit: None,
+            commit_detail: Load::Idle,
+            open_issue: None,
+            issue_detail: Load::Idle,
+            list_area: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -186,6 +241,18 @@ impl GitView {
             GitPayload::PrDetail(r) => {
                 if self.open_pr.is_some() {
                     self.detail = into_load(*r);
+                }
+            }
+            // Only apply if the commit view is still open (it may have closed
+            // while `git show` was running).
+            GitPayload::CommitDetail(r) => {
+                if self.open_commit.is_some() {
+                    self.commit_detail = into_load(*r);
+                }
+            }
+            GitPayload::IssueDetail(r) => {
+                if self.open_issue.is_some() {
+                    self.issue_detail = into_load(*r);
                 }
             }
         }

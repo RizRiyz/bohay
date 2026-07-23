@@ -697,6 +697,12 @@ impl App {
                 self.git_click_section(s);
                 return;
             }
+            // Clicking a list row opens its detail in-tab (docs/17) — commit `git
+            // show`, PR panel, or issue detail. `esc` goes back to the list.
+            if let Some(idx) = self.git_list_row_at(m.column, m.row) {
+                self.git_click_row(idx);
+                return;
+            }
         }
         // Clicking a task row on the board selects it (docs/22, ORCH-7).
         if self.active_is_orch() {
