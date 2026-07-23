@@ -24,6 +24,19 @@ pub struct ModuleMenuAction {
 }
 
 impl App {
+    /// Resolve a module `spec` (its id, or the `owner/repo[/sub]` shorthand it
+    /// was installed with) to its canonical id.
+    ///
+    /// Everything downstream keys off the real id: the registry, the config and
+    /// state directories, the startup-hook set. Resolving once at the entry
+    /// point keeps `owner/repo` from leaking into any of them.
+    pub fn module_id_for(&self, spec: &str) -> Result<String, String> {
+        self.modules
+            .find(spec)
+            .map(|m| m.id.clone())
+            .ok_or_else(|| format!("no module {spec}"))
+    }
+
     /// Register a module dir, recording its install `source` (a git install
     /// passes `owner/repo@<sha>`; a local link passes `None`).
     pub fn module_link_with(
@@ -57,7 +70,8 @@ impl App {
 
     /// Uninstall a git-installed module: remove it from the registry **and**
     /// delete its managed checkout (guarded — refuses for locally-linked modules).
-    pub fn module_uninstall(&mut self, id: &str) -> Result<(), String> {
+    pub fn module_uninstall(&mut self, spec: &str) -> Result<(), String> {
+        let id = &self.module_id_for(spec)?;
         let root = self
             .modules
             .find(id)
@@ -69,7 +83,7 @@ impl App {
             ));
         }
         let dock_ids = self.module_dock_ids(id);
-        self.modules.modules.retain(|m| m.id != id);
+        self.modules.modules.retain(|m| &m.id != id);
         registry::save(&self.modules);
         let _ = std::fs::remove_dir_all(&root);
         self.remove_module_docks(&dock_ids);
@@ -77,10 +91,11 @@ impl App {
     }
 
     /// Remove a module from the registry (does not touch its files).
-    pub fn module_unlink(&mut self, id: &str) -> Result<(), String> {
+    pub fn module_unlink(&mut self, spec: &str) -> Result<(), String> {
+        let id = &self.module_id_for(spec)?;
         let dock_ids = self.module_dock_ids(id);
         let before = self.modules.modules.len();
-        self.modules.modules.retain(|m| m.id != id);
+        self.modules.modules.retain(|m| &m.id != id);
         if self.modules.modules.len() == before {
             return Err(format!("no module {id}"));
         }
@@ -89,7 +104,8 @@ impl App {
         Ok(())
     }
 
-    pub fn module_set_enabled(&mut self, id: &str, on: bool) -> Result<(), String> {
+    pub fn module_set_enabled(&mut self, spec: &str, on: bool) -> Result<(), String> {
+        let id = &self.module_id_for(spec)?;
         let m = self
             .modules
             .find_mut(id)
@@ -126,11 +142,9 @@ impl App {
     }
 
     /// Ensure (and return) a module's config dir.
-    pub fn module_config_dir(&self, id: &str) -> Result<std::path::PathBuf, String> {
-        if self.modules.find(id).is_none() {
-            return Err(format!("no module {id}"));
-        }
-        let dir = paths::config_dir(id);
+    pub fn module_config_dir(&self, spec: &str) -> Result<std::path::PathBuf, String> {
+        let id = self.module_id_for(spec)?;
+        let dir = paths::config_dir(&id);
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         Ok(dir)
@@ -190,21 +204,21 @@ impl App {
     // ── settings (docs/13 §3.6) ──────────────────────────────────────────────
 
     /// A module's effective settings (manifest defaults under stored values).
-    pub fn module_settings(&self, id: &str) -> Result<serde_json::Map<String, Value>, String> {
+    pub fn module_settings(&self, spec: &str) -> Result<serde_json::Map<String, Value>, String> {
         let m = self
             .modules
-            .find(id)
-            .ok_or_else(|| format!("no module {id}"))?;
-        Ok(settings::effective(&m.manifest, id))
+            .find(spec)
+            .ok_or_else(|| format!("no module {spec}"))?;
+        Ok(settings::effective(&m.manifest, &m.id))
     }
 
     /// Set one declared setting, validated against its spec.
-    pub fn module_set_setting(&mut self, id: &str, key: &str, v: Value) -> Result<Value, String> {
+    pub fn module_set_setting(&mut self, spec: &str, key: &str, v: Value) -> Result<Value, String> {
         let m = self
             .modules
-            .find(id)
-            .ok_or_else(|| format!("no module {id}"))?;
-        settings::set(&m.manifest, id, key, v)
+            .find(spec)
+            .ok_or_else(|| format!("no module {spec}"))?;
+        settings::set(&m.manifest, &m.id, key, v)
     }
 
     // ── startup hooks (docs/13 §3.7) ─────────────────────────────────────────
@@ -1450,6 +1464,115 @@ secret = true
     }
 
     #[test]
+    fn modules_resolve_by_owner_repo_as_well_as_id() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modspec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        let dir = home.join("spec-mod");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bohay-module.toml"),
+            r#"
+id = "example.agent-ping"
+name = "Ping"
+version = "0.1.0"
+min_bohay_version = "0.1.0"
+
+[[settings]]
+key = "token"
+title = "Token"
+type = "string"
+"#,
+        )
+        .unwrap();
+        // Registered as if installed from GitHub: source is `<spec>@<sha>`.
+        app.module_link_with(&dir, true, Some("Riz/bohay-agent-ping@abc123".into()))
+            .unwrap();
+
+        // Both names resolve to the same module.
+        assert_eq!(
+            app.module_id_for("example.agent-ping").unwrap(),
+            "example.agent-ping"
+        );
+        assert_eq!(
+            app.module_id_for("Riz/bohay-agent-ping").unwrap(),
+            "example.agent-ping"
+        );
+        // GitHub owner/repo is case-insensitive.
+        assert_eq!(
+            app.module_id_for("riz/BOHAY-agent-ping").unwrap(),
+            "example.agent-ping"
+        );
+        // A trailing slash is forgiven.
+        assert!(app.module_id_for("Riz/bohay-agent-ping/").is_ok());
+        // Something that matches neither is still an error.
+        assert!(app.module_id_for("someone/else").is_err());
+        assert!(app.module_id_for("no.such.module").is_err());
+
+        // Settings and the config dir key off the *canonical* id either way, so
+        // `owner/repo` can't create a second directory beside the real one.
+        app.module_set_setting("Riz/bohay-agent-ping", "token", "t1".into())
+            .unwrap();
+        assert_eq!(
+            app.module_settings("example.agent-ping")
+                .unwrap()
+                .get("token")
+                .unwrap(),
+            "t1"
+        );
+        assert_eq!(
+            app.module_config_dir("Riz/bohay-agent-ping").unwrap(),
+            app.module_config_dir("example.agent-ping").unwrap()
+        );
+
+        // Enable/disable resolves too.
+        app.module_set_enabled("Riz/bohay-agent-ping", false)
+            .unwrap();
+        assert!(!app.modules.find("example.agent-ping").unwrap().enabled);
+        app.module_set_enabled("Riz/bohay-agent-ping", true)
+            .unwrap();
+
+        // And unlink by owner/repo actually removes it, rather than reporting
+        // success while the module stays registered.
+        app.module_unlink("Riz/bohay-agent-ping").unwrap();
+        assert!(app.modules.find("example.agent-ping").is_none());
+        assert!(app.module_unlink("Riz/bohay-agent-ping").is_err());
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_linked_module_has_no_source_to_resolve_by() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("bohay-modnosrc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("BOHAY_HOME", &home);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        link(
+            &mut app,
+            &home,
+            "local-mod",
+            "id = \"you.local\"\nname = \"Local\"\nversion = \"0.1.0\"\nmin_bohay_version = \"0.1.0\"\n",
+        );
+
+        // A locally linked module was never installed from anywhere, so only its
+        // id names it. This must not panic or match some other module.
+        assert!(app.module_id_for("you.local").is_ok());
+        assert!(app.module_id_for("someone/you.local").is_err());
+
+        std::env::remove_var("BOHAY_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn git_install_builds_and_uninstall_removes_checkout() {
         use std::process::Command;
         let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1523,7 +1646,11 @@ command = ["echo", "hi"]
         app.module_link_with(&installed.root, true, Some(installed.source.clone()))
             .unwrap();
         assert!(app.modules.find("you.installed").is_some());
-        app.module_uninstall("you.installed").unwrap();
+        // Uninstall by the *source* it was installed with, not its id: that is
+        // the name the user typed, so it is the one they will remember.
+        let spec = installed.source.rsplit_once('@').unwrap().0.to_string();
+        assert!(app.modules.find(&spec).is_some(), "resolvable by source");
+        app.module_uninstall(&spec).unwrap();
         assert!(app.modules.find("you.installed").is_none());
         assert!(!installed.root.exists(), "managed checkout removed");
 

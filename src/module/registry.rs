@@ -42,12 +42,45 @@ impl InstalledModule {
 }
 
 impl ModuleRegistry {
-    pub fn find(&self, id: &str) -> Option<&InstalledModule> {
-        self.modules.iter().find(|m| m.id == id)
+    /// Resolve a module by its **id** (`you.git-status`) or by the
+    /// `owner/repo[/sub]` shorthand it was installed with, so you can remove a
+    /// module with the same name you typed to install it.
+    ///
+    /// The two namespaces can't collide: a module id may not contain `/`
+    /// (see `valid_module_id`), so an id is tried first and a spec containing a
+    /// slash can only ever be a source.
+    pub fn find(&self, spec: &str) -> Option<&InstalledModule> {
+        match self.index_of(spec) {
+            Some(i) => self.modules.get(i),
+            None => None,
+        }
     }
 
-    pub fn find_mut(&mut self, id: &str) -> Option<&mut InstalledModule> {
-        self.modules.iter_mut().find(|m| m.id == id)
+    pub fn find_mut(&mut self, spec: &str) -> Option<&mut InstalledModule> {
+        match self.index_of(spec) {
+            Some(i) => self.modules.get_mut(i),
+            None => None,
+        }
+    }
+
+    /// Index of the module `spec` names, by id then by install source.
+    fn index_of(&self, spec: &str) -> Option<usize> {
+        if let Some(i) = self.modules.iter().position(|m| m.id == spec) {
+            return Some(i);
+        }
+        if !spec.contains('/') {
+            return None;
+        }
+        let want = spec.trim_end_matches('/');
+        self.modules.iter().position(|m| {
+            m.source.as_deref().is_some_and(|s| {
+                // Sources are stored as `<spec>@<sha>`; compare the spec half.
+                // `rsplit_once` so an ssh-style URL keeps its own `@`.
+                let base = s.rsplit_once('@').map_or(s, |(b, _)| b);
+                // GitHub owner/repo is case-insensitive.
+                base.eq_ignore_ascii_case(want)
+            })
+        })
     }
 
     /// Re-read each manifest from disk: valid → refresh cached fields (keeping

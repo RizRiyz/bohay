@@ -68,6 +68,7 @@ modules (extensions):
   module unlink <id>         remove a module from the registry
   module uninstall <id>      unlink + delete a git-installed module's checkout
   module enable <id> | disable <id>
+                             <id> is a module id or the owner/repo it came from
   module actions             list every action across modules
   module run <id> <action>   invoke a module action (captures + logs output)
   module pane open <id> <entrypoint> [--placement split|overlay|tab]

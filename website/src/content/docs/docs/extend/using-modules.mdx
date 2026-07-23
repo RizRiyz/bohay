@@ -109,6 +109,22 @@ bohay module uninstall <id>      # unregister + delete a managed checkout
 bohay module unlink <id>         # unregister only, leave the files alone
 ```
 
+:::tip[Name it however you remember it]
+Anywhere a command takes `<id>`, you can pass either the module's id or the
+`owner/repo` you installed it from. You should not have to remember that
+`RizRiyz/bohay-agent-ping` calls itself `example.agent-ping` just to remove it:
+
+```sh
+bohay module uninstall RizRiyz/bohay-agent-ping   # the name you installed with
+bohay module uninstall example.agent-ping         # the module's own id
+```
+
+The two can never collide, because a module id may not contain a slash. Owner
+and repo are matched case-insensitively, like GitHub does. A module you linked
+from a local directory was never installed from anywhere, so only its id names
+it.
+:::
+
 Everything here also works from **Settings → Modules**, where a click toggles a
 module on or off.
 
