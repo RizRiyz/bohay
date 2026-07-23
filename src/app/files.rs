@@ -1,11 +1,14 @@
 //! App-layer file-tree actions (docs/38 FILE-1): keeping the tree pointed at the
 //! active node, scheduling directory reads off the loop, and opening a file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app::{App, DockKind, Mode, Tab, ViewKind};
+use crate::app::{
+    App, DockKind, FileMenu, FileMenuItem, FilePrompt, FilePromptKind, Mode, Tab, ViewKind,
+    FILE_NAME_MAX,
+};
 use crate::event::AppEvent;
 use crate::files::FileView;
 use crate::ids::PaneId;
@@ -35,6 +38,27 @@ impl App {
         let cwd = self.ws().cwd.clone();
         self.file_tree.set_root(cwd);
         self.load_pending_dirs();
+        self.refresh_git_status();
+    }
+
+    /// Refresh the FILES-dock git tint (docs/38 FILE-6) off the loop, at most
+    /// every 2s and never piling up. `git status` can be slow on a huge repo, so
+    /// it runs on a worker thread and posts `FileGitStatus` back.
+    fn refresh_git_status(&mut self) {
+        if self.git_status_inflight
+            || std::time::Instant::now().duration_since(self.last_git_status_at)
+                < std::time::Duration::from_secs(2)
+        {
+            return;
+        }
+        self.last_git_status_at = std::time::Instant::now();
+        self.git_status_inflight = true;
+        let root = self.file_tree.root().to_path_buf();
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let map = crate::git::local::tree_status(&root);
+            let _ = tx.send(AppEvent::FileGitStatus(map));
+        });
     }
 
     /// Resolve a possibly-relative path (from the API/CLI) against the active
@@ -111,6 +135,204 @@ impl App {
                 let _ = tx.send(AppEvent::DirRead { path, entries });
             });
         }
+    }
+
+    // ── FILES-dock right-click CRUD (docs/38 FILE-6) ─────────────────────────
+
+    /// Open the file context menu for visible row `index`, anchored at the cursor.
+    pub fn open_file_menu(&mut self, index: usize, col: u16, row: u16) {
+        if let Some(r) = self.file_tree.visible_rows().get(index).cloned() {
+            self.file_menu = Some(FileMenu {
+                path: r.path,
+                is_dir: r.is_dir,
+                anchor: (col, row),
+                items: Vec::new(),
+            });
+        }
+    }
+
+    /// A click inside the open file menu: run the hit item, else dismiss.
+    pub fn file_menu_click(&mut self, col: u16, row: u16) {
+        let hit = self.file_menu.as_ref().and_then(|m| {
+            m.items
+                .iter()
+                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .map(|(it, _)| *it)
+        });
+        match hit {
+            Some(FileMenuItem::Divider) => {}
+            Some(it) => self.file_menu_action(it),
+            None => self.file_menu = None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn file_menu_action_pub(&mut self, item: FileMenuItem) {
+        self.file_menu_action(item);
+    }
+    fn file_menu_action(&mut self, item: FileMenuItem) {
+        let Some(menu) = self.file_menu.take() else {
+            return;
+        };
+        // New entries land *inside* a folder, or beside a clicked file.
+        let dir = if menu.is_dir {
+            menu.path.clone()
+        } else {
+            menu.path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| menu.path.clone())
+        };
+        let prompt = |kind, dir, target, buffer| {
+            Some(FilePrompt {
+                kind,
+                dir,
+                target,
+                buffer,
+                error: None,
+            })
+        };
+        match item {
+            FileMenuItem::NewFile => {
+                self.file_prompt = prompt(FilePromptKind::NewFile, dir, None, String::new())
+            }
+            FileMenuItem::NewFolder => {
+                self.file_prompt = prompt(FilePromptKind::NewFolder, dir, None, String::new())
+            }
+            FileMenuItem::Rename => {
+                let parent = menu
+                    .path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| menu.path.clone());
+                let name = menu
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.file_prompt = prompt(
+                    FilePromptKind::Rename,
+                    parent,
+                    Some(menu.path.clone()),
+                    name,
+                )
+            }
+            FileMenuItem::CopyPath => {
+                self.pending_clipboard = Some(menu.path.to_string_lossy().into_owned());
+                self.show_toast("copied path");
+            }
+            FileMenuItem::Delete => self.file_delete = Some(menu.path),
+            FileMenuItem::Divider => {}
+        }
+    }
+
+    /// Keys for the create/rename prompt: type the name, `⏎` commit, `Esc` cancel.
+    pub fn file_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.file_prompt = None,
+            KeyCode::Enter => self.commit_file_prompt(),
+            KeyCode::Backspace => {
+                if let Some(p) = self.file_prompt.as_mut() {
+                    p.buffer.pop();
+                    p.error = None;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(p) = self.file_prompt.as_mut() {
+                    if p.buffer.chars().count() < FILE_NAME_MAX {
+                        p.buffer.push(c);
+                        p.error = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn commit_file_prompt(&mut self) {
+        let Some(p) = self.file_prompt.as_ref() else {
+            return;
+        };
+        let name = p.buffer.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        // No path separators or `..` — a name, not a path.
+        if name.contains(['/', '\\']) || name == ".." || name == "." {
+            if let Some(pr) = self.file_prompt.as_mut() {
+                pr.error = Some("name can't contain a path".into());
+            }
+            return;
+        }
+        let dest = p.dir.join(&name);
+        let (kind, target) = (p.kind, p.target.clone());
+        let result = match kind {
+            FilePromptKind::NewFile => {
+                if dest.exists() {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "already exists",
+                    ))
+                } else {
+                    std::fs::write(&dest, b"")
+                }
+            }
+            FilePromptKind::NewFolder => std::fs::create_dir(&dest),
+            FilePromptKind::Rename => std::fs::rename(target.as_ref().unwrap(), &dest),
+        };
+        match result {
+            Ok(()) => {
+                self.file_prompt = None;
+                self.after_fs_change(&dest);
+                self.show_toast(match kind {
+                    FilePromptKind::Rename => "renamed",
+                    _ => "created",
+                });
+            }
+            Err(e) => {
+                if let Some(pr) = self.file_prompt.as_mut() {
+                    pr.error = Some(e.to_string());
+                }
+            }
+        }
+    }
+
+    /// Keys for the delete-confirm modal: `y`/`⏎` delete, anything else cancels.
+    pub fn file_delete_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => self.confirm_delete(),
+            _ => self.file_delete = None,
+        }
+    }
+
+    fn confirm_delete(&mut self) {
+        let Some(path) = self.file_delete.take() else {
+            return;
+        };
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => {
+                self.after_fs_change(&path);
+                self.show_toast("deleted");
+            }
+            Err(e) => self.show_toast(format!("delete failed: {e}")),
+        }
+    }
+
+    /// After a create/rename/delete: re-read the tree, reveal the path, re-tint.
+    fn after_fs_change(&mut self, path: &Path) {
+        self.file_tree.invalidate();
+        self.load_pending_dirs();
+        self.file_tree.reveal(path);
+        // Force a git re-tint on the next tick, not up to 2s later.
+        self.last_git_status_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap_or_else(std::time::Instant::now);
+        self.refresh_git_status();
     }
 
     /// The leaf id of an open view already showing `path`, if any.
@@ -693,6 +915,149 @@ mod tests {
                 .any(|r| r.name == "inner.rs"),
             "the folder's contents loaded right after the click"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// The right-click menu creates, renames, and deletes on disk (docs/38 FILE-6).
+    #[test]
+    fn file_menu_crud_creates_renames_deletes() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let _env = crate::persist::test_env("file-crud");
+        let root = std::env::temp_dir().join(format!("bohay-crud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/old.rs"), b"x").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 30, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        // drain root read + expand src
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+        let src_idx = app
+            .file_tree
+            .visible_rows()
+            .iter()
+            .position(|r| r.name == "src")
+            .unwrap();
+        app.file_row_activate(src_idx, OpenTarget::Tab); // expand
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+
+        let typ = |app: &mut App, s: &str| {
+            for c in s.chars() {
+                app.file_prompt_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+        };
+
+        // New file inside `src`.
+        let src_idx = app
+            .file_tree
+            .visible_rows()
+            .iter()
+            .position(|r| r.name == "src")
+            .unwrap();
+        app.open_file_menu(src_idx, 5, 5);
+        app.file_menu_action_pub(crate::app::FileMenuItem::NewFile);
+        typ(&mut app, "created.rs");
+        app.file_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            root.join("src/created.rs").exists(),
+            "new file created on disk"
+        );
+
+        // Rename old.rs -> new.rs.
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+        let old_idx = app
+            .file_tree
+            .visible_rows()
+            .iter()
+            .position(|r| r.name == "old.rs")
+            .unwrap();
+        app.open_file_menu(old_idx, 5, 6);
+        app.file_menu_action_pub(crate::app::FileMenuItem::Rename);
+        // clear the pre-filled name then type the new one
+        for _ in 0..20 {
+            app.file_prompt_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        typ(&mut app, "new.rs");
+        app.file_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            root.join("src/new.rs").exists() && !root.join("src/old.rs").exists(),
+            "renamed"
+        );
+
+        // Delete created.rs.
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+        let c_idx = app
+            .file_tree
+            .visible_rows()
+            .iter()
+            .position(|r| r.name == "created.rs")
+            .unwrap();
+        app.open_file_menu(c_idx, 5, 7);
+        app.file_menu_action_pub(crate::app::FileMenuItem::Delete);
+        app.file_delete_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(!root.join("src/created.rs").exists(), "deleted");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// Delete requires the confirm modal: choosing Delete does NOT remove the
+    /// file, cancelling leaves it, and only `y`/⏎ actually deletes.
+    #[test]
+    fn delete_needs_confirmation() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let _env = crate::persist::test_env("file-del-guard");
+        let root = std::env::temp_dir().join(format!("bohay-dg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("keep.rs");
+        std::fs::write(&file, b"x").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        while let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            app.handle_event(ev);
+        }
+        let idx = app
+            .file_tree
+            .visible_rows()
+            .iter()
+            .position(|r| r.name == "keep.rs")
+            .unwrap();
+
+        // Choosing Delete arms the confirm modal but does NOT touch disk.
+        app.open_file_menu(idx, 5, 5);
+        app.file_menu_action_pub(crate::app::FileMenuItem::Delete);
+        assert!(app.file_delete.is_some(), "the confirm modal is armed");
+        assert!(
+            file.exists(),
+            "nothing deleted yet — waiting on confirmation"
+        );
+
+        // Cancelling (Esc) leaves the file and closes the modal.
+        app.file_delete_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            app.file_delete.is_none() && file.exists(),
+            "cancel keeps the file"
+        );
+
+        // Only y/Enter deletes.
+        app.open_file_menu(idx, 5, 5);
+        app.file_menu_action_pub(crate::app::FileMenuItem::Delete);
+        app.file_delete_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(!file.exists(), "confirmed delete removes it");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

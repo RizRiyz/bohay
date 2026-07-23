@@ -2,7 +2,7 @@
 //! at the click point.
 
 use super::*;
-use crate::app::{AgentMenuItem, ModuleMenuAction, PaneMenuItem, WsMenuItem};
+use crate::app::{AgentMenuItem, FileMenuItem, ModuleMenuAction, PaneMenuItem, WsMenuItem};
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
 
@@ -210,5 +210,36 @@ fn cap_first(s: &str) -> String {
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
         None => String::new(),
+    }
+}
+
+pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
+    let Some(menu) = app.file_menu.as_ref() else {
+        return;
+    };
+    let anchor = menu.anchor;
+    let items: Vec<FileMenuItem> = FileMenuItem::ALL.to_vec();
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|it| MenuRow {
+            text: file_label(*it).to_string(),
+            divider: matches!(it, FileMenuItem::Divider),
+            destructive: matches!(it, FileMenuItem::Delete),
+        })
+        .collect();
+    let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    if let Some(menu) = app.file_menu.as_mut() {
+        menu.items = items.into_iter().zip(rects).collect();
+    }
+}
+
+fn file_label(it: FileMenuItem) -> &'static str {
+    match it {
+        FileMenuItem::NewFile => "New file",
+        FileMenuItem::NewFolder => "New folder",
+        FileMenuItem::Rename => "Rename",
+        FileMenuItem::CopyPath => "Copy path",
+        FileMenuItem::Divider => "",
+        FileMenuItem::Delete => "Delete",
     }
 }

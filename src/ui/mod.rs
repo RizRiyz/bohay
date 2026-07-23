@@ -337,6 +337,26 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     if app.ws_menu.is_some() {
         menu::draw_ws_menu(f, area, app, cat, &t);
     }
+    // The FILES-dock context menu + its create/rename/delete modals (docs/38).
+    if app.file_menu.is_some() {
+        menu::draw_file_menu(f, area, app, &t);
+    }
+    if let Some(p) = &app.file_prompt {
+        let (title, buf, err) = (
+            files::file_prompt_title(p),
+            p.buffer.clone(),
+            p.error.clone(),
+        );
+        let (c, x) =
+            picker::draw_rename_titled(f, area, title, &buf, err.as_deref(), hover, cat, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+    }
+    if let Some(path) = &app.file_delete {
+        let (c, x) = files::draw_delete_confirm(f, area, path, hover, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+    }
     // The board's new-task form (docs/22 ORCH-7).
     if let Some(form) = &app.orch_form {
         board::draw_form(f, area, form, cat, &t);
@@ -370,6 +390,9 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         || app.ws_menu.is_some()
         || app.pane_menu.is_some()
         || app.agent_menu.is_some()
+        || app.file_menu.is_some()
+        || app.file_prompt.is_some()
+        || app.file_delete.is_some()
         || app.orch_form.is_some()
         || app.orch_start.is_some()
         || app.orch_detail.is_some()

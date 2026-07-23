@@ -65,6 +65,12 @@ impl App {
                 self.file_tree.apply_dir(path, entries);
                 true
             }
+            AppEvent::FileGitStatus(map) => {
+                self.git_status_inflight = false;
+                let changed = self.file_git_status != map;
+                self.file_git_status = map;
+                changed
+            }
             AppEvent::FileRead { id, load } => {
                 if let Some(crate::app::ViewKind::File(v)) = self.views.get_mut(&id) {
                     v.apply(load);
@@ -220,6 +226,26 @@ impl App {
             }
             return;
         }
+        // FILES-dock menu owns the mouse while open (docs/38); its modals swallow
+        // clicks (they own the screen; use the keyboard).
+        if self.file_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.file_menu_click(m.column, m.row);
+            }
+            return;
+        }
+        if self.file_prompt.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.file_prompt_key(k);
+            }
+            return;
+        }
+        if self.file_delete.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.file_delete_key(k);
+            }
+            return;
+        }
         // Text-input modals: only the ⏎/esc footer buttons respond to the mouse;
         // any other click is swallowed (the centered modal owns the screen).
         if self.worktree_prompt.is_some() {
@@ -258,6 +284,8 @@ impl App {
                 self.open_agent_menu(AgentTarget::Live(*id), c, r); // live agent → Close
             } else if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_agent_menu(AgentTarget::Session(*i), c, r); // session → Resume/Close
+            } else if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_file_menu(*i, c, r); // FILES-dock row → new/rename/delete (docs/38)
             } else if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_pane_menu(*id, c, r); // no-op on a git/orch dashboard tab
             }
@@ -1056,6 +1084,21 @@ impl App {
         // The AGENTS-list context menu (docs/28) captures all input while open.
         if self.agent_menu.is_some() {
             self.handle_agent_menu_key(key);
+            return true;
+        }
+        // FILES-dock menu / prompt / delete-confirm capture input while open (docs/38).
+        if self.file_prompt.is_some() {
+            self.file_prompt_key(key);
+            return true;
+        }
+        if self.file_delete.is_some() {
+            self.file_delete_key(key);
+            return true;
+        }
+        if self.file_menu.is_some() {
+            if key.code == KeyCode::Esc {
+                self.file_menu = None;
+            }
             return true;
         }
         if self.ws_rename.is_some() {

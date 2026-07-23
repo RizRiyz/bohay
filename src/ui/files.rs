@@ -82,15 +82,26 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
             label.push_str(" …");
         }
 
-        let fg = if row.is_dir { t.subtext1 } else { t.subtext0 };
-        let mut style = Style::new().fg(fg);
+        // Git tint (docs/38 FILE-6): color the name by working-tree status, and
+        // badge changed files with a letter on the right.
+        let git = app.file_git_status.get(&row.path).copied();
+        let base_fg = if row.is_dir { t.subtext1 } else { t.subtext0 };
+        let git_fg = git.and_then(|s| git_color(s, t));
+        let mut style = Style::new().fg(git_fg.unwrap_or(base_fg));
         if row.is_dir {
             style = style.bold();
         }
         if hovered {
             style = style.fg(t.accent);
         }
-        line_at(f, y, Line::from(Span::styled(label, style)));
+        let mut spans = vec![Span::styled(label, style)];
+        if let Some(badge) = git.map(|s| s.badge()).filter(|b| !b.is_empty()) {
+            spans.push(Span::styled(
+                format!(" {badge}"),
+                Style::new().fg(git_fg.unwrap_or(t.overlay1)),
+            ));
+        }
+        line_at(f, y, Line::from(spans));
         app.file_tree_rects.push((i, rect));
     }
 }
@@ -290,4 +301,112 @@ fn search_line<'a>(v: &FileView, line_idx: usize, line: &'a str, t: &Theme) -> L
         spans.push(Span::styled(seg, Style::new().fg(t.text)));
     }
     Line::from(spans)
+}
+
+/// The tint color for a git working-tree status in the FILES dock (docs/38).
+fn git_color(s: crate::git::local::FileStatus, t: &Theme) -> Option<ratatui::style::Color> {
+    use crate::git::local::FileStatus::*;
+    Some(match s {
+        Modified | DirDirty => t.amber,
+        Added | Untracked => t.green,
+        Deleted => t.coral,
+        Renamed => t.mint,
+        Conflict => t.coral,
+    })
+}
+
+/// The title line for a create/rename prompt (docs/38 FILE-6).
+pub(super) fn file_prompt_title(p: &crate::app::FilePrompt) -> &'static str {
+    use crate::app::FilePromptKind::*;
+    match p.kind {
+        NewFile => "New file",
+        NewFolder => "New folder",
+        Rename => "Rename",
+    }
+}
+
+/// The delete-confirm modal: "Delete <name>?" with y / esc footer hints.
+pub(super) fn draw_delete_confirm(
+    f: &mut RenderTarget,
+    area: Rect,
+    path: &std::path::Path,
+    hover: Option<(u16, u16)>,
+    t: &Theme,
+) -> (Option<Rect>, Option<Rect>) {
+    use ratatui::layout::Alignment;
+    use ratatui::widgets::{Block, Borders, Clear};
+    // Dim backdrop.
+    let buf = f.buffer_mut();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_bg(t.crust);
+            }
+        }
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let is_dir = path.is_dir();
+    let w = area.width.saturating_sub(6).clamp(30, 60).min(area.width);
+    let h = 6u16;
+    let mx = area.x + (area.width.saturating_sub(w)) / 2;
+    let my = area.y + (area.height.saturating_sub(h)) / 2;
+    let modal = Rect::new(mx, my, w, h);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.coral).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    let what = if is_dir {
+        "folder (and its contents)"
+    } else {
+        "file"
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("Delete {what}?"),
+            Style::new().fg(t.text).bold(),
+        ))
+        .alignment(Alignment::Center),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(name, Style::new().fg(t.coral).bold()))
+            .alignment(Alignment::Center),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
+    // Footer: y delete · esc cancel (clickable rects).
+    let footer_y = inner.bottom().saturating_sub(1);
+    let del = " y delete ";
+    let cancel = " esc cancel ";
+    let dw = del.chars().count() as u16;
+    let del_rect = Rect::new(inner.x, footer_y, dw.min(inner.width), 1);
+    let cancel_x = (inner.x + dw + 1).min(inner.right());
+    let cancel_rect = Rect::new(
+        cancel_x,
+        footer_y,
+        (cancel.chars().count() as u16).min(inner.right().saturating_sub(cancel_x)),
+        1,
+    );
+    let over = |r: Rect| hover.is_some_and(|(c, hr)| c >= r.x && c < r.right() && hr == r.y);
+    let hl = |on: bool, fg| {
+        if on {
+            Style::new().fg(t.crust).bg(fg).bold()
+        } else {
+            Style::new().fg(fg).bold()
+        }
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(del, hl(over(del_rect), t.coral))),
+        del_rect,
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(cancel, hl(over(cancel_rect), t.overlay1))),
+        cancel_rect,
+    );
+    (Some(del_rect), Some(cancel_rect))
 }

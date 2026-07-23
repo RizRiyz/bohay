@@ -264,6 +264,61 @@ fn draw_rename(
     (Some(c), Some(x))
 }
 
+/// A titled single-field prompt with an optional error line (docs/38 FILE-6):
+/// the file-tree create/rename modal. Same look as the rename modal, plus a red
+/// error row that keeps the prompt open on a failed create.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_rename_titled(
+    f: &mut RenderTarget,
+    area: Rect,
+    title: &str,
+    buf: &str,
+    err: Option<&str>,
+    hover: Option<(u16, u16)>,
+    cat: &Catalog,
+    t: &Theme,
+) -> (Option<Rect>, Option<Rect>) {
+    dim_backdrop(f, area, t);
+    let w = area.width.saturating_sub(6).clamp(36, 70).min(area.width);
+    let modal = centered_rect(area, w, 7);
+    f.render_widget(Clear, modal);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
+        .style(Style::new().bg(t.surface0));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {title}"),
+            Style::new().fg(t.text).bold(),
+        )),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(buf.to_string(), Style::new().fg(t.accent).bold()),
+            Span::styled("▏", Style::new().fg(t.accent)),
+        ])),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
+    // Error row (or the footer sits one row higher).
+    let footer_y;
+    if let Some(e) = err {
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" {e}"), Style::new().fg(t.coral))),
+            Rect::new(inner.x, inner.y + 3, inner.width, 1),
+        );
+        footer_y = inner.bottom().saturating_sub(1);
+    } else {
+        footer_y = inner.bottom().saturating_sub(1);
+    }
+    let footer = Rect::new(inner.x, footer_y, inner.width, 1);
+    let (c, x) = footer_hints(f, footer, cat.act_save, cat.act_cancel, hover, t);
+    (Some(c), Some(x))
+}
+
 /// Render the footer `⏎ commit · esc cancel` hints (the original left-aligned
 /// look) and return each hint's clickable rect, so a click drives the same
 /// commit / cancel as the key. The hint under the cursor gets a subtle highlight.

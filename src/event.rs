@@ -45,6 +45,8 @@ pub enum AppEvent {
         path: std::path::PathBuf,
         entries: Vec<crate::files::Entry>,
     },
+    /// The file-tree git-status scan finished (docs/38 FILE-6): path -> status.
+    FileGitStatus(std::collections::HashMap<std::path::PathBuf, crate::git::local::FileStatus>),
     /// A file-view read finished (docs/38 FILE-3): applied to the view leaf `id`.
     FileRead {
         id: PaneId,

@@ -308,6 +308,59 @@ pub enum WsMenuItem {
     Module(usize),
 }
 
+/// A right-click context menu on a FILES-dock row (docs/38 FILE-6): file/folder
+/// CRUD. Snapshots the target path when opened so a tree change mid-menu can't
+/// retarget it.
+pub struct FileMenu {
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub anchor: (u16, u16),
+    pub items: Vec<(FileMenuItem, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileMenuItem {
+    NewFile,
+    NewFolder,
+    Rename,
+    CopyPath,
+    Divider,
+    Delete,
+}
+
+impl FileMenuItem {
+    pub const ALL: &'static [FileMenuItem] = &[
+        FileMenuItem::NewFile,
+        FileMenuItem::NewFolder,
+        FileMenuItem::Rename,
+        FileMenuItem::CopyPath,
+        FileMenuItem::Divider,
+        FileMenuItem::Delete,
+    ];
+}
+
+/// A text-input modal for creating/renaming a file-tree entry (docs/38 FILE-6).
+pub struct FilePrompt {
+    pub kind: FilePromptKind,
+    /// The directory the new entry lands in (New*) or the rename's parent.
+    pub dir: PathBuf,
+    /// The path being renamed (Rename only).
+    pub target: Option<PathBuf>,
+    pub buffer: String,
+    /// A failed create/rename shows its reason here and keeps the prompt open.
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FilePromptKind {
+    NewFile,
+    NewFolder,
+    Rename,
+}
+
+/// Cap a file-tree name entry (same spirit as [`TAB_NAME_MAX`]).
+pub(crate) const FILE_NAME_MAX: usize = 120;
+
 /// A right-click context menu **inside a pane**: split or close it. Opened by
 /// right-clicking anywhere in a pane's area.
 pub struct PaneMenu {
@@ -724,6 +777,16 @@ pub struct App {
     pub file_tree: crate::files::FileTree,
     pub files_area: Rect,
     pub file_tree_rects: Vec<(usize, Rect)>,
+    /// Working-tree git status per path, for tinting the FILES dock (docs/38).
+    /// Refreshed off-loop; empty when the tree root isn't a repo.
+    pub file_git_status: HashMap<PathBuf, crate::git::local::FileStatus>,
+    git_status_inflight: bool,
+    last_git_status_at: Instant,
+    /// FILES-dock right-click menu + its modals (docs/38 FILE-6).
+    pub file_menu: Option<FileMenu>,
+    pub file_prompt: Option<FilePrompt>,
+    /// The path a delete-confirm modal is asking about.
+    pub file_delete: Option<PathBuf>,
     /// Native **view panes** (docs/38 FILE-3): a leaf id maps to a non-PTY
     /// renderer here instead of a `Pane` in `panes`. Invariant: a leaf is in
     /// `panes` **xor** `views`.
@@ -922,6 +985,14 @@ impl App {
             file_tree_rects: Vec::new(),
             views: HashMap::new(),
             preview_view: None,
+            file_git_status: HashMap::new(),
+            git_status_inflight: false,
+            last_git_status_at: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or_else(Instant::now),
+            file_menu: None,
+            file_prompt: None,
+            file_delete: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,
@@ -1241,6 +1312,14 @@ impl App {
             file_tree_rects: Vec::new(),
             views,
             preview_view: None,
+            file_git_status: HashMap::new(),
+            git_status_inflight: false,
+            last_git_status_at: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or_else(Instant::now),
+            file_menu: None,
+            file_prompt: None,
+            file_delete: None,
             last_active_ws_shown: 0,
             hover: None,
             app_tx,

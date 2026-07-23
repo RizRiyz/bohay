@@ -430,6 +430,44 @@ fn parse_contributors(out: &str) -> Vec<Contributor> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tree_status_maps_changes_and_dirties_parents() {
+        // A throwaway repo with a modified + an untracked file in a subdir.
+        let dir = std::env::temp_dir().join(format!("bohay-gs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+        g(&["init", "-q"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("src/a.rs"), b"one\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "init"]);
+        std::fs::write(dir.join("src/a.rs"), b"one\ntwo\n").unwrap(); // modified
+        std::fs::write(dir.join("src/b.rs"), b"new\n").unwrap(); // untracked
+        let map = super::tree_status(&dir);
+        let canon = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(
+            map.get(&canon.join("src/a.rs")).copied(),
+            Some(super::FileStatus::Modified)
+        );
+        assert_eq!(
+            map.get(&canon.join("src/b.rs")).copied(),
+            Some(super::FileStatus::Untracked)
+        );
+        // the `src` dir is marked dirty (contains changes)
+        assert_eq!(
+            map.get(&canon.join("src")).copied(),
+            Some(super::FileStatus::DirDirty)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     #[test]
@@ -587,4 +625,93 @@ detached
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }
+}
+
+// ── file-tree git status (docs/38 FILE-6) ────────────────────────────────────
+
+/// Working-tree status of one path, for tinting the FILES dock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FileStatus {
+    Modified,
+    Added,
+    Untracked,
+    Deleted,
+    Renamed,
+    Conflict,
+    /// A directory that itself is clean but contains a changed descendant.
+    DirDirty,
+}
+
+impl FileStatus {
+    /// The single-letter badge shown after the name (VS Code style).
+    pub fn badge(self) -> &'static str {
+        match self {
+            FileStatus::Modified => "M",
+            FileStatus::Added => "A",
+            FileStatus::Untracked => "U",
+            FileStatus::Deleted => "D",
+            FileStatus::Renamed => "R",
+            FileStatus::Conflict => "!",
+            FileStatus::DirDirty => "",
+        }
+    }
+}
+
+fn classify_code(code: &str) -> FileStatus {
+    let b = code.as_bytes();
+    let (x, y) = (b[0] as char, b[1] as char);
+    if x == '?' || y == '?' {
+        FileStatus::Untracked
+    } else if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+        FileStatus::Conflict
+    } else if x == 'R' {
+        FileStatus::Renamed
+    } else if x == 'A' || y == 'A' {
+        FileStatus::Added
+    } else if x == 'D' || y == 'D' {
+        FileStatus::Deleted
+    } else {
+        FileStatus::Modified
+    }
+}
+
+/// Per-path working-tree status for the file tree rooted at `root` (docs/38):
+/// absolute path -> status, plus each ancestor directory (within `root`) marked
+/// `DirDirty` so a folder shows it *contains* changes. Empty when `root` is not
+/// a repo or `git` is missing — so a non-repo tree just renders untinted.
+pub fn tree_status(root: &Path) -> std::collections::HashMap<PathBuf, FileStatus> {
+    use std::collections::HashMap;
+    let mut map: HashMap<PathBuf, FileStatus> = HashMap::new();
+    let Ok(top) = run(root, &["rev-parse", "--show-toplevel"]) else {
+        return map;
+    };
+    let top = PathBuf::from(top.trim());
+    let Ok(raw) = run(root, &["status", "--porcelain=v1"]) else {
+        return map;
+    };
+    let canon_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    for line in raw.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let code = &line[..2];
+        // A rename shows "old -> new"; the new path is what's on disk.
+        let path_str = line[3..].rsplit(" -> ").next().unwrap_or(&line[3..]);
+        let abs = top.join(path_str.trim_end_matches('/'));
+        // Only entries inside the visible tree.
+        if !abs.starts_with(&canon_root) {
+            continue;
+        }
+        map.insert(abs.clone(), classify_code(code));
+        // Mark intermediate directories (between root and the file) as dirty.
+        let mut cur = abs.parent();
+        while let Some(dir) = cur {
+            if dir == canon_root || !dir.starts_with(&canon_root) {
+                break;
+            }
+            map.entry(dir.to_path_buf()).or_insert(FileStatus::DirDirty);
+            cur = dir.parent();
+        }
+    }
+    map
 }
