@@ -132,6 +132,17 @@ impl App {
         }
     }
 
+    /// Toggle whether dotfiles show in the FILES tree, and remember the choice.
+    /// `.git` stays hidden either way. No re-read: `visible_rows` re-flattens the
+    /// already-cached listing when `show_hidden` flips (docs/38).
+    pub fn toggle_files_hidden(&mut self) {
+        let show = !self.file_tree.show_hidden;
+        self.file_tree.show_hidden = show;
+        self.file_tree.scroll = 0;
+        self.config.layout.files_show_hidden = show;
+        crate::config::save(&self.config);
+    }
+
     /// A FILES row was clicked: expand/collapse a folder, or open a file in a
     /// **preview** pane (VS Code style — one reused pane while browsing).
     pub fn file_row_activate(&mut self, index: usize, target: OpenTarget) {
@@ -800,6 +811,71 @@ mod tests {
         assert!(text.contains("mod.rs"), "child visible after expanding src");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Dotfiles show by default; the Settings → General toggle hides them and
+    /// persists that choice, while `.git` stays hidden either way. Regression:
+    /// `show_hidden` existed but was unreachable (no keybinding, menu, config, or
+    /// button set it), so it was stuck off with no way to change it (docs/38).
+    #[test]
+    fn files_show_hidden_defaults_on_and_the_setting_persists() {
+        let _env = crate::persist::test_env("files-hidden-toggle");
+        let root = std::env::temp_dir().join(format!("bohay-fth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".env"), b"X=1").unwrap();
+        std::fs::write(root.join("main.rs"), b"fn main(){}").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        app.file_tree
+            .apply_dir(root.clone(), crate::files::read_dir_entries(&root));
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        // Default on: the dotfile shows, `.git` never does.
+        let text = buffer_text(&term);
+        assert!(text.contains(".env"), "dotfile shown by default");
+        assert!(!text.contains(".git"), ".git stays hidden regardless");
+
+        // Flip the Settings → General "Show hidden files" row (what the toggle
+        // does under the hood): dotfiles hide, live, without a re-read.
+        app.toggle_files_hidden();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            !buffer_text(&term).contains(".env"),
+            "dotfile hidden after turning the setting off"
+        );
+
+        // The choice persists, so a fresh App reads it back off.
+        assert!(!app.config.layout.files_show_hidden);
+        let reopened = App::new(120, 40, std::sync::mpsc::channel().0).unwrap();
+        assert!(
+            !reopened.file_tree.show_hidden,
+            "a restart keeps the toggled-off choice"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The "Show hidden files" row appears in Settings → General, above the
+    /// notification section, so the divider index stays correct.
+    #[test]
+    fn general_tab_has_show_hidden_above_the_notify_divider() {
+        let _env = crate::persist::test_env("general-show-hidden-row");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(80, 24, tx).unwrap();
+        let rows = app.general_rows();
+        let pos = rows
+            .iter()
+            .position(|r| *r == crate::app::GeneralRow::FilesShowHidden)
+            .expect("show-hidden row present");
+        assert!(
+            pos < app.general_section_start(),
+            "it is a general setting, above the Notify divider"
+        );
     }
 
     /// Opening a file makes a native view leaf that renders the file's contents

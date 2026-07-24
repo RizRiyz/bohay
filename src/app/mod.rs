@@ -991,6 +991,7 @@ impl App {
         let name = ws_name(&cwd);
 
         let config = crate::config::load();
+        let files_show_hidden = config.layout.files_show_hidden;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme = crate::ui::theme::by_name(&config.theme);
         let catalog = crate::i18n::by_code(&config.language);
@@ -1097,7 +1098,14 @@ impl App {
             agents_area: Rect::ZERO,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
-            file_tree: crate::files::FileTree::new(std::path::PathBuf::new()),
+            file_tree: {
+                // Start from the persisted show-hidden choice (docs/38). Read
+                // from a hoisted local, since `config` is moved into its own
+                // field above before this initializer runs.
+                let mut t = crate::files::FileTree::new(std::path::PathBuf::new());
+                t.show_hidden = files_show_hidden;
+                t
+            },
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
             views: HashMap::new(),
@@ -1175,6 +1183,7 @@ impl App {
 
     fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        let files_show_hidden = config.layout.files_show_hidden;
         let keymap = keys::build_keymap(&config.keybindings);
         let shell = crate::platform::resolve_shell(&config.shell);
         let scrollback = config.scrollback();
@@ -1436,7 +1445,14 @@ impl App {
             agents_area: Rect::ZERO,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
-            file_tree: crate::files::FileTree::new(std::path::PathBuf::new()),
+            file_tree: {
+                // Start from the persisted show-hidden choice (docs/38). Read
+                // from a hoisted local, since `config` is moved into its own
+                // field above before this initializer runs.
+                let mut t = crate::files::FileTree::new(std::path::PathBuf::new());
+                t.show_hidden = files_show_hidden;
+                t
+            },
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
             views,

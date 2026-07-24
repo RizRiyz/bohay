@@ -447,6 +447,16 @@ fn draw_content(
                         );
                         ctls.push((i, r));
                     }
+                    GeneralRow::FilesShowHidden => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_files_hidden,
+                        toggle(app.config.layout.files_show_hidden, t),
+                        t,
+                    )),
                     GeneralRow::SoundDone => ctls.push(ctl_row(
                         f,
                         area,

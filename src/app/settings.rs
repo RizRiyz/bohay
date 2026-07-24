@@ -96,6 +96,7 @@ pub enum LayoutRow {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GeneralRow {
     FileOpen,
+    FilesShowHidden,
     SoundDone,
     SoundBlocked,
     TestSound,
@@ -118,6 +119,7 @@ impl App {
     pub fn general_rows(&self) -> Vec<GeneralRow> {
         vec![
             GeneralRow::FileOpen,
+            GeneralRow::FilesShowHidden,
             GeneralRow::SoundDone,
             GeneralRow::SoundBlocked,
             GeneralRow::TestSound,
@@ -125,9 +127,10 @@ impl App {
     }
 
     /// Index of the first notification row (where the `── Notifications ──`
-    /// divider goes), mirroring `dock_section_start` in the Layout tab.
+    /// divider goes), mirroring `dock_section_start` in the Layout tab. The two
+    /// general settings (file-open + show-hidden) sit above it.
     pub fn general_section_start(&self) -> usize {
-        1
+        2
     }
 
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
@@ -687,6 +690,8 @@ impl App {
     fn adjust_general(&mut self, cursor: usize, delta: i32) {
         match self.general_rows().get(cursor).copied() {
             Some(GeneralRow::FileOpen) => self.cycle_file_open(delta),
+            // Flips config *and* the live tree (docs/38), so it applies at once.
+            Some(GeneralRow::FilesShowHidden) => self.toggle_files_hidden(),
             Some(GeneralRow::SoundDone) => {
                 self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done;
                 config::save(&self.config);
@@ -752,7 +757,7 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 4);
+        assert_eq!(app.settings_rows(SettingsTab::General), 5);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
 

@@ -68,6 +68,13 @@ pub struct LayoutConfig {
     /// keep many panes open.
     #[serde(default = "default_scrollback")]
     pub scrollback: usize,
+    /// Show dotfiles in the FILES tree (docs/38). On by default (dev projects
+    /// lean on `.env`/`.gitignore`/`.github` and hiding them surprised people);
+    /// toggled in Settings → General, and `.git` is always hidden regardless.
+    /// `default = "yes"` so an older config without the field also gets it on.
+    /// Persisted so the choice sticks across restarts.
+    #[serde(default = "yes")]
+    pub files_show_hidden: bool,
 }
 
 /// Left + right sidebar layout (docs/29). Serialized under `sidebars`.
@@ -189,6 +196,7 @@ impl Default for LayoutConfig {
             resume_in_new_workspace: true,
             file_open: default_file_open(),
             scrollback: default_scrollback(),
+            files_show_hidden: true,
         }
     }
 }
