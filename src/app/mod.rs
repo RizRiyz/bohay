@@ -1828,6 +1828,24 @@ impl App {
         if let Some(nst) = self.status.get_mut(&new_id) {
             nst.agent = agent.clone();
         }
+        // Pin the *source* pane to the session we just forked from.
+        //
+        // We resolved `sid` above, so this pane's session is known right now —
+        // but the fork is about to write a *newer* session into the same folder,
+        // and a pane with no recorded session is resolved at save time by
+        // "newest in this folder" (`persist::resolve_pane_sessions`). Without
+        // this, the parent would later be attributed its own child's session,
+        // and the fork would be left with none. Recording it now keeps both
+        // panes pointing at the right conversation. A hook report still wins:
+        // it overwrites this, and we only fill a pane that had nothing.
+        if let Some(st) = self.status.get_mut(&pane) {
+            if st.agent_session.is_none() {
+                st.agent_session = Some(AgentSession {
+                    agent: agent.clone(),
+                    session_id: sid.clone(),
+                });
+            }
+        }
         self.zoomed = false;
         self.session_dirty = true;
         self.show_toast(format!("forked {agent} session"));
@@ -3608,6 +3626,221 @@ mod tests {
             by_pane.get(&older.0),
             Some(&None),
             "the other pane must not steal it, and restores as a plain shell"
+        );
+    }
+
+    /// Forking then restarting must restore *two different* conversations.
+    ///
+    /// A fork shares its parent's folder and gets a brand new session id from the
+    /// agent, so the fork's session immediately becomes the newest in that
+    /// folder. With sessions resolved by "newest in this folder", the parent
+    /// would be handed its own child's conversation and the fork would get
+    /// nothing. Forking pins the parent to the session it was forked from, which
+    /// leaves the fork free to claim the newer one.
+    #[test]
+    fn forking_then_restoring_keeps_parent_and_fork_on_their_own_sessions() {
+        let _env = crate::persist::test_env("fork-session-split");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let parent = app.layout().focus;
+        let cwd = app.panes.get(&parent).unwrap().cwd.clone();
+
+        // A Claude store holding the parent's session.
+        let store = std::env::temp_dir().join(format!("bohay-forksess-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let enc: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | '.') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let proj = store.join("projects").join(enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("parent-sess.jsonl"), "{}").unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &store);
+
+        // The parent runs claude with no hook-reported id (the common case).
+        {
+            let st = app.status.get_mut(&parent).unwrap();
+            st.agent = "claude".into();
+            st.agent_session = None;
+        }
+        assert!(app.fork_pane(parent), "claude forks");
+        let fork = app.layout().focus;
+        assert_ne!(fork, parent);
+
+        // Forking pinned the parent to the session it forked from.
+        assert_eq!(
+            app.status
+                .get(&parent)
+                .unwrap()
+                .agent_session
+                .as_ref()
+                .map(|a| a.session_id.as_str()),
+            Some("parent-sess"),
+            "the parent keeps the conversation it was forked from"
+        );
+
+        // The agent now writes the fork's own (newer) session into the folder.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(proj.join("fork-sess.jsonl"), "{}").unwrap();
+        app.status.get_mut(&fork).unwrap().agent = "claude".into();
+
+        let snap = crate::persist::snapshot(&app);
+        let by_pane: std::collections::HashMap<u32, Option<String>> = snap.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .map(|(raw, ps)| (*raw, ps.agent_session.as_ref().map(|(_, s)| s.clone())))
+            .collect();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&store);
+
+        assert_eq!(
+            by_pane.get(&parent.0),
+            Some(&Some("parent-sess".to_string())),
+            "parent restores its own conversation, not the fork's"
+        );
+        assert_eq!(
+            by_pane.get(&fork.0),
+            Some(&Some("fork-sess".to_string())),
+            "the fork restores the session it created"
+        );
+    }
+
+    /// Reproduces: fork, restart, and the fork comes back as a bare shell.
+    ///
+    /// The parent is live, so its transcript keeps being appended to and is the
+    /// *newest* file in the folder. The fork therefore guesses the parent's
+    /// session, which the parent already claimed, and is left with nothing. The
+    /// guess must fall through to the newest session **not already spoken for**.
+    #[test]
+    fn a_fork_resumes_even_when_the_parent_transcript_is_newer() {
+        let _env = crate::persist::test_env("fork-newer-parent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let parent = app.layout().focus;
+        let cwd = app.panes.get(&parent).unwrap().cwd.clone();
+
+        let store = std::env::temp_dir().join(format!("bohay-forknewer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let enc: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | '.') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let proj = store.join("projects").join(enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("parent-sess.jsonl"), "{}").unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &store);
+
+        {
+            let st = app.status.get_mut(&parent).unwrap();
+            st.agent = "claude".into();
+            st.agent_session = None;
+        }
+        assert!(app.fork_pane(parent), "claude forks");
+        let fork = app.layout().focus;
+        app.status.get_mut(&fork).unwrap().agent = "claude".into();
+
+        // The fork writes its session, then the *parent* keeps working — so the
+        // parent's transcript ends up with the newer mtime.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(proj.join("fork-sess.jsonl"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(proj.join("parent-sess.jsonl"), "{}{}").unwrap();
+
+        let snap = crate::persist::snapshot(&app);
+        let by_pane: std::collections::HashMap<u32, Option<String>> = snap.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .map(|(raw, ps)| (*raw, ps.agent_session.as_ref().map(|(_, s)| s.clone())))
+            .collect();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&store);
+
+        assert_eq!(
+            by_pane.get(&parent.0),
+            Some(&Some("parent-sess".to_string()))
+        );
+        assert_eq!(
+            by_pane.get(&fork.0),
+            Some(&Some("fork-sess".to_string())),
+            "the fork must still resume its own session, not fall back to a shell"
+        );
+    }
+
+    /// Panes must line up with sessions by age: the pane started first owns the
+    /// session started first. Resolving oldest-pane-first while each takes the
+    /// *newest* unclaimed session pairs them backwards, so two agent panes in one
+    /// folder swap conversations — each restores into the other's session.
+    #[test]
+    fn two_agent_panes_keep_their_own_sessions_by_age() {
+        let _env = crate::persist::test_env("session-pairing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let older = app.layout().focus;
+        let cwd = app.panes.get(&older).unwrap().cwd.clone();
+
+        let store = std::env::temp_dir().join(format!("bohay-pairing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let enc: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | '.') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let proj = store.join("projects").join(enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        // The older pane's session was written first.
+        std::fs::write(proj.join("old-sess.jsonl"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(proj.join("new-sess.jsonl"), "{}").unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &store);
+
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let mut ids = app.layout().leaves();
+        ids.sort_by_key(|p| p.0);
+        let newer = *ids.last().unwrap();
+        for id in [older, newer] {
+            let st = app.status.get_mut(&id).unwrap();
+            st.agent = "claude".into();
+            st.agent_session = None;
+        }
+
+        let snap = crate::persist::snapshot(&app);
+        let by_pane: std::collections::HashMap<u32, Option<String>> = snap.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .map(|(raw, ps)| (*raw, ps.agent_session.as_ref().map(|(_, s)| s.clone())))
+            .collect();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&store);
+
+        assert_eq!(
+            by_pane.get(&newer.0),
+            Some(&Some("new-sess".to_string())),
+            "the newer pane owns the newer session"
+        );
+        assert_eq!(
+            by_pane.get(&older.0),
+            Some(&Some("old-sess".to_string())),
+            "the older pane keeps its own, not its neighbour's"
         );
     }
 

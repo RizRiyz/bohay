@@ -548,9 +548,16 @@ impl App {
                                 .get(&id)
                                 .map(|p| p.cwd.to_string_lossy().to_string())
                                 .unwrap_or_default();
+                            // The agent's own session id, when bohay knows it
+                            // exactly: reported by the integration hook, or set
+                            // because bohay launched it (resume/fork). `null`
+                            // means unbound — nothing is guessed here, so this
+                            // doubles as "is this pane's session actually known?"
+                            let session = s.agent_session.as_ref().map(|a| a.session_id.clone());
                             arr.push(json!({
                                 "pane": id.0.to_string(), "agent": s.agent,
                                 "status": state_str(s.state),
+                                "session": session,
                                 "workspace": wi.to_string(), "workspace_name": ws.name,
                                 "project": ws.name, "cwd": cwd,
                                 "branch": branch, "repo": repo, "worktree": is_worktree,
@@ -1351,5 +1358,20 @@ mod tests {
         assert_eq!(row["branch"], "feat/x");
         // A plain node is not a linked worktree.
         assert_eq!(row["worktree"], false);
+        // Nothing has reported a session for this pane, so it is explicitly
+        // unbound rather than guessed — `agent.list` never invents one.
+        assert!(row["session"].is_null(), "unbound session is null");
+
+        // Once the integration hook reports one (or bohay launches it), the exact
+        // id shows up here, which is how a script tells *which* conversation a
+        // pane is running.
+        app.status.get_mut(&pane).unwrap().agent_session = Some(crate::app::AgentSession {
+            agent: "claude".into(),
+            session_id: "sess-42".into(),
+        });
+        let out = app
+            .dispatch("agent.list", &json!({}))
+            .expect("agent.list ok");
+        assert_eq!(out["agents"][0]["session"], "sess-42");
     }
 }

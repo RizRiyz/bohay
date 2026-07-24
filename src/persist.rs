@@ -240,11 +240,23 @@ pub fn client_socket_path() -> PathBuf {
 /// conversation shows up in two tabs, and the transcript is corrupted once two
 /// agents append to it.
 ///
-/// A pane whose guess is already taken records nothing and restores as a plain
+/// Each guessing pane takes the newest session **not already claimed**, so panes
+/// sharing a folder line up with distinct conversations instead of colliding on
+/// one. That matters most after a fork: the parent is live, so its transcript is
+/// usually the newest file in the folder, and a fork that could only ever see
+/// "the newest" would find it taken and fall back to a bare shell. Falling
+/// through to the next-newest gives the fork its own session back.
+///
+/// Guessing panes are matched to sessions **by age**: pane ids are handed out in
+/// order, so the newest pane is resolved first and takes the newest session, the
+/// next-newest takes the one after it, and so on. Pairing them the other way
+/// round (oldest pane first, still taking the *newest* session) hands each pane
+/// its neighbour's conversation, which is how two agent panes in one folder ended
+/// up swapping sessions across a restart.
+///
+/// A pane with nothing left to claim records nothing and restores as a plain
 /// shell. Losing a resume is much better than duplicating a live session, and
-/// the guess was never evidence that *this* pane owned it. Contested guesses go
-/// to the lowest pane id — the oldest pane, most likely the one that started the
-/// session — which also keeps successive saves stable.
+/// the guess was never evidence that *this* pane owned it.
 fn resolve_pane_sessions(app: &App) -> HashMap<PaneId, Option<(String, String)>> {
     let mut out: HashMap<PaneId, Option<(String, String)>> = HashMap::new();
     let mut claimed: HashSet<String> = HashSet::new();
@@ -258,22 +270,25 @@ fn resolve_pane_sessions(app: &App) -> HashMap<PaneId, Option<(String, String)>>
             out.insert(*id, Some((a.agent.clone(), a.session_id.clone())));
         }
     }
-    // Pass 2: everyone else guesses from their cwd, and only an unclaimed guess
-    // survives (`HashSet::insert` reports whether it was new).
-    for id in &ids {
+    // Pass 2: everyone else takes the newest session for their folder that is
+    // still unclaimed, so panes sharing a folder get distinct conversations.
+    // Newest pane first, so pane age lines up with session age (see above).
+    for id in ids.iter().rev() {
         if out.contains_key(id) {
             continue;
         }
         let Some(st) = app.status.get(id) else {
             continue;
         };
-        let guess = app
-            .panes
-            .get(id)
-            .and_then(|p| crate::agent::latest_session(&st.agent, &p.cwd))
-            .filter(|sid| claimed.insert(sid.clone()))
-            .map(|sid| (st.agent.clone(), sid));
-        out.insert(*id, guess);
+        let guess = app.panes.get(id).and_then(|p| {
+            crate::agent::sessions_for(&st.agent, &p.cwd)
+                .into_iter()
+                .find(|sid| !claimed.contains(sid))
+        });
+        if let Some(sid) = &guess {
+            claimed.insert(sid.clone());
+        }
+        out.insert(*id, guess.map(|sid| (st.agent.clone(), sid)));
     }
     out
 }

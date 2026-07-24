@@ -26,6 +26,11 @@ struct Discovery {
     recent: fn(&Path, usize) -> Vec<SessionInfo>,
     /// The newest session id whose project matches `cwd`.
     latest: fn(&Path, &Path) -> Option<String>,
+    /// Every session id for `cwd`, **newest first** — the ranked form of
+    /// `latest`. Needed when several panes share a folder: each takes the newest
+    /// session not already claimed, instead of all resolving to the same one.
+    /// `None` = no ranked listing, so callers fall back to `latest` alone.
+    list: Option<fn(&Path, &Path) -> Vec<String>>,
 }
 
 /// One agent bohay can resume: how to find its sessions (optional — some agents
@@ -49,6 +54,7 @@ static SOURCES: &[SessionSource] = &[
             base: claude_base,
             recent: claude_recent,
             latest: claude_latest,
+            list: Some(claude_list),
         }),
         resume: |q| format!("claude --resume {q}\r"),
         // `--fork-session` resumes the transcript into a fresh session id.
@@ -60,6 +66,7 @@ static SOURCES: &[SessionSource] = &[
             base: copilot_base,
             recent: copilot_recent,
             latest: copilot_latest,
+            list: None,
         }),
         resume: |q| format!("copilot --resume={q}\r"),
         fork: None,
@@ -70,6 +77,7 @@ static SOURCES: &[SessionSource] = &[
             base: opencode_base,
             recent: opencode_recent,
             latest: opencode_latest,
+            list: None,
         }),
         resume: |q| format!("opencode --session {q}\r"),
         fork: None,
@@ -80,6 +88,7 @@ static SOURCES: &[SessionSource] = &[
             base: codex_base,
             recent: codex_recent,
             latest: codex_latest,
+            list: None,
         }),
         resume: |q| format!("codex resume {q}\r"),
         fork: None,
@@ -90,6 +99,7 @@ static SOURCES: &[SessionSource] = &[
             base: kimi_base,
             recent: kimi_recent,
             latest: kimi_latest,
+            list: None,
         }),
         resume: |q| format!("kimi --resume {q}\r"),
         fork: None,
@@ -100,6 +110,7 @@ static SOURCES: &[SessionSource] = &[
             base: grok_base,
             recent: grok_recent,
             latest: grok_latest,
+            list: None,
         }),
         resume: |q| format!("grok --resume {q}\r"),
         fork: None,
@@ -110,6 +121,7 @@ static SOURCES: &[SessionSource] = &[
             base: pi_base,
             recent: pi_recent,
             latest: pi_latest,
+            list: Some(pi_list),
         }),
         resume: |q| format!("pi --session {q}\r"),
         // Pi's session model is a branching tree; `--fork` forks by id (docs/23).
@@ -162,6 +174,22 @@ pub fn recent_sessions(limit: usize) -> Vec<SessionInfo> {
 pub fn latest_session(agent: &str, cwd: &Path) -> Option<String> {
     let d = source(agent)?.discover.as_ref()?;
     (d.latest)(&(d.base)(), cwd)
+}
+
+/// Every session for `agent` in `cwd`, **newest first**.
+///
+/// Used when several panes share a folder and must not all be handed the same
+/// session: each takes the newest one not already claimed. Agents without a
+/// ranked listing degrade to just their single newest session.
+pub fn sessions_for(agent: &str, cwd: &Path) -> Vec<String> {
+    let Some(d) = source(agent).and_then(|s| s.discover.as_ref()) else {
+        return Vec::new();
+    };
+    let base = (d.base)();
+    match d.list {
+        Some(list) => list(&base, cwd),
+        None => (d.latest)(&base, cwd).into_iter().collect(),
+    }
 }
 
 /// The shell command that resumes an agent's native session, if supported.
@@ -284,6 +312,29 @@ fn newest_jsonl(dir: &Path) -> Option<(SystemTime, PathBuf, String)> {
         }
     }
     best
+}
+
+/// Every session for `cwd`, newest first (file stem = session id).
+fn claude_list(base: &Path, cwd: &Path) -> Vec<String> {
+    let dir = claude_project_dir(base, cwd);
+    let mut found: Vec<(SystemTime, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let (Some(stem), Ok(mtime)) = (
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string),
+            entry.metadata().and_then(|m| m.modified()),
+        ) else {
+            continue;
+        };
+        found.push((mtime, stem));
+    }
+    found.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    found.into_iter().map(|(_, id)| id).collect()
 }
 
 fn claude_latest(base: &Path, cwd: &Path) -> Option<String> {
@@ -900,6 +951,18 @@ fn read_pi_session(path: &Path) -> Option<(String, PathBuf)> {
         }
     }
     None
+}
+
+/// Every session for `cwd`, newest first (read from each file's header).
+fn pi_list(base: &Path, cwd: &Path) -> Vec<String> {
+    let mut files = pi_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    files
+        .into_iter()
+        .filter_map(|(_, path)| read_pi_session(&path))
+        .filter(|(_, dir)| dir == cwd)
+        .map(|(id, _)| id)
+        .collect()
 }
 
 fn pi_latest(base: &Path, cwd: &Path) -> Option<String> {
