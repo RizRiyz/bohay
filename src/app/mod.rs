@@ -3149,6 +3149,12 @@ mod tests {
     fn border_only_when_split() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        // Isolate `$BOHAY_HOME` so this renders the *default* layout. Without it
+        // the test read the developer's real `~/.bohay` config, so a user who had
+        // (say) a right sidebar mounted saw its chrome counted as pane borders —
+        // failing alone but passing in a full run, purely because some earlier
+        // test's `test_env` had already redirected the global env var.
+        let _env = crate::persist::test_env("border-split");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         // Borders use ratatui's native box-drawing glyphs, so count cells
@@ -4631,6 +4637,10 @@ mod tests {
     #[test]
     fn working_agent_shows_spinner() {
         use ratatui::{backend::TestBackend, Terminal};
+        // Isolate `$BOHAY_HOME`: with the developer's real config a different
+        // dock layout can push the AGENTS rows out of view, so the spinner is
+        // never drawn and this fails depending on test order.
+        let _env = crate::persist::test_env("spinner");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         // Make the default pane a working "claude" agent so it lists as active.
