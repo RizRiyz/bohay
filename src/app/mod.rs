@@ -37,7 +37,7 @@ mod switcher;
 pub use keys::Cmd;
 pub use modules::ModuleMenuAction;
 pub use picker::{FolderPicker, Row};
-pub use settings::{LayoutRow, ModuleRow, SettingsTab, SettingsUi};
+pub use settings::{GeneralRow, LayoutRow, ModuleRow, SettingsTab, SettingsUi};
 
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
@@ -352,10 +352,18 @@ pub struct FileMenu {
     pub is_dir: bool,
     pub anchor: (u16, u16),
     pub items: Vec<(FileMenuItem, Rect)>,
+    /// Editors offered for this file (snapshot of `App.editors` when the menu
+    /// opened), so `OpenWith(i)` resolves stably even if the cache changes. Empty
+    /// for a folder (open actions are file-only).
+    pub editors: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileMenuItem {
+    /// Open in the native read-only viewer (files only).
+    OpenReadonly,
+    /// Open with editor `editors[i]` (files only).
+    OpenWith(usize),
     NewFile,
     NewFolder,
     Rename,
@@ -364,15 +372,26 @@ pub enum FileMenuItem {
     Delete,
 }
 
-impl FileMenuItem {
-    pub const ALL: &'static [FileMenuItem] = &[
-        FileMenuItem::NewFile,
-        FileMenuItem::NewFolder,
-        FileMenuItem::Rename,
-        FileMenuItem::CopyPath,
-        FileMenuItem::Divider,
-        FileMenuItem::Delete,
-    ];
+impl FileMenu {
+    /// This menu's rows, in order. A file leads with the open actions (read-only
+    /// + one per detected editor) and a divider; a folder skips straight to CRUD.
+    pub fn build_items(&self) -> Vec<FileMenuItem> {
+        let mut v = Vec::new();
+        if !self.is_dir {
+            v.push(FileMenuItem::OpenReadonly);
+            v.extend((0..self.editors.len()).map(FileMenuItem::OpenWith));
+            v.push(FileMenuItem::Divider);
+        }
+        v.extend([
+            FileMenuItem::NewFile,
+            FileMenuItem::NewFolder,
+            FileMenuItem::Rename,
+            FileMenuItem::CopyPath,
+            FileMenuItem::Divider,
+            FileMenuItem::Delete,
+        ]);
+        v
+    }
 }
 
 /// A text-input modal for creating/renaming a file-tree entry (docs/38 FILE-6).
@@ -698,6 +717,10 @@ pub struct App {
     /// Agent-detection rule set: built-ins plus user `~/.bohay/manifests/*.toml`
     /// (docs/07). Loaded once at startup.
     pub manifests: crate::detect::Manifests,
+    /// Terminal editors found on `PATH` (+ `$EDITOR`), for "open file with"
+    /// (docs/38). `(run command, label)`. Probed once at startup, off the render
+    /// path — see `platform::editor_choices`.
+    pub editors: Vec<(String, String)>,
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub theme: Theme,
@@ -990,6 +1013,7 @@ impl App {
             panes,
             status,
             manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
+            editors: crate::platform::editor_choices(),
             workspaces: vec![Workspace {
                 name,
                 worktree: worktree_membership(&cwd),
@@ -1335,6 +1359,7 @@ impl App {
             panes,
             status,
             manifests: crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir()),
+            editors: crate::platform::editor_choices(),
             workspaces,
             active_ws,
             theme,
@@ -4190,8 +4215,23 @@ mod tests {
         assert_eq!(app.settings_tab_rects.len(), 7, "seven tabs");
         assert!(
             !app.settings_ctl_rects.is_empty(),
-            "theme tab lists palettes"
+            "the opening tab lists controls"
         );
+        // Settings opens on General (the first tab); step to Theme for the
+        // live-preview assertions below.
+        assert_eq!(
+            app.settings.as_ref().unwrap().tab,
+            crate::app::SettingsTab::General
+        );
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.settings.as_ref().unwrap().tab,
+            crate::app::SettingsTab::Theme
+        );
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let text: String = term
             .backend()
             .buffer()
@@ -4485,11 +4525,17 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        app.open_settings();
-        app.handle_event(AppEvent::Key(KeyEvent::new(
-            KeyCode::Tab,
-            KeyModifiers::NONE,
-        ))); // → Layout
+        app.open_settings(); // General
+        for _ in 0..2 {
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+            ))); // General → Theme → Layout
+        }
+        assert_eq!(
+            app.settings.as_ref().unwrap().tab,
+            crate::app::SettingsTab::Layout
+        );
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         let left = app

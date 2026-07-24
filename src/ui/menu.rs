@@ -280,11 +280,12 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         return;
     };
     let anchor = menu.anchor;
-    let items: Vec<FileMenuItem> = FileMenuItem::ALL.to_vec();
+    let editors = menu.editors.clone();
+    let items = menu.build_items();
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
-            text: file_label(*it).to_string(),
+            text: file_label(*it, &editors),
             divider: matches!(it, FileMenuItem::Divider),
             destructive: matches!(it, FileMenuItem::Delete),
         })
@@ -295,13 +296,20 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     }
 }
 
-fn file_label(it: FileMenuItem) -> &'static str {
+/// FILES-menu labels are plain English (this menu is not localized — unlike the
+/// workspace/pane menus — and editor names are proper nouns anyway).
+fn file_label(it: FileMenuItem, editors: &[(String, String)]) -> String {
     match it {
-        FileMenuItem::NewFile => "New file",
-        FileMenuItem::NewFolder => "New folder",
-        FileMenuItem::Rename => "Rename",
-        FileMenuItem::CopyPath => "Copy path",
-        FileMenuItem::Divider => "",
-        FileMenuItem::Delete => "Delete",
+        FileMenuItem::OpenReadonly => "Open (read-only)".to_string(),
+        FileMenuItem::OpenWith(i) => editors
+            .get(i)
+            .map(|(_, label)| format!("Open in {label}"))
+            .unwrap_or_default(),
+        FileMenuItem::NewFile => "New file".to_string(),
+        FileMenuItem::NewFolder => "New folder".to_string(),
+        FileMenuItem::Rename => "Rename".to_string(),
+        FileMenuItem::CopyPath => "Copy path".to_string(),
+        FileMenuItem::Divider => String::new(),
+        FileMenuItem::Delete => "Delete".to_string(),
     }
 }

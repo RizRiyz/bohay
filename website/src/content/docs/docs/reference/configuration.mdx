@@ -19,11 +19,22 @@ Prefer editing config through **Settings** (it applies live and writes the
 file for you). Hand-edits are picked up on restart. Old config files load
 cleanly across versions because unknown fields get defaults.
 
+## Notable `config.json` keys
+
+| Key | Effect |
+|---|---|
+| `layout.scrollback` | lines of history kept per pane (see [Scrollback](/docs/guides/scrollback/)) |
+| `layout.show_titles` | show the title on each pane border |
+| `layout.resume_in_new_workspace` | resume a session into its own workspace instead of a new tab |
+| `layout.file_open` | what a click in the FILES dock does: `readonly` (default) or an editor command such as `vim` (see [Browsing & Opening Files](/docs/guides/files/)) |
+| `keybindings` | command id → key, overriding the defaults |
+
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
 | `BOHAY_HOME` | relocate the state directory |
 | `BOHAY_SHELL` | shell for new panes (overrides `config.shell`) |
+| `EDITOR` | offered as an "open with" choice for files, alongside the editors found on `PATH` |
 | `BOHAY_PANE_ID` | *injected into every pane*, the pane's own id |
 | `BOHAY_SOCKET_PATH` | *injected into every pane*, the control socket |
