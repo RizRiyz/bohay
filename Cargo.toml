@@ -1,6 +1,6 @@
 [package]
 name = "bohay"
-version = "0.9.1"
+version = "0.9.2"
 edition = "2021"
 rust-version = "1.82"
 description = "Mission control for your AI coding agents"
