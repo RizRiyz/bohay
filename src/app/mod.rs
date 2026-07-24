@@ -408,6 +408,22 @@ pub struct PaneMenu {
     pub items: Vec<(PaneMenuItem, Rect)>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13 §3.8).
     pub module_actions: Vec<ModuleMenuAction>,
+    /// "Move to tab" destinations (target + label), snapshotted at open. The
+    /// submenu lists these when the "Move to tab" row is hovered.
+    pub move_targets: Vec<(MoveTarget, String)>,
+    /// Whether the move-to-tab submenu is showing (sticky: set while hovering the
+    /// "Move to tab" row or the submenu itself, so the border gap doesn't flicker
+    /// it off). Driven by the renderer from `App.hover`.
+    pub move_open: bool,
+    /// Submenu row rects (target + rect), filled by the renderer for hit-testing.
+    pub tab_rects: Vec<(MoveTarget, Rect)>,
+}
+
+/// Where "Move to tab" sends the pane: an existing tab (by index) or a fresh one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MoveTarget {
+    Tab(usize),
+    NewTab,
 }
 
 /// An action offered by the pane context menu. `SplitVertical` puts the new pane
@@ -419,6 +435,8 @@ pub enum PaneMenuItem {
     SplitHorizontal,
     /// "What's running here?" — the OS process tree for this pane (docs/07).
     RunningCmd,
+    /// Parent row: hovering it opens a submenu of tabs to move this pane into.
+    MoveToTab,
     Divider,
     Close,
     /// The `i`-th module action declaring `contexts = ["pane"]` (docs/13 §3.8).
@@ -432,6 +450,7 @@ impl PaneMenuItem {
         PaneMenuItem::SplitVertical,
         PaneMenuItem::SplitHorizontal,
         PaneMenuItem::RunningCmd,
+        PaneMenuItem::MoveToTab,
         PaneMenuItem::Divider,
         PaneMenuItem::Close,
     ];
@@ -1901,9 +1920,18 @@ impl App {
     }
 
     /// The pane context-menu items: the built-ins, then any module actions
-    /// declaring `contexts = ["pane"]` below a divider.
+    /// declaring `contexts = ["pane"]` below a divider. "Move to tab" is dropped
+    /// when there's nowhere to move to.
     pub fn pane_menu_items(&self) -> Vec<PaneMenuItem> {
-        let mut items = PaneMenuItem::ALL.to_vec();
+        let has_move = self
+            .pane_menu
+            .as_ref()
+            .is_some_and(|m| !m.move_targets.is_empty());
+        let mut items: Vec<PaneMenuItem> = PaneMenuItem::ALL
+            .iter()
+            .copied()
+            .filter(|it| has_move || *it != PaneMenuItem::MoveToTab)
+            .collect();
         let extras = self
             .pane_menu
             .as_ref()
@@ -2048,23 +2076,125 @@ impl App {
         if self.active_is_git() || self.active_is_orch() {
             return;
         }
+        let move_targets = self.pane_move_targets();
         self.pane_menu = Some(PaneMenu {
             pane,
             anchor: (col, row),
             items: Vec::new(),
             module_actions: self.module_menu_actions("pane"),
+            move_targets,
+            move_open: false,
+            tab_rects: Vec::new(),
         });
     }
 
-    /// A click inside the open pane menu: run the hit item, else dismiss.
+    /// The tabs this pane could move into: every other real pane tab in the
+    /// workspace (not the current one, not the git/orch dashboards), then a fresh
+    /// tab. Empty when there's nowhere useful to move (one pane in one tab).
+    fn pane_move_targets(&self) -> Vec<(MoveTarget, String)> {
+        let wsi = self.active_ws;
+        let cur = self.workspaces[wsi].active_tab;
+        let mut targets = Vec::new();
+        for (ti, tab) in self.workspaces[wsi].tabs.iter().enumerate() {
+            if ti == cur || tab.is_git() || tab.is_orch() {
+                continue;
+            }
+            // A named tab shows its name; an unnamed one its number (as in the tab
+            // bar), which needs no translation.
+            let label = tab.name.clone().unwrap_or_else(|| format!("#{}", ti + 1));
+            targets.push((MoveTarget::Tab(ti), label));
+        }
+        // Offer "new tab" only when it would actually separate panes or there are
+        // other tabs — i.e. don't offer a pointless move for a lone pane.
+        let other_tabs = !targets.is_empty();
+        let many_panes = self.workspaces[wsi]
+            .tabs
+            .get(cur)
+            .is_some_and(|t| t.layout.len() > 1);
+        if other_tabs || many_panes {
+            targets.push((MoveTarget::NewTab, self.catalog.menu_new_tab.to_string()));
+        }
+        targets
+    }
+
+    /// Move `pane` out of the current tab into `target`, keeping the process
+    /// alive (the pane's id is just re-parented between layout trees — never
+    /// through `close_pane`, which would kill it). If the source tab empties, it
+    /// is removed. Focus follows the pane to its new tab.
+    pub fn move_pane_to_tab(&mut self, pane: PaneId, target: MoveTarget) {
+        let wsi = self.active_ws;
+        let src = self.workspaces[wsi].active_tab;
+        // Detach from the source layout without touching `App.panes`.
+        let emptied = self.workspaces[wsi].tabs[src].layout.remove(pane);
+        match target {
+            MoveTarget::Tab(ti) => {
+                if ti >= self.workspaces[wsi].tabs.len()
+                    || ti == src
+                    || self.workspaces[wsi].tabs[ti].is_git()
+                    || self.workspaces[wsi].tabs[ti].is_orch()
+                {
+                    return; // stale/invalid target — leave the pane where it is
+                }
+                self.workspaces[wsi].tabs[ti]
+                    .layout
+                    .split_focused(Axis::Col, pane);
+            }
+            MoveTarget::NewTab => {
+                self.workspaces[wsi]
+                    .tabs
+                    .push(Tab::panes(TileLayout::new(pane)));
+            }
+        }
+        if emptied {
+            self.workspaces[wsi].tabs.remove(src);
+        }
+        // Re-focus whichever tab now holds the pane (index math is fragile after a
+        // possible removal, so just find it).
+        if let Some(ti) = self.workspaces[wsi]
+            .tabs
+            .iter()
+            .position(|t| t.layout.leaves().contains(&pane))
+        {
+            self.workspaces[wsi].active_tab = ti;
+            self.workspaces[wsi].tabs[ti].layout.focus = pane;
+        }
+        self.zoomed = false;
+        self.session_dirty = true;
+        self.emit_event(
+            "pane.moved",
+            serde_json::json!({"pane": pane.0.to_string()}),
+        );
+    }
+
+    /// A click inside the open pane menu: a submenu tab (move the pane), the
+    /// "Move to tab" row (open the submenu), another item (run it), else dismiss.
     pub fn pane_menu_click(&mut self, col: u16, row: u16) {
-        let hit = self.pane_menu.as_ref().and_then(|m| {
-            m.items
+        let in_rect = |r: &Rect| col >= r.x && col < r.right() && row >= r.y && row < r.bottom();
+        // A submenu tab row → move the pane there.
+        let tab_hit = self.pane_menu.as_ref().and_then(|m| {
+            m.tab_rects
                 .iter()
-                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
-                .map(|(it, _)| *it)
+                .find(|(_, r)| in_rect(r))
+                .map(|(tg, _)| *tg)
         });
+        if let Some(tg) = tab_hit {
+            if let Some(pane) = self.pane_menu.as_ref().map(|m| m.pane) {
+                self.pane_menu = None;
+                self.move_pane_to_tab(pane, tg);
+            }
+            return;
+        }
+        let hit = self
+            .pane_menu
+            .as_ref()
+            .and_then(|m| m.items.iter().find(|(_, r)| in_rect(r)).map(|(it, _)| *it));
         match hit {
+            // Open the submenu; the tabs list appears to the side.
+            Some(PaneMenuItem::MoveToTab) => {
+                if let Some(m) = self.pane_menu.as_mut() {
+                    m.move_open = true;
+                }
+            }
             Some(PaneMenuItem::Divider) => {} // non-interactive; keep the menu open
             Some(it) => self.pane_menu_action(it),
             None => self.pane_menu = None, // click outside dismisses
@@ -2095,6 +2225,9 @@ impl App {
             PaneMenuItem::SplitVertical => self.split(Axis::Col), // side by side
             PaneMenuItem::SplitHorizontal => self.split(Axis::Row), // stacked
             PaneMenuItem::RunningCmd => self.open_cmd_inspect(pane),
+            // Handled in `pane_menu_click` (opens a submenu, keeps the menu open);
+            // reachable here only via a direct call — treat as a no-op.
+            PaneMenuItem::MoveToTab => {}
             PaneMenuItem::Close => self.close_pane(pane),
         }
     }
@@ -3493,6 +3626,96 @@ mod tests {
         app.run_cmd(crate::app::keys::Cmd::OpenBoard);
         app.open_pane_menu(app.layout().focus, 6, 6);
         assert!(app.pane_menu.is_none(), "no pane menu on the orch board");
+    }
+
+    /// Moving a pane to another tab re-parents its id between layout trees — the
+    /// process/PTY survives (never through `close_pane`) — and if the source tab
+    /// empties it collapses, with focus following the pane.
+    #[test]
+    fn move_pane_to_tab_reparents_and_keeps_the_process() {
+        let _env = crate::persist::test_env("pane-move");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+
+        // Tab 0 holds pane `p`. A new tab 1 holds its own pane.
+        let p = app.layout().focus;
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        assert_eq!(app.ws().active_tab, 1, "new tab is active");
+        let tab1_pane = app.layout().focus;
+        assert_ne!(p, tab1_pane);
+        app.workspaces[0].active_tab = 0; // back to the pane we'll move
+
+        // The submenu offers tab #1 as a target.
+        let targets = app.pane_move_targets();
+        assert!(
+            targets.iter().any(|(t, _)| *t == MoveTarget::Tab(1)),
+            "tab 1 is a move target"
+        );
+
+        // Move `p` into tab 1. Tab 0 (now empty) is removed, so the target becomes
+        // the only tab, holding both panes; the process is untouched.
+        app.move_pane_to_tab(p, MoveTarget::Tab(1));
+        assert!(
+            app.panes.contains_key(&p),
+            "the pane's process survived the move"
+        );
+        assert_eq!(app.ws().tabs.len(), 1, "the emptied source tab collapsed");
+        let leaves = app.ws().tabs[0].layout.leaves();
+        assert!(
+            leaves.contains(&p) && leaves.contains(&tab1_pane),
+            "both panes now live in the target tab"
+        );
+        assert_eq!(app.ws().active_tab, 0, "focus followed the pane's new tab");
+        assert_eq!(app.layout().focus, p, "the moved pane is focused");
+    }
+
+    /// End-to-end: right-click a pane, hover "Move to tab" so the submenu opens
+    /// and fills its tab rects, then click a tab row to move the pane there.
+    #[test]
+    fn move_to_tab_submenu_opens_on_hover_and_moves_on_click() {
+        let _env = crate::persist::test_env("pane-move-menu");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let p = app.layout().focus;
+        app.run_cmd(crate::app::keys::Cmd::NewTab); // tab 1
+        app.workspaces[0].active_tab = 0;
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.open_pane_menu(p, 6, 6);
+        app.hover = None;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        // Hover the "Move to tab" row → next render opens the submenu.
+        let mrect = app
+            .pane_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(it, _)| *it == PaneMenuItem::MoveToTab)
+            .map(|(_, r)| *r)
+            .expect("Move to tab row is present");
+        app.hover = Some((mrect.x + 1, mrect.y));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(app.pane_menu.as_ref().unwrap().move_open, "submenu opened");
+        let tab_rects = app.pane_menu.as_ref().unwrap().tab_rects.clone();
+        assert!(!tab_rects.is_empty(), "submenu listed tabs");
+
+        // Click the tab #1 row → the pane moves and the menu closes.
+        let (_, r) = tab_rects
+            .iter()
+            .find(|(tg, _)| *tg == MoveTarget::Tab(1))
+            .expect("tab 1 offered");
+        app.pane_menu_click(r.x + 1, r.y);
+        assert!(app.pane_menu.is_none(), "menu closed after moving");
+        assert!(app.panes.contains_key(&p), "pane survived");
+        assert!(
+            app.ws().tabs.iter().any(|t| t.layout.leaves().contains(&p)),
+            "pane landed in a tab"
+        );
     }
 
     #[test]

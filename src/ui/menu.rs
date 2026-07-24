@@ -120,8 +120,13 @@ pub(super) fn draw_pane_menu(
         return;
     };
     let anchor = menu.anchor;
-    let items = app.pane_menu_items();
     let extras = menu.module_actions.clone();
+    let move_targets = menu.move_targets.clone();
+    // Submenu rects from the *previous* frame, to keep the submenu open while the
+    // cursor is over it (before we recompute this frame's rects).
+    let prev_tab_rects = menu.tab_rects.clone();
+
+    let items = app.pane_menu_items();
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
@@ -131,8 +136,62 @@ pub(super) fn draw_pane_menu(
         })
         .collect();
     let rects = render_popup(f, area, anchor, &rows, app.hover, t);
+    let move_rect = items
+        .iter()
+        .zip(&rects)
+        .find(|(it, _)| **it == PaneMenuItem::MoveToTab)
+        .map(|(_, r)| *r);
     if let Some(menu) = app.pane_menu.as_mut() {
-        menu.items = items.into_iter().zip(rects).collect();
+        menu.items = items.iter().copied().zip(rects.iter().copied()).collect();
+    }
+
+    // Sticky open/close of the submenu based on where the cursor is: over the
+    // "Move to tab" row or the submenu opens it; over another main row closes it;
+    // over the border gap between them leaves it unchanged (so it doesn't flicker).
+    if let (Some(mrect), Some(hov)) = (move_rect, app.hover) {
+        let in_r =
+            |r: &Rect| hov.0 >= r.x && hov.0 < r.right() && hov.1 >= r.y && hov.1 < r.bottom();
+        let over_move = in_r(&mrect);
+        let over_submenu = prev_tab_rects.iter().any(|(_, r)| in_r(r));
+        let over_other = items.iter().zip(&rects).any(|(it, r)| {
+            !matches!(it, PaneMenuItem::MoveToTab | PaneMenuItem::Divider) && in_r(r)
+        });
+        if let Some(menu) = app.pane_menu.as_mut() {
+            if over_move || over_submenu {
+                menu.move_open = true;
+            } else if over_other {
+                menu.move_open = false;
+            }
+        }
+    }
+
+    let open = app.pane_menu.as_ref().is_some_and(|m| m.move_open);
+    match (open.then_some(()).and(move_rect), move_targets.is_empty()) {
+        (Some(mrect), false) => {
+            let sub_rows: Vec<MenuRow> = move_targets
+                .iter()
+                .map(|(_, label)| MenuRow {
+                    text: label.clone(),
+                    divider: false,
+                    destructive: false,
+                })
+                .collect();
+            // Beside the main popup, first row aligned with the "Move to tab" row.
+            let sub_anchor = (mrect.right() + 1, mrect.y.saturating_sub(1));
+            let sub_rects = render_popup(f, area, sub_anchor, &sub_rows, app.hover, t);
+            if let Some(menu) = app.pane_menu.as_mut() {
+                menu.tab_rects = move_targets
+                    .iter()
+                    .map(|(tg, _)| *tg)
+                    .zip(sub_rects)
+                    .collect();
+            }
+        }
+        _ => {
+            if let Some(menu) = app.pane_menu.as_mut() {
+                menu.tab_rects.clear();
+            }
+        }
     }
 }
 
@@ -190,6 +249,8 @@ fn pane_label(it: PaneMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> S
         PaneMenuItem::SplitVertical => cat.menu_split_vertical.to_string(),
         PaneMenuItem::SplitHorizontal => cat.menu_split_horizontal.to_string(),
         PaneMenuItem::RunningCmd => cat.menu_running_cmd.to_string(),
+        // A trailing ▸ marks the row that opens the tabs submenu.
+        PaneMenuItem::MoveToTab => format!("{} ▸", cat.menu_move_to_tab),
         PaneMenuItem::Divider => String::new(),
         PaneMenuItem::Close => cap_first(cat.act_close),
         PaneMenuItem::Module(i) => module_label(extras, i),
