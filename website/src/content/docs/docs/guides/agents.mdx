@@ -94,6 +94,36 @@ You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
 before you installed bohay. The ✕ hides an entry from the list. It never
 touches the agent's stored session.
 
+## Fork a session into a new pane
+
+Sometimes you want to try a different direction without losing where you are.
+**Fork to new pane** branches the agent conversation in the current pane into a
+brand new pane beside it. The fork inherits the **entire context** of the
+original session, but under a new session id, so the two run independently: keep
+the original going in the left pane and explore the branch on the right, with no
+crossed wires.
+
+Two ways to trigger it:
+
+- **Right-click** the pane and choose **Fork to new pane**.
+- Press **`Ctrl+Space f`** to fork the focused pane.
+
+The new pane opens straight into the agent, already caught up on the whole
+conversation, exactly as if you had resumed it, except the original session is
+untouched and the two diverge from here.
+
+Forking uses the agent's own fork command, so it is available for agents that
+support it natively:
+
+| Agent | Forks via |
+|---|---|
+| Claude Code | `claude --resume <id> --fork-session` |
+| Pi | `pi --fork <id>` |
+
+The action (and the shortcut) only does something for a pane running one of
+these. For everything else it is a no-op, and the right-click entry does not
+appear, so you never get a fork that quietly dropped its context.
+
 ## Precise events: the integration hook
 
 Screen-based detection needs no setup and works for everything. The optional

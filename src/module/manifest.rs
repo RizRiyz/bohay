@@ -347,6 +347,7 @@ pub const KNOWN_EVENTS: &[&str] = &[
     "tab.closed",
     "pane.created",
     "pane.closed",
+    "pane.forked",
     "pane.agent_status_changed",
     "agent.hook",
     "task.added",

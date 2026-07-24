@@ -18,6 +18,7 @@ pub enum Cmd {
     FocusRight,
     SplitRight,
     SplitDown,
+    ForkSession,
     ClosePane,
     ZoomPane,
     ResizeMode,
@@ -49,6 +50,7 @@ impl Cmd {
         Cmd::FocusRight,
         Cmd::SplitRight,
         Cmd::SplitDown,
+        Cmd::ForkSession,
         Cmd::ClosePane,
         Cmd::ZoomPane,
         Cmd::ResizeMode,
@@ -80,6 +82,7 @@ impl Cmd {
             Cmd::FocusRight => "focus_right",
             Cmd::SplitRight => "split_right",
             Cmd::SplitDown => "split_down",
+            Cmd::ForkSession => "fork_session",
             Cmd::ClosePane => "close_pane",
             Cmd::ZoomPane => "zoom_pane",
             Cmd::ResizeMode => "resize_mode",
@@ -114,6 +117,7 @@ impl Cmd {
             Cmd::FocusRight => cat.cmd_focus_right,
             Cmd::SplitRight => cat.cmd_split_right,
             Cmd::SplitDown => cat.cmd_split_down,
+            Cmd::ForkSession => cat.cmd_fork_session,
             Cmd::ClosePane => cat.cmd_close_pane,
             Cmd::ZoomPane => cat.cmd_zoom_pane,
             Cmd::ResizeMode => cat.cmd_resize_mode,
@@ -146,6 +150,7 @@ impl Cmd {
             Cmd::FocusRight => "→",
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
+            Cmd::ForkSession => "f",
             Cmd::ClosePane => "x",
             Cmd::ZoomPane => "z",
             Cmd::ResizeMode => "r",
@@ -259,6 +264,11 @@ impl App {
             Cmd::FocusRight => self.focus_dir(Dir::Right),
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
+            // Fork the focused agent pane's session into a new pane (no-op if it
+            // isn't a fork-capable agent).
+            Cmd::ForkSession => {
+                self.fork_pane(self.layout().focus);
+            }
             Cmd::ClosePane => {
                 // A git tab / orchestration board has no real pane — close the
                 // dashboard tab instead.

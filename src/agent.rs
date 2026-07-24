@@ -36,6 +36,10 @@ struct SessionSource {
     discover: Option<Discovery>,
     /// Build the resume command from an already shell-quoted id (`q`).
     resume: fn(&str) -> String,
+    /// Build the *fork* command from a shell-quoted id: continue the session in a
+    /// NEW, diverging session that inherits the original's full context, leaving
+    /// the original untouched. `None` for agents with no native fork (docs/23).
+    fork: Option<fn(&str) -> String>,
 }
 
 static SOURCES: &[SessionSource] = &[
@@ -47,6 +51,8 @@ static SOURCES: &[SessionSource] = &[
             latest: claude_latest,
         }),
         resume: |q| format!("claude --resume {q}\r"),
+        // `--fork-session` resumes the transcript into a fresh session id.
+        fork: Some(|q| format!("claude --resume {q} --fork-session\r")),
     },
     SessionSource {
         name: "copilot",
@@ -56,6 +62,7 @@ static SOURCES: &[SessionSource] = &[
             latest: copilot_latest,
         }),
         resume: |q| format!("copilot --resume={q}\r"),
+        fork: None,
     },
     SessionSource {
         name: "opencode",
@@ -65,6 +72,7 @@ static SOURCES: &[SessionSource] = &[
             latest: opencode_latest,
         }),
         resume: |q| format!("opencode --session {q}\r"),
+        fork: None,
     },
     SessionSource {
         name: "codex",
@@ -74,6 +82,7 @@ static SOURCES: &[SessionSource] = &[
             latest: codex_latest,
         }),
         resume: |q| format!("codex resume {q}\r"),
+        fork: None,
     },
     SessionSource {
         name: "kimi",
@@ -83,6 +92,7 @@ static SOURCES: &[SessionSource] = &[
             latest: kimi_latest,
         }),
         resume: |q| format!("kimi --resume {q}\r"),
+        fork: None,
     },
     SessionSource {
         name: "grok",
@@ -92,6 +102,7 @@ static SOURCES: &[SessionSource] = &[
             latest: grok_latest,
         }),
         resume: |q| format!("grok --resume {q}\r"),
+        fork: None,
     },
     SessionSource {
         name: "pi",
@@ -101,12 +112,15 @@ static SOURCES: &[SessionSource] = &[
             latest: pi_latest,
         }),
         resume: |q| format!("pi --session {q}\r"),
+        // Pi's session model is a branching tree; `--fork` forks by id (docs/23).
+        fork: Some(|q| format!("pi --fork {q}\r")),
     },
     // Resume-only (no readable session store): usable when a hook reports the id.
     SessionSource {
         name: "cursor",
         discover: None,
         resume: |q| format!("cursor-agent --resume {q}\r"),
+        fork: None,
     },
 ];
 
@@ -159,6 +173,23 @@ pub fn resume_command(agent: &str, session_id: &str) -> Option<String> {
     let src = source(agent)?;
     let q = format!("'{}'", session_id.replace('\'', "'\\''"));
     Some((src.resume)(&q))
+}
+
+/// The command that **forks** an agent's session: continue from the original's
+/// full context in a new, diverging session (the original is left untouched).
+/// `None` for agents without a native fork, unknown agents, or unsafe ids.
+pub fn fork_command(agent: &str, session_id: &str) -> Option<String> {
+    if !safe_id(session_id) {
+        return None;
+    }
+    let f = source(agent)?.fork?;
+    let q = format!("'{}'", session_id.replace('\'', "'\\''"));
+    Some(f(&q))
+}
+
+/// Whether bohay can fork this agent's session (it has a native fork command).
+pub fn can_fork(agent: &str) -> bool {
+    source(agent).and_then(|s| s.fork).is_some()
 }
 
 fn safe_id(id: &str) -> bool {
@@ -1122,6 +1153,27 @@ mod tests {
         assert!(recent
             .iter()
             .any(|s| s.cwd == Path::new("/very/long/path/to/api")));
+    }
+
+    #[test]
+    fn fork_commands() {
+        // Native-fork agents produce a diverging-session command; the id is
+        // shell-quoted like resume, and unsafe ids are refused.
+        let claude = fork_command("claude", "abc").unwrap();
+        assert!(claude.contains("claude --resume") && claude.contains("--fork-session"));
+        assert!(fork_command("pi", "0198abcd-uuid")
+            .unwrap()
+            .contains("pi --fork"));
+        assert!(can_fork("claude") && can_fork("pi"));
+        // Resume-capable, but no native fork (the copy-then-resume tier is future).
+        assert!(fork_command("codex", "c1").is_none());
+        assert!(fork_command("grok", "g1").is_none());
+        assert!(!can_fork("codex") && !can_fork("copilot") && !can_fork("grok"));
+        assert!(!can_fork("cursor"));
+        // Unknown agent / unsafe / empty id all refuse.
+        assert!(fork_command("unknown", "x").is_none());
+        assert!(fork_command("claude", "a b").is_none());
+        assert!(fork_command("claude", "").is_none());
     }
 
     #[test]
