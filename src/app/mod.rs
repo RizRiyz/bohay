@@ -2679,6 +2679,19 @@ impl App {
         if self.active_is_git() || self.active_is_orch() || self.on_pane_close(c, r) {
             return false;
         }
+        // A cell inside a pane's *content* belongs to the pane, never to the
+        // divider. `RESIZE_GRAB_TOL` makes the grab band ±2 cells wide so the
+        // seam is comfortable to hit, but the gap between panes is only one
+        // column — so without this the band reaches ~2 columns into each
+        // neighbour and swallows clicks meant for the terminal (and starts a
+        // resize the user never asked for, since `begin_resize` runs before
+        // selection and mouse-forwarding). Borders and the gap are outside every
+        // content rect, so the seam itself stays as grabbable as before, and
+        // `Ctrl`+drag (`begin_resize_nearest`) is still the deliberate
+        // grab-from-anywhere path.
+        if self.pane_content_at(c, r).is_some() {
+            return false;
+        }
         let area = self.last_pane_area;
         match self.layout().divider_at(area, c, r, RESIZE_GRAB_TOL) {
             Some(d) => {
@@ -2745,7 +2758,13 @@ impl App {
     /// Recompute the divider under the cursor for the hover highlight (RESIZE-4).
     pub fn update_hover_divider(&mut self, c: u16, r: u16) {
         self.hover_divider =
-            if self.active_is_git() || self.active_is_orch() || self.on_pane_close(c, r) {
+            // Mirror `begin_resize`'s content-rect rule, or the divider would
+            // highlight over cells that no longer grab it.
+            if self.active_is_git()
+                || self.active_is_orch()
+                || self.on_pane_close(c, r)
+                || self.pane_content_at(c, r).is_some()
+            {
                 None
             } else {
                 let area = self.last_pane_area;
@@ -3662,6 +3681,57 @@ mod tests {
         )));
         assert!(app.mouse_grab.is_none());
         assert!(app.selection.is_some(), "no tracking → selection as before");
+    }
+
+    /// The divider grab band must not reach into a pane's content.
+    ///
+    /// `RESIZE_GRAB_TOL` is ±2 cells so the seam is comfortable to hit, but the
+    /// gap between panes is a single column — so the band used to overlap ~2
+    /// columns of each neighbour's terminal content. Because `begin_resize` runs
+    /// *before* selection and mouse-forwarding, a click a couple of cells from
+    /// the seam started a divider drag instead of reaching the pane: it stole
+    /// text selections and clicks meant for the agent underneath.
+    #[test]
+    fn resize_grab_zone_does_not_reach_into_pane_content() {
+        let _env = crate::persist::test_env("resize-grab-content");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight); // two side-by-side panes
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(app.layout().len(), 2);
+
+        // Every cell that belongs to a pane's content must be the pane's, even
+        // the columns hugging the seam that the ±2 tolerance used to swallow.
+        let rects: Vec<Rect> = app.pane_content_rects.iter().map(|(_, r)| *r).collect();
+        assert_eq!(rects.len(), 2, "two content rects after the split");
+        for rc in &rects {
+            let mid = rc.y + rc.height / 2;
+            for x in [rc.x, rc.right().saturating_sub(1)] {
+                assert!(
+                    !app.begin_resize(x, mid),
+                    "clicking pane content at ({x},{mid}) must not grab a divider"
+                );
+                assert!(app.resize_drag.is_none());
+                app.end_resize();
+            }
+        }
+
+        // The seam itself is still grabbable: the gap/border column between the
+        // two content rects belongs to no pane.
+        let left = rects.iter().min_by_key(|r| r.x).unwrap();
+        let right = rects.iter().max_by_key(|r| r.x).unwrap();
+        let seam = (left.right() + right.x) / 2;
+        let mid = left.y + left.height / 2;
+        assert!(
+            app.begin_resize(seam, mid),
+            "the seam at ({seam},{mid}) still grabs the divider"
+        );
+        assert!(app.resize_drag.is_some(), "a drag started from the seam");
+        app.end_resize();
     }
 
     #[test]

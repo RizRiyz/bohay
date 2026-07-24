@@ -921,7 +921,9 @@ impl App {
         self.mark_input_for(g.pane);
     }
 
-    fn pane_content_at(&self, x: u16, y: u16) -> Option<(PaneId, Rect)> {
+    /// `pub(super)` so the resize hit-test in `app` can share this exact rule:
+    /// a cell inside a pane's content belongs to the pane, never to a divider.
+    pub(super) fn pane_content_at(&self, x: u16, y: u16) -> Option<(PaneId, Rect)> {
         self.pane_content_rects
             .iter()
             .find(|(_, r)| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())

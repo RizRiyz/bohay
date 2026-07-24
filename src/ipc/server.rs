@@ -190,8 +190,9 @@ pub fn run() -> Result<()> {
         }
 
         // A forced redraw (resize / focus-regained / external damage) must render
-        // even if nothing else changed this tick.
-        dirty |= app.force_redraw;
+        // even if nothing else changed this tick — and so must a client that is
+        // waiting on its full-frame resync (see `needs_render`).
+        dirty = needs_render(dirty, app.force_redraw, !behind.is_empty());
 
         if dirty && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
             let area = Rect::new(0, 0, size.0, size.1);
@@ -303,6 +304,20 @@ fn apply(
 
 fn broadcast(clients: &mut Clients, msg: ServerMessage) {
     clients.retain(|_, tx| !matches!(tx.try_send(msg.clone()), Err(TrySendError::Disconnected(_))));
+}
+
+/// Whether this tick must render, even when nothing in the app changed.
+///
+/// `any_behind` is the subtle one. A client whose bounded channel was full
+/// dropped that update and is marked `behind`; it is repaired by a **full
+/// frame**, and [`send_frame`] only runs inside a render. So if the screen went
+/// quiet at the moment a client fell behind — which is exactly what happens when
+/// a burst of agent output ends — nothing would be dirty, no frame would render,
+/// and that client would sit on a **stale** screen (missing whatever the dropped
+/// diff carried) until some unrelated change happened to wake the loop. Treating
+/// a pending resync as work to do closes that window to one frame interval.
+fn needs_render(app_dirty: bool, force_redraw: bool, any_behind: bool) -> bool {
+    app_dirty || force_redraw || any_behind
 }
 
 /// Send each client a `FrameDiff` (cheap) — or a full `Frame` if it's behind or
@@ -487,4 +502,31 @@ mod shutdown {
     }
 
     pub fn install() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_render;
+
+    /// A client that dropped a diff must get its full-frame resync even when the
+    /// screen goes quiet. The resync only ships from inside a render, so a
+    /// pending `behind` entry has to count as work — otherwise a client that fell
+    /// behind just as a burst of agent output ended would keep showing stale
+    /// cells until something unrelated redrew the screen.
+    #[test]
+    fn a_behind_client_forces_a_frame_on_an_idle_screen() {
+        assert!(
+            needs_render(false, false, true),
+            "a pending resync renders even with nothing else to do"
+        );
+        // The pre-existing reasons still hold.
+        assert!(needs_render(true, false, false), "app activity renders");
+        assert!(needs_render(false, true, false), "a forced redraw renders");
+        // And a genuinely idle loop with every client up to date stays idle, so
+        // this cannot spin the render loop on a quiet screen.
+        assert!(
+            !needs_render(false, false, false),
+            "nothing to do means no frame"
+        );
+    }
 }
