@@ -153,6 +153,14 @@ fn draw_content(
             let scroll = cursor
                 .saturating_sub(avail.saturating_sub(1))
                 .min(total.saturating_sub(avail));
+            // Size the name column to the longest registered name, so the swatches
+            // and descriptions stay in one straight column however long a palette
+            // is called. A fixed width mis-aligned every row once a name outgrew it.
+            let name_w = theme::THEMES
+                .iter()
+                .map(|n| display_width(n))
+                .max()
+                .unwrap_or(9);
             for (vi, i) in (scroll..total).take(avail).enumerate() {
                 let name = theme::THEMES[i];
                 let row = Rect::new(area.x, area.y + vi as u16, area.width, 1);
@@ -160,22 +168,29 @@ fn draw_content(
                 if sel {
                     fill_bg(f, row, t.sel_bg);
                 }
-                // One swatch — a solid block of the theme's *own* accent (its main
-                // color). `by_name` returns full RGB; downsample it to 256 when
-                // the active theme is (i.e. on non-truecolor terminals) so it
-                // renders the right color instead of a mangled truecolor escape.
-                let mut swatch = theme::by_name(name).accent;
+                // Two swatches: the palette's background, then its accent.
+                // Background matters because related flavours (the Catppuccin set)
+                // share an accent and differ only in how dark the surface is — an
+                // accent-only swatch made them indistinguishable. `by_name` returns
+                // full RGB; downsample when the active theme is (i.e. on
+                // non-truecolor terminals) so it renders the right color instead of
+                // a mangled truecolor escape.
+                let pal = theme::by_name(name);
+                let (mut bg, mut accent) = (pal.base, pal.accent);
                 if app.downsample {
-                    swatch = crate::ipc::protocol::to_256(swatch);
+                    bg = crate::ipc::protocol::to_256(bg);
+                    accent = crate::ipc::protocol::to_256(accent);
                 }
                 f.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled(if sel { " ▸ " } else { "   " }, Style::new().fg(t.accent)),
                         Span::styled(
-                            format!("{name:<9}"),
+                            format!("{name:<w$}", w = name_w),
                             Style::new().fg(if sel { t.text } else { t.subtext1 }),
                         ),
-                        Span::styled("    ", Style::new().bg(swatch)),
+                        Span::raw(" "),
+                        Span::styled("   ", Style::new().bg(bg)),
+                        Span::styled("   ", Style::new().bg(accent)),
                         Span::raw("  "),
                         Span::styled(theme::describe(name), Style::new().fg(t.overlay0)),
                     ])),

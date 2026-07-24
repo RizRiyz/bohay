@@ -723,6 +723,9 @@ impl App {
 }
 
 fn theme_cursor(name: &str) -> usize {
+    // Resolve legacy names (`mocha` → `catppuccin-mocha`) first, or a config
+    // written before the rename would highlight the wrong row.
+    let name = theme::canonical(name);
     theme::THEMES.iter().position(|n| *n == name).unwrap_or(0)
 }
 

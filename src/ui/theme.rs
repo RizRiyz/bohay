@@ -81,6 +81,136 @@ impl Theme {
         }
     }
 
+    /// Catppuccin **Mocha** — the dark flavour of the palette whose semantic
+    /// names (crust/mantle/base/surface/overlay/subtext) this `Theme` borrows.
+    /// Upstream hex values; the accent is Mocha's signature mauve.
+    pub fn mocha() -> Self {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        Theme {
+            crust: rgb(0x11, 0x11, 0x1b),
+            mantle: rgb(0x18, 0x18, 0x25), // pane background
+            base: rgb(0x1e, 0x1e, 0x2e),   // sidebar — Mocha's own `base`
+            surface0: rgb(0x31, 0x32, 0x44),
+            surface1: rgb(0x45, 0x47, 0x5a),
+            overlay0: rgb(0x6c, 0x70, 0x86),
+            overlay1: rgb(0x7f, 0x84, 0x9c),
+            subtext0: rgb(0xa6, 0xad, 0xc8),
+            subtext1: rgb(0xba, 0xc2, 0xde),
+            text: rgb(0xcd, 0xd6, 0xf4),
+            accent: rgb(0xcb, 0xa6, 0xf7), // mauve
+            sel_bg: rgb(0x3f, 0x33, 0x59), // dark mauve tint
+            border: rgb(0x45, 0x47, 0x5a),
+            border_focus: rgb(0x7f, 0x84, 0x9c),
+            green: rgb(0xa6, 0xe3, 0xa1), // idle
+            mint: rgb(0x94, 0xe2, 0xd5),  // done (teal)
+            amber: rgb(0xfa, 0xb3, 0x87), // working (peach)
+            coral: rgb(0xf3, 0x8b, 0xa8), // blocked (red)
+        }
+    }
+
+    /// Catppuccin **Macchiato** — one step lighter than Mocha. Upstream hexes.
+    pub fn macchiato() -> Self {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        Theme {
+            crust: rgb(0x18, 0x19, 0x26),
+            mantle: rgb(0x1e, 0x20, 0x30),
+            base: rgb(0x24, 0x27, 0x3a),
+            surface0: rgb(0x36, 0x3a, 0x4f),
+            surface1: rgb(0x49, 0x4d, 0x64),
+            overlay0: rgb(0x6e, 0x73, 0x8d),
+            overlay1: rgb(0x80, 0x87, 0xa2),
+            subtext0: rgb(0xa5, 0xad, 0xcb),
+            subtext1: rgb(0xb8, 0xc0, 0xe0),
+            text: rgb(0xca, 0xd3, 0xf5),
+            accent: rgb(0xc6, 0xa0, 0xf6), // mauve
+            sel_bg: rgb(0x3b, 0x32, 0x54),
+            border: rgb(0x49, 0x4d, 0x64),
+            border_focus: rgb(0x80, 0x87, 0xa2),
+            green: rgb(0xa6, 0xda, 0x95),
+            mint: rgb(0x8b, 0xd5, 0xca),
+            amber: rgb(0xf5, 0xa9, 0x7f),
+            coral: rgb(0xed, 0x87, 0x96),
+        }
+    }
+
+    /// Catppuccin **Frappé** — the lightest of the three dark flavours.
+    pub fn frappe() -> Self {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        Theme {
+            crust: rgb(0x23, 0x26, 0x34),
+            mantle: rgb(0x29, 0x2c, 0x3c),
+            base: rgb(0x30, 0x34, 0x46),
+            surface0: rgb(0x41, 0x45, 0x59),
+            surface1: rgb(0x51, 0x57, 0x6d),
+            overlay0: rgb(0x73, 0x79, 0x94),
+            overlay1: rgb(0x83, 0x8b, 0xa7),
+            subtext0: rgb(0xa5, 0xad, 0xce),
+            subtext1: rgb(0xb5, 0xbf, 0xe2),
+            text: rgb(0xc6, 0xd0, 0xf5),
+            accent: rgb(0xca, 0x9e, 0xe6), // mauve
+            sel_bg: rgb(0x46, 0x3e, 0x5e),
+            border: rgb(0x51, 0x57, 0x6d),
+            border_focus: rgb(0x83, 0x8b, 0xa7),
+            green: rgb(0xa6, 0xd1, 0x89),
+            mint: rgb(0x81, 0xc8, 0xbe),
+            amber: rgb(0xef, 0x9f, 0x76),
+            coral: rgb(0xe7, 0x82, 0x84),
+        }
+    }
+
+    /// Gruvbox **dark** — retro warm earth tones. Upstream hex values; the accent
+    /// is Gruvbox's bright yellow rather than its orange, which would sit too
+    /// close to `redsands` once downsampled to 256 colors.
+    pub fn gruvbox() -> Self {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        Theme {
+            crust: rgb(0x1d, 0x20, 0x21),  // bg0_h
+            mantle: rgb(0x28, 0x28, 0x28), // bg — pane background
+            base: rgb(0x3c, 0x38, 0x36),   // bg1 — sidebar
+            surface0: rgb(0x32, 0x30, 0x2f),
+            surface1: rgb(0x50, 0x49, 0x45),
+            overlay0: rgb(0x66, 0x5c, 0x54),
+            overlay1: rgb(0x7c, 0x6f, 0x64),
+            subtext0: rgb(0xa8, 0x99, 0x84),
+            subtext1: rgb(0xbd, 0xae, 0x93),
+            text: rgb(0xeb, 0xdb, 0xb2),
+            accent: rgb(0xfa, 0xbd, 0x2f), // bright yellow
+            sel_bg: rgb(0x45, 0x3d, 0x21), // dark amber tint
+            border: rgb(0x50, 0x49, 0x45),
+            border_focus: rgb(0x92, 0x83, 0x74),
+            green: rgb(0xb8, 0xbb, 0x26), // idle
+            mint: rgb(0x8e, 0xc0, 0x7c),  // done (aqua)
+            amber: rgb(0xfe, 0x80, 0x19), // working (orange)
+            coral: rgb(0xfb, 0x49, 0x34), // blocked (bright red)
+        }
+    }
+
+    /// Gruvbox **light** — the same earth tones on cream, for light terminals.
+    /// Surfaces run lightest-first here, like `latte`.
+    pub fn gruvbox_light() -> Self {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        Theme {
+            crust: rgb(0xfb, 0xf1, 0xc7),  // bg0
+            mantle: rgb(0xf2, 0xe5, 0xbc), // pane background
+            base: rgb(0xeb, 0xdb, 0xb2),   // bg1 — sidebar
+            surface0: rgb(0xd5, 0xc4, 0xa1),
+            surface1: rgb(0xbd, 0xae, 0x93),
+            overlay0: rgb(0xa8, 0x99, 0x84),
+            overlay1: rgb(0x92, 0x83, 0x74),
+            subtext0: rgb(0x66, 0x5c, 0x54),
+            subtext1: rgb(0x50, 0x49, 0x45),
+            text: rgb(0x3c, 0x38, 0x36),
+            accent: rgb(0xaf, 0x3a, 0x03), // burnt orange, dark enough for cream
+            sel_bg: rgb(0xe0, 0xc6, 0x8a),
+            border: rgb(0xbd, 0xae, 0x93),
+            border_focus: rgb(0x7c, 0x6f, 0x64),
+            green: rgb(0x79, 0x74, 0x0e), // idle
+            mint: rgb(0x42, 0x7b, 0x58),  // done (aqua)
+            amber: rgb(0xb5, 0x76, 0x14), // working
+            coral: rgb(0x9d, 0x00, 0x06), // blocked
+        }
+    }
+
     /// A warm light palette (Catppuccin-Latte-ish) for light terminals.
     pub fn latte() -> Self {
         let rgb = |r, g, b| Color::Rgb(r, g, b);
@@ -310,8 +440,36 @@ impl Theme {
 
 /// Built-in palette names, in display order (first is the default).
 pub const THEMES: &[&str] = &[
-    "noir", "ocean", "dracula", "nord", "sunset", "homebrew", "grass", "redsands", "latte", "mono",
+    "noir",
+    "ocean",
+    "dracula",
+    "nord",
+    "catppuccin-mocha",
+    "catppuccin-macchiato",
+    "catppuccin-frappe",
+    "gruvbox",
+    "sunset",
+    "homebrew",
+    "grass",
+    "redsands",
+    "catppuccin-latte",
+    "gruvbox-light",
+    "mono",
 ];
+
+/// Map a stored theme name onto its current registry name. The Catppuccin
+/// palettes were originally registered as bare `latte`/`mocha`; a config written
+/// then must keep working rather than silently falling back to `noir`.
+pub fn canonical(name: &str) -> &str {
+    match name {
+        "latte" => "catppuccin-latte",
+        "mocha" => "catppuccin-mocha",
+        "macchiato" => "catppuccin-macchiato",
+        "frappe" => "catppuccin-frappe",
+        "gruvboxlight" => "gruvbox-light",
+        other => other,
+    }
+}
 
 /// A theme by name; unknown names fall back to `noir`.
 pub fn by_name(name: &str) -> Theme {
@@ -322,8 +480,13 @@ pub fn by_name(name: &str) -> Theme {
         "grass" => Theme::grass(),
         "dracula" => Theme::dracula(),
         "nord" => Theme::nord(),
+        "catppuccin-mocha" | "mocha" => Theme::mocha(),
+        "catppuccin-macchiato" | "macchiato" => Theme::macchiato(),
+        "catppuccin-frappe" | "frappe" => Theme::frappe(),
+        "gruvbox" => Theme::gruvbox(),
+        "gruvbox-light" | "gruvboxlight" => Theme::gruvbox_light(),
         "sunset" => Theme::sunset(),
-        "latte" => Theme::latte(),
+        "catppuccin-latte" | "latte" => Theme::latte(),
         "mono" => Theme::mono(),
         _ => Theme::noir(),
     }
@@ -338,8 +501,13 @@ pub fn describe(name: &str) -> &'static str {
         "grass" => "green field, pale-yellow text",
         "dracula" => "indigo dark, violet accent",
         "nord" => "cool arctic blue-grey",
+        "catppuccin-mocha" | "mocha" => "darkest Catppuccin, mauve",
+        "catppuccin-macchiato" | "macchiato" => "softer dark Catppuccin",
+        "catppuccin-frappe" | "frappe" => "lightest dark Catppuccin",
+        "gruvbox" => "retro warm dark, yellow accent",
+        "gruvbox-light" | "gruvboxlight" => "Gruvbox on cream, burnt orange",
         "sunset" => "neon synthwave, hot-pink",
-        "latte" => "warm light",
+        "catppuccin-latte" | "latte" => "light Catppuccin, warm",
         "mono" => "grayscale, no accent color",
         _ => "near-black, fluo-green accent",
     }
@@ -493,22 +661,40 @@ mod tests {
     fn theme_registry_is_consistent() {
         // Every listed palette resolves, has a description, and a distinct accent
         // (guards against adding a name to THEMES but forgetting by_name/describe).
-        let mut accents = std::collections::HashSet::new();
-        // The picker swatch downsamples each accent to 256 colors on non-truecolor
-        // terminals — those must stay distinct too, or the swatches look identical.
-        let mut accents_256 = std::collections::HashSet::new();
+        let mut swatches = std::collections::HashSet::new();
+        // The picker swatch is (background, accent) and is downsampled to 256
+        // colors on non-truecolor terminals — the *pair* must stay distinct, or two
+        // rows look identical. A pair rather than the accent alone, because the
+        // Catppuccin flavours deliberately share an accent and differ by surface.
+        let mut swatches_256 = std::collections::HashSet::new();
         for &name in THEMES {
             assert!(!describe(name).is_empty(), "{name} needs a description");
             let pal = by_name(name);
             assert!(
-                accents.insert(format!("{:?}", pal.accent)),
-                "{name} should have a distinct accent"
+                swatches.insert(format!("{:?}{:?}", pal.base, pal.accent)),
+                "{name} should have a distinct background+accent swatch"
             );
+            let px = crate::ipc::protocol::to_256(pal.base);
+            let pa = crate::ipc::protocol::to_256(pal.accent);
             assert!(
-                accents_256.insert(format!("{:?}", crate::ipc::protocol::to_256(pal.accent))),
+                swatches_256.insert(format!("{px:?}{pa:?}")),
                 "{name}'s swatch must stay distinct after 256-color downsampling"
             );
         }
-        assert!(THEMES.len() >= 10, "the new palettes are registered");
+        assert!(THEMES.len() >= 15, "the new palettes are registered");
+
+        // Legacy config values must keep resolving to the same palette.
+        for (old, new) in [
+            ("mocha", "catppuccin-mocha"),
+            ("latte", "catppuccin-latte"),
+            ("gruvboxlight", "gruvbox-light"),
+        ] {
+            assert_eq!(canonical(old), new, "{old} should map to {new}");
+            assert_eq!(
+                format!("{:?}", by_name(old).accent),
+                format!("{:?}", by_name(new).accent),
+                "{old} must still resolve to the {new} palette"
+            );
+        }
     }
 }
