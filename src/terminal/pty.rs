@@ -41,7 +41,51 @@ pub struct Pane {
     /// the loop once per iteration instead of once per read (measured ~30% of
     /// a core of pure wakeup churn during a `yes` firehose).
     data_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the reaper once the child has been waited on. After that the OS may
+    /// recycle its pid, so [`Drop`] must never signal it — it could hit an
+    /// unrelated process.
+    child_exited: Arc<std::sync::atomic::AtomicBool>,
     size: (u16, u16),
+}
+
+impl Drop for Pane {
+    /// Hang up the child, exactly like closing a terminal window.
+    ///
+    /// Without this the pane leaks everything it owns. Dropping `master` closes
+    /// only bohay's own handle: the reader thread still holds a cloned PTY fd, so
+    /// the child never sees EOF, so the reader never returns, so it keeps the
+    /// engine `Arc` (and its whole scrollback grid) alive forever — and the
+    /// writer thread with it, since the engine holds a clone of `input_tx`.
+    /// Measured at 8 panes opened and closed: 8 orphaned shells and ~170 MB never
+    /// reclaimed. It matters because the server deliberately outlives its windows,
+    /// so a long session accumulates one leak per closed pane.
+    ///
+    /// Killing the child breaks the cycle: the reader hits EOF and exits, which
+    /// releases the engine and the scrollback, and the last `input_tx` drop ends
+    /// the writer.
+    fn drop(&mut self) {
+        // Already reaped → the pid may belong to someone else now.
+        if self.child_exited.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(pid) = self.child_pid else { return };
+        // SIGHUP rather than SIGKILL: a shell hangs up its jobs and exits
+        // cleanly, and a deliberately `nohup`ed process still survives — the
+        // same contract as closing the terminal window.
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGHUP);
+        }
+        // No signals on Windows; end the whole child tree instead.
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
 }
 
 impl Pane {
@@ -213,10 +257,15 @@ impl Pane {
         let pending = data_pending.clone();
         thread::spawn(move || read_loop(id, reader, eng, tx, pending));
 
-        // Reap the child so we notice it exiting.
+        // Reap the child so we notice it exiting. The exit flag is set *before*
+        // the event goes out, so by the time the loop closes the pane (and drops
+        // it) `Drop` already knows not to signal a possibly-recycled pid.
+        let child_exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exited = child_exited.clone();
         thread::spawn(move || {
             let mut child = child;
             let _ = child.wait();
+            exited.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = app_tx.send(AppEvent::PtyExit(id));
         });
 
@@ -228,6 +277,7 @@ impl Pane {
             cwd,
             command,
             data_pending,
+            child_exited,
             size: (cols, rows),
         })
     }
@@ -392,6 +442,73 @@ fn read_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reap_tests {
+    use super::*;
+    use crate::ids::PaneId;
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    fn wait_gone(pid: u32) -> bool {
+        for _ in 0..40 {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    fn spawn_sh() -> Pane {
+        let (tx, rx) = mpsc::channel();
+        std::mem::forget(rx); // the real app holds the receiver for the session
+        Pane::spawn(
+            PaneId::alloc(),
+            80,
+            24,
+            std::env::temp_dir(),
+            tx,
+            None,
+            "/bin/sh",
+            500,
+        )
+        .expect("spawn")
+    }
+
+    /// Closing a pane must hang up its child. Regression for the leak where the
+    /// reader thread's cloned PTY fd kept the child alive, which in turn kept the
+    /// engine (and its whole scrollback grid) and both threads alive for the life
+    /// of the server: measured 8/8 orphaned shells and ~170 MB never reclaimed.
+    #[test]
+    fn dropping_a_pane_reaps_its_child() {
+        let pane = spawn_sh();
+        let pid = pane.child_pid.expect("pid");
+        assert!(alive(pid), "child runs while the pane is open");
+        drop(pane);
+        assert!(wait_gone(pid), "LEAK: child {pid} survived the pane");
+    }
+
+    /// Closing one pane must not disturb its neighbours — the signal is aimed at
+    /// one child, not a process group that could take the others with it.
+    #[test]
+    fn closing_one_pane_leaves_the_others_running() {
+        let keep = spawn_sh();
+        let kept_pid = keep.child_pid.expect("pid");
+        let doomed = spawn_sh();
+        let doomed_pid = doomed.child_pid.expect("pid");
+
+        drop(doomed);
+        assert!(wait_gone(doomed_pid), "the closed pane's child exited");
+        assert!(
+            alive(kept_pid),
+            "the surviving pane's child is untouched by its neighbour closing"
+        );
+        drop(keep);
     }
 }
 

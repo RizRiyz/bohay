@@ -900,6 +900,12 @@ pub struct App {
     /// renderer here instead of a `Pane` in `panes`. Invariant: a leaf is in
     /// `panes` **xor** `views`.
     pub views: HashMap<PaneId, ViewKind>,
+    /// Panes running a terminal **editor** on a file (docs/38): the pane is a
+    /// real PTY (so it is in `panes`, not `views`), but the tab bar labels it
+    /// with the file exactly like a read-only view tab. Deliberately not
+    /// persisted — after a restart the pane is no longer that editor, so the
+    /// label must not survive it. Untracked in `drop_leaf_runtime`.
+    pub editor_files: HashMap<PaneId, PathBuf>,
     /// The reused single-click **preview** file pane, if one is open — clicking
     /// another file replaces its content instead of spawning a second pane.
     pub preview_view: Option<PaneId>,
@@ -1095,6 +1101,7 @@ impl App {
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
             views: HashMap::new(),
+            editor_files: HashMap::new(),
             preview_view: None,
             file_git_status: HashMap::new(),
             git_status_inflight: false,
@@ -1433,6 +1440,7 @@ impl App {
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
             views,
+            editor_files: HashMap::new(),
             preview_view: None,
             file_git_status: HashMap::new(),
             git_status_inflight: false,
@@ -2765,6 +2773,7 @@ impl App {
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);
+        self.editor_files.remove(&id); // untrack an editor pane's file (docs/38)
         self.module_panes.remove(&id); // untrack a module pane (MOD-2)
         if self.preview_view == Some(id) {
             self.preview_view = None; // forget it as the reused preview pane

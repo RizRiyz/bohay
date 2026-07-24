@@ -202,6 +202,11 @@ impl App {
                 let cmd = pane.command.clone();
                 self.panes.insert(id, pane);
                 self.status.insert(id, crate::app::PaneStatus::new(cmd));
+                // Track the file so the tab bar labels this tab `■ name`, exactly
+                // like a read-only view tab. An editor pane is an ordinary PTY
+                // pane with no file view behind it, so without this the tab bar
+                // has nothing to derive a name from and falls back to the number.
+                self.editor_files.insert(id, path.clone());
                 let ws = &mut self.workspaces[self.active_ws];
                 ws.tabs.push(Tab::panes(TileLayout::new(id)));
                 ws.active_tab = ws.tabs.len() - 1;
@@ -685,6 +690,25 @@ mod tests {
         assert!(
             !app.views.contains_key(&focus),
             "it is a terminal pane, not a read-only view leaf"
+        );
+        // The tab must show the file, exactly like the read-only viewer's tab:
+        // the pane is tracked in `editor_files`, which is what makes the tab bar
+        // render the same `■ name` label instead of the bare tab number.
+        assert_eq!(
+            app.editor_files.get(&focus).map(|p| p.as_path()),
+            Some(file.as_path()),
+            "the editor pane is tracked with its file for the tab label"
+        );
+        let ws = &app.workspaces[app.active_ws];
+        assert!(
+            ws.tabs[ws.active_tab].name.is_none(),
+            "the label is derived live, not baked into a persisted tab name"
+        );
+        // Closing the pane untracks it, so the label can never outlive the editor.
+        app.close_pane(focus);
+        assert!(
+            !app.editor_files.contains_key(&focus),
+            "closing the editor pane untracks its file"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

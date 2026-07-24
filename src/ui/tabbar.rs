@@ -235,15 +235,22 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     (tab_rects, close_rects, prev_rect, next_rect)
 }
 
-/// If `tab` is a single file-view leaf (docs/38), its `■ name` label (a plain
-/// square glyph, no emoji).
+/// If `tab` shows a single file (docs/38), its `■ name` label (a plain square
+/// glyph, no emoji).
+///
+/// Both ways of opening a file land here, so the two look identical in the tab
+/// bar: the read-only viewer (a native view leaf) and a terminal editor (a real
+/// PTY pane tracked in `editor_files`).
 fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
     let leaves = tab.layout.leaves();
-    if leaves.len() == 1 {
-        if let Some(crate::app::ViewKind::File(v)) = app.views.get(&leaves[0]) {
-            let name = v.path.file_name()?.to_string_lossy().into_owned();
-            return Some(format!("■ {name}"));
-        }
+    if leaves.len() != 1 {
+        return None;
     }
-    None
+    let id = leaves[0];
+    let path = match app.views.get(&id) {
+        Some(crate::app::ViewKind::File(v)) => &v.path,
+        _ => app.editor_files.get(&id)?,
+    };
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(format!("■ {name}"))
 }
