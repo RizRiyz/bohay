@@ -23,9 +23,13 @@ impl App {
                 true // conservative: hover/selection/clicks can change the UI
             }
             AppEvent::Paste(s) => {
+                // `send_paste` re-wraps in the bracketed-paste markers crossterm
+                // stripped, so a child that distinguishes paste from typing (an
+                // agent CLI attaching a dropped file, vim not auto-indenting)
+                // still sees a paste.
                 if let Some(p) = self.focused() {
                     p.scroll_to_bottom(); // pasting is input → snap to live
-                    p.send(s.as_bytes());
+                    p.send_paste(&s);
                 }
                 self.mark_user_input(); // so the echo isn't misread as agent work
                 false // goes to the pane; its echo (PtyData) renders it

@@ -269,6 +269,10 @@ impl VtEngine for AlacrittyEngine {
         self.term.mode().contains(TermMode::SGR_MOUSE)
     }
 
+    fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     fn snapshot_ansi(&self) -> String {
         let grid = self.term.grid();
         let rows = grid.screen_lines();

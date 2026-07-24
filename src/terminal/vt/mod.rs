@@ -96,6 +96,13 @@ pub trait VtEngine: Send {
     /// rather than the legacy X10 byte encoding.
     fn sgr_mouse(&self) -> bool;
 
+    /// Whether the child enabled **bracketed paste** (DECSET 2004). When true a
+    /// paste forwarded into the pane must be wrapped in `ESC[200~`/`ESC[201~`,
+    /// or the program cannot tell pasted text from typed text — which is how a
+    /// dropped file path reaches an agent CLI as literal characters instead of
+    /// an attachment, and how vim auto-indents pasted code into a staircase.
+    fn bracketed_paste(&self) -> bool;
+
     /// Dump the visible screen as ANSI so it can be replayed into a fresh
     /// engine on restore (session persistence). Trailing blanks are trimmed.
     fn snapshot_ansi(&self) -> String;

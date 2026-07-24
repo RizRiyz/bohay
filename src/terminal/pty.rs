@@ -306,6 +306,24 @@ impl Pane {
             .unwrap_or_default()
     }
 
+    /// Send pasted text to the child, wrapped in the bracketed-paste markers
+    /// when the child asked for them (DECSET 2004).
+    ///
+    /// The outer terminal hands bohay a paste with its markers already stripped
+    /// (crossterm turns `ESC[200~ … ESC[201~` into one `Event::Paste`), so
+    /// forwarding the bare text would make the child see it as ordinary typing.
+    /// Programs that distinguish the two then misbehave: an agent CLI shows a
+    /// dropped file's path as literal text instead of attaching the file, and
+    /// vim auto-indents pasted code. Re-wrapping restores the distinction.
+    pub fn send_paste(&self, text: &str) {
+        let bracketed = self
+            .engine
+            .lock()
+            .map(|e| e.bracketed_paste())
+            .unwrap_or(false);
+        self.send(&wrap_paste(text, bracketed));
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if cols == 0 || rows == 0 || (cols, rows) == self.size {
             return;
@@ -321,6 +339,19 @@ impl Pane {
         }
         self.size = (cols, rows);
     }
+}
+
+/// Pasted text as the bytes to write to the child: wrapped in the
+/// bracketed-paste markers when `bracketed`, bare otherwise.
+fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut out = Vec::with_capacity(text.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(b"\x1b[201~");
+    out
 }
 
 /// The file-name component of a program path, for the pane's display command.
@@ -361,5 +392,29 @@ fn read_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_paste;
+
+    /// A dropped file path must reach the child as a *paste*, not as typing.
+    /// bohay receives it with the markers already stripped by crossterm, so it
+    /// re-adds them whenever the child enabled DECSET 2004. Without this, an
+    /// agent CLI renders the path as literal text instead of attaching the file.
+    #[test]
+    fn paste_is_bracketed_only_when_the_child_asked() {
+        let path = "/Users/riz/shot.png";
+        assert_eq!(
+            wrap_paste(path, true),
+            format!("\x1b[200~{path}\x1b[201~").into_bytes(),
+            "wrapped when the child enabled bracketed paste"
+        );
+        assert_eq!(
+            wrap_paste(path, false),
+            path.as_bytes(),
+            "sent bare when it did not, so a plain shell is unaffected"
+        );
     }
 }
