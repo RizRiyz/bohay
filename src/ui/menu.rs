@@ -248,6 +248,7 @@ fn pane_label(it: PaneMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> S
     match it {
         PaneMenuItem::SplitVertical => cat.menu_split_vertical.to_string(),
         PaneMenuItem::SplitHorizontal => cat.menu_split_horizontal.to_string(),
+        PaneMenuItem::ForkPane => cat.menu_fork_pane.to_string(),
         PaneMenuItem::RunningCmd => cat.menu_running_cmd.to_string(),
         // A trailing ▸ marks the row that opens the tabs submenu.
         PaneMenuItem::MoveToTab => format!("{} ▸", cat.menu_move_to_tab),

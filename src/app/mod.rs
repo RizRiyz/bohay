@@ -417,6 +417,9 @@ pub struct PaneMenu {
     pub move_open: bool,
     /// Submenu row rects (target + rect), filled by the renderer for hit-testing.
     pub tab_rects: Vec<(MoveTarget, Rect)>,
+    /// Whether this pane runs a fork-capable agent, snapshotted at open. Gates
+    /// whether the "Fork to new pane" row is shown (docs/23).
+    pub can_fork: bool,
 }
 
 /// Where "Move to tab" sends the pane: an existing tab (by index) or a fresh one.
@@ -433,6 +436,10 @@ pub enum MoveTarget {
 pub enum PaneMenuItem {
     SplitVertical,
     SplitHorizontal,
+    /// "Fork to new pane" — branch this pane's agent session into a new pane to
+    /// the right, preserving the original's context (docs/23). Shown only for
+    /// fork-capable agents.
+    ForkPane,
     /// "What's running here?" — the OS process tree for this pane (docs/07).
     RunningCmd,
     /// Parent row: hovering it opens a submenu of tabs to move this pane into.
@@ -449,6 +456,7 @@ impl PaneMenuItem {
     pub const ALL: &'static [PaneMenuItem] = &[
         PaneMenuItem::SplitVertical,
         PaneMenuItem::SplitHorizontal,
+        PaneMenuItem::ForkPane,
         PaneMenuItem::RunningCmd,
         PaneMenuItem::MoveToTab,
         PaneMenuItem::Divider,
@@ -1746,6 +1754,61 @@ impl App {
         }
     }
 
+    /// Fork `pane`'s agent session into a new pane split off to its right,
+    /// preserving the original conversation under a *new* session id (the
+    /// original session keeps running, untouched). No-op unless the pane runs a
+    /// fork-capable agent (docs/23) whose session id can be resolved — from the
+    /// integration hook's exact id, else disk discovery keyed by the pane's cwd.
+    /// Returns whether a fork pane was spawned. The pane's process is spawned on
+    /// the agent's fork command (never typed), like a resume.
+    pub fn fork_pane(&mut self, pane: PaneId) -> bool {
+        let Some(st) = self.status.get(&pane) else {
+            return false;
+        };
+        let agent = st.agent.clone();
+        if !crate::agent::can_fork(&agent) {
+            return false;
+        }
+        let Some(cwd) = self.panes.get(&pane).map(|p| p.cwd.clone()) else {
+            return false;
+        };
+        let sid = st
+            .agent_session
+            .as_ref()
+            .map(|s| s.session_id.clone())
+            .or_else(|| crate::agent::latest_session(&agent, &cwd));
+        let Some(sid) = sid else {
+            return false; // nothing to fork from
+        };
+        let Some(fork) = crate::agent::fork_command(&agent, &sid) else {
+            return false;
+        };
+        let Some(new_id) = self.spawn_resume_pane(cwd, &fork) else {
+            return false;
+        };
+        // Split off to the right of the *source* pane (a vertical divider),
+        // regardless of what was focused before.
+        self.layout_mut().focus = pane;
+        self.layout_mut().split_focused(Axis::Col, new_id);
+        // Label the new pane as the same agent right away (detection will confirm
+        // it, and pick up the fork's fresh session id, on the next tick).
+        if let Some(nst) = self.status.get_mut(&new_id) {
+            nst.agent = agent.clone();
+        }
+        self.zoomed = false;
+        self.session_dirty = true;
+        self.show_toast(format!("forked {agent} session"));
+        self.emit_event(
+            "pane.forked",
+            serde_json::json!({
+                "from": pane.0.to_string(),
+                "to": new_id.0.to_string(),
+                "agent": agent,
+            }),
+        );
+        true
+    }
+
     fn new_tab(&mut self) {
         // A new tab opens at the workspace's **static** folder (not wherever the
         // current pane has `cd`'d), matching the static-workspace model.
@@ -1927,10 +1990,12 @@ impl App {
             .pane_menu
             .as_ref()
             .is_some_and(|m| !m.move_targets.is_empty());
+        let can_fork = self.pane_menu.as_ref().is_some_and(|m| m.can_fork);
         let mut items: Vec<PaneMenuItem> = PaneMenuItem::ALL
             .iter()
             .copied()
             .filter(|it| has_move || *it != PaneMenuItem::MoveToTab)
+            .filter(|it| can_fork || *it != PaneMenuItem::ForkPane)
             .collect();
         let extras = self
             .pane_menu
@@ -2077,6 +2142,10 @@ impl App {
             return;
         }
         let move_targets = self.pane_move_targets();
+        let can_fork = self
+            .status
+            .get(&pane)
+            .is_some_and(|st| crate::agent::can_fork(&st.agent));
         self.pane_menu = Some(PaneMenu {
             pane,
             anchor: (col, row),
@@ -2085,6 +2154,7 @@ impl App {
             move_targets,
             move_open: false,
             tab_rects: Vec::new(),
+            can_fork,
         });
     }
 
@@ -2224,6 +2294,9 @@ impl App {
             }
             PaneMenuItem::SplitVertical => self.split(Axis::Col), // side by side
             PaneMenuItem::SplitHorizontal => self.split(Axis::Row), // stacked
+            PaneMenuItem::ForkPane => {
+                self.fork_pane(pane);
+            }
             PaneMenuItem::RunningCmd => self.open_cmd_inspect(pane),
             // Handled in `pane_menu_click` (opens a submenu, keeps the menu open);
             // reachable here only via a direct call — treat as a no-op.
@@ -3944,6 +4017,40 @@ mod tests {
         assert_eq!(s.agent, "claude");
         assert_eq!(s.agent_session.as_ref().unwrap().session_id, "abc");
         assert!(app.resumable.is_empty(), "session dropped from the list");
+    }
+
+    #[test]
+    fn fork_pane_splits_a_fork_capable_agent() {
+        let _env = crate::persist::test_env("fork-pane");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let src = app.layout().focus;
+        let before = app.layout().len();
+
+        // A plain pane can't fork: no agent, no session.
+        assert!(!app.fork_pane(src), "non-agent pane does not fork");
+        assert_eq!(app.layout().len(), before);
+
+        // Mark it as a live Claude pane with a known session id (as the hook
+        // would), then fork: a new pane splits in beside it, source untouched.
+        {
+            let st = app.status.get_mut(&src).unwrap();
+            st.agent = "claude".into();
+            st.agent_session = Some(AgentSession {
+                agent: "claude".into(),
+                session_id: "sess-abc".into(),
+            });
+        }
+        assert!(app.fork_pane(src), "fork-capable agent forks");
+        assert_eq!(app.layout().len(), before + 1, "a fork pane was spawned");
+        // Both the source and the new fork pane are present in the same tab.
+        let leaves = app.layout().leaves();
+        assert!(leaves.contains(&src), "source pane survives the fork");
+        assert_eq!(leaves.len(), before + 1);
+        // The focused (new) pane is tagged as the same agent.
+        let new = app.layout().focus;
+        assert_ne!(new, src);
+        assert_eq!(app.status.get(&new).unwrap().agent, "claude");
     }
 
     #[test]
