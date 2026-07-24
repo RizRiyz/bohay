@@ -144,8 +144,76 @@ impl App {
             // the 1 Hz `ensure_file_tree` tick (that cadence is for background
             // re-root/refresh, not a user click).
             self.load_pending_dirs();
+        } else if target == OpenTarget::Tab {
+            // A plain click honors the configured default (read-only or an editor).
+            match self.file_open_editor() {
+                Some(cmd) => self.open_file_in_editor(row.path, &cmd),
+                None => self.open_file_view(row.path, OpenTarget::Tab),
+            }
         } else {
+            // Shift+click (Pane) / preview always opens the native read-only view.
             self.open_file_view(row.path, target);
+        }
+    }
+
+    /// The configured default open action (docs/38), resolved to an editor
+    /// run-command — or `None` for the read-only viewer. A configured editor
+    /// that is no longer installed degrades to read-only, so a plain click never
+    /// silently does nothing.
+    fn file_open_editor(&self) -> Option<String> {
+        let choice = self.config.layout.file_open.trim();
+        if choice.is_empty() || choice == crate::config::FILE_OPEN_READONLY {
+            return None;
+        }
+        self.editors
+            .iter()
+            .find(|(cmd, _)| cmd == choice)
+            .map(|(cmd, _)| cmd.clone())
+    }
+
+    /// Open `path` in a terminal editor in a **new tab** (docs/38). `editor` is a
+    /// run-command such as `"vim"` or `"emacs -nw"`; it runs as a real PTY pane
+    /// (argv = the editor's words + the file path — a literal argument, so no
+    /// shell quoting is involved), so quitting the editor fires `PtyExit` and the
+    /// tab closes. The pane's cwd is the file's folder.
+    pub fn open_file_in_editor(&mut self, path: PathBuf, editor: &str) {
+        let cwd = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.ws().cwd.clone());
+        let mut argv: Vec<String> = editor.split_whitespace().map(str::to_string).collect();
+        if argv.is_empty() {
+            return;
+        }
+        argv.push(path.to_string_lossy().into_owned());
+        let id = PaneId::alloc();
+        let scrollback = self.config.scrollback();
+        match crate::terminal::pty::Pane::spawn_command(
+            id,
+            80,
+            24,
+            cwd,
+            self.app_tx.clone(),
+            &argv,
+            &[],
+            scrollback,
+        ) {
+            Ok(pane) => {
+                let cmd = pane.command.clone();
+                self.panes.insert(id, pane);
+                self.status.insert(id, crate::app::PaneStatus::new(cmd));
+                let ws = &mut self.workspaces[self.active_ws];
+                ws.tabs.push(Tab::panes(TileLayout::new(id)));
+                ws.active_tab = ws.tabs.len() - 1;
+                self.zoomed = false;
+                self.session_dirty = true;
+                self.mode = Mode::Normal;
+                self.emit_event(
+                    "pane.created",
+                    serde_json::json!({"pane": id.0.to_string()}),
+                );
+            }
+            Err(e) => self.show_toast(format!("cannot open editor: {e}")),
         }
     }
 
@@ -168,11 +236,20 @@ impl App {
     /// Open the file context menu for visible row `index`, anchored at the cursor.
     pub fn open_file_menu(&mut self, index: usize, col: u16, row: u16) {
         if let Some(r) = self.file_tree.visible_rows().get(index).cloned() {
+            // Snapshot the editor list for a file (open actions are file-only), so
+            // an `OpenWith(i)` picked from this menu maps to the same editor even
+            // if the cache changes underneath it.
+            let editors = if r.is_dir {
+                Vec::new()
+            } else {
+                self.editors.clone()
+            };
             self.file_menu = Some(FileMenu {
                 path: r.path,
                 is_dir: r.is_dir,
                 anchor: (col, row),
                 items: Vec::new(),
+                editors,
             });
         }
     }
@@ -219,6 +296,13 @@ impl App {
             })
         };
         match item {
+            // Open actions target the clicked file (never a folder).
+            FileMenuItem::OpenReadonly => self.open_file_view(menu.path.clone(), OpenTarget::Tab),
+            FileMenuItem::OpenWith(i) => {
+                if let Some((cmd, _)) = menu.editors.get(i).cloned() {
+                    self.open_file_in_editor(menu.path.clone(), &cmd);
+                }
+            }
             FileMenuItem::NewFile => {
                 self.file_prompt = prompt(FilePromptKind::NewFile, dir, None, String::new())
             }
@@ -516,8 +600,118 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::DockKind;
+    use crate::app::{DockKind, FileMenu, FileMenuItem};
     use ratatui::{backend::TestBackend, Terminal};
+
+    /// A file's context menu leads with open actions (read-only + one per detected
+    /// editor); a folder's does not — you don't "open" a directory into an editor.
+    #[test]
+    fn file_menu_offers_open_actions_for_files_only() {
+        let editors = vec![
+            ("vim".to_string(), "vim".to_string()),
+            ("nano".to_string(), "nano".to_string()),
+        ];
+        let file = FileMenu {
+            path: PathBuf::from("/tmp/x.rs"),
+            is_dir: false,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: editors.clone(),
+        };
+        let items = file.build_items();
+        assert!(
+            items.contains(&FileMenuItem::OpenReadonly),
+            "read-only offered"
+        );
+        assert!(
+            items.contains(&FileMenuItem::OpenWith(0))
+                && items.contains(&FileMenuItem::OpenWith(1)),
+            "one open-in row per detected editor"
+        );
+        // The open block sits above the CRUD block (a divider between).
+        let ro = items.iter().position(|i| *i == FileMenuItem::OpenReadonly);
+        let del = items.iter().position(|i| *i == FileMenuItem::Delete);
+        assert!(ro < del, "open actions come before Delete");
+
+        let folder = FileMenu {
+            path: PathBuf::from("/tmp"),
+            is_dir: true,
+            anchor: (0, 0),
+            items: Vec::new(),
+            editors: Vec::new(),
+        };
+        let ditems = folder.build_items();
+        assert!(
+            !ditems
+                .iter()
+                .any(|i| matches!(i, FileMenuItem::OpenReadonly | FileMenuItem::OpenWith(_))),
+            "a folder gets no open actions"
+        );
+        assert!(
+            ditems.contains(&FileMenuItem::NewFile),
+            "folder still has CRUD"
+        );
+    }
+
+    /// Opening a file with an editor spawns a real PTY pane (not a native view
+    /// leaf) in a fresh tab, so it behaves like any other terminal program.
+    #[test]
+    fn opening_with_editor_spawns_a_pty_pane_in_a_new_tab() {
+        let _env = crate::persist::test_env("file-editor-open");
+        let dir = std::env::temp_dir().join(format!("bohay-ed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("edit.rs");
+        std::fs::write(&file, b"x\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let tabs_before = app.workspaces[app.active_ws].tabs.len();
+
+        // `cat` stands in for an editor: a real program launched with the file as
+        // a literal argv element (present on every unix CI runner).
+        app.open_file_in_editor(file.clone(), "cat");
+
+        assert_eq!(
+            app.workspaces[app.active_ws].tabs.len(),
+            tabs_before + 1,
+            "a new tab opened for the editor"
+        );
+        let focus = app.layout().focus;
+        assert!(
+            app.panes.contains_key(&focus),
+            "the editor runs in a real PTY pane"
+        );
+        assert!(
+            !app.views.contains_key(&focus),
+            "it is a terminal pane, not a read-only view leaf"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default-open resolver: `readonly` → None; a configured editor that is
+    /// installed → its command; one that vanished → None (degrade to read-only).
+    #[test]
+    fn default_open_resolves_and_degrades() {
+        let _env = crate::persist::test_env("file-open-default");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        assert_eq!(app.file_open_editor(), None, "default is read-only");
+
+        // Configured for vim, but nothing is on PATH → falls back to read-only.
+        app.config.layout.file_open = "vim".to_string();
+        app.editors = Vec::new();
+        assert_eq!(
+            app.file_open_editor(),
+            None,
+            "an uninstalled configured editor degrades to read-only"
+        );
+
+        // Present on PATH → returned as the editor command.
+        app.editors = vec![("vim".to_string(), "vim".to_string())];
+        assert_eq!(app.file_open_editor().as_deref(), Some("vim"));
+    }
 
     fn buffer_text(term: &Terminal<TestBackend>) -> String {
         let buf = term.backend().buffer();

@@ -88,6 +88,57 @@ fn find_on_path(exe: &str) -> Option<String> {
         .map(|full| full.to_string_lossy().into_owned())
 }
 
+/// Is a terminal editor `exe` on `PATH`? (On Windows, also try `exe.exe`.)
+fn editor_on_path(exe: &str) -> bool {
+    find_on_path(exe).is_some() || (cfg!(windows) && find_on_path(&format!("{exe}.exe")).is_some())
+}
+
+/// Terminal editors bohay can offer to open a file with (docs/38): the ones
+/// actually installed on `PATH`, in preference order, plus `$EDITOR` when set
+/// and not already covered. Each entry is `(run command, display label)` — the
+/// command is spawned as a real pane, the label is what Settings/the menu shows.
+///
+/// Computed once at startup and cached on `App` (a handful of `PATH` stats), so
+/// it never runs on the render path. A dead option can only appear if an editor
+/// is uninstalled mid-session, and the open path degrades gracefully then.
+pub fn editor_choices() -> Vec<(String, String)> {
+    // (probe name, run command, label). `emacs -nw` forces the terminal UI.
+    const KNOWN: &[(&str, &str, &str)] = &[
+        ("vim", "vim", "vim"),
+        ("nvim", "nvim", "nvim"),
+        ("nano", "nano", "nano"),
+        ("vi", "vi", "vi"),
+        ("hx", "hx", "helix"),
+        ("micro", "micro", "micro"),
+        ("emacs", "emacs -nw", "emacs"),
+    ];
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (exe, cmd, label) in KNOWN {
+        if editor_on_path(exe) {
+            out.push(((*cmd).to_string(), (*label).to_string()));
+        }
+    }
+    // $EDITOR, honored verbatim (so `EDITOR="emacs -nw"` works) unless its base
+    // name is already listed above.
+    if let Ok(ed) = std::env::var("EDITOR") {
+        let ed = ed.trim();
+        let first = ed.split_whitespace().next().unwrap_or("");
+        let base = std::path::Path::new(first)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(first);
+        let already = !base.is_empty()
+            && (KNOWN.iter().any(|(exe, _, _)| *exe == base)
+                || out
+                    .iter()
+                    .any(|(c, _)| c.split_whitespace().next() == Some(base)));
+        if !ed.is_empty() && !already {
+            out.push((ed.to_string(), format!("$EDITOR ({base})")));
+        }
+    }
+    out
+}
+
 /// Shell choices offered in Settings, as `(keyword, display label)`. The choice
 /// is **Windows-only** — elsewhere panes always use the login `$SHELL`, so there
 /// is nothing to pick. The keyword is stored in config and passed to

@@ -8,9 +8,9 @@ use crate::ui::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
+    General,
     Theme,
     Layout,
-    Notifications,
     Keys,
     Modules,
     Integrations,
@@ -19,9 +19,9 @@ pub enum SettingsTab {
 
 impl SettingsTab {
     pub const ALL: [SettingsTab; 7] = [
+        SettingsTab::General,
         SettingsTab::Theme,
         SettingsTab::Layout,
-        SettingsTab::Notifications,
         SettingsTab::Keys,
         SettingsTab::Modules,
         SettingsTab::Integrations,
@@ -30,9 +30,9 @@ impl SettingsTab {
 
     pub fn icon(self) -> &'static str {
         match self {
+            SettingsTab::General => "◈",
             SettingsTab::Theme => "◑",
             SettingsTab::Layout => "▦",
-            SettingsTab::Notifications => "◔",
             SettingsTab::Keys => "⌨",
             SettingsTab::Modules => "❏",
             SettingsTab::Integrations => "⌁",
@@ -43,9 +43,9 @@ impl SettingsTab {
     /// The tab label in the active UI language (docs/21).
     pub fn label(self, cat: &crate::i18n::Catalog) -> &'static str {
         match self {
+            SettingsTab::General => cat.tab_general,
             SettingsTab::Theme => cat.tab_theme,
             SettingsTab::Layout => cat.tab_layout,
-            SettingsTab::Notifications => cat.tab_notify,
             SettingsTab::Keys => cat.tab_keys,
             SettingsTab::Modules => cat.tab_modules,
             SettingsTab::Integrations => cat.tab_agents,
@@ -89,6 +89,18 @@ pub enum LayoutRow {
     Dock(DockKind),
 }
 
+/// A selectable row in the General tab: the app-wide preferences that are not
+/// about looks or layout. The file-open control comes first, then a
+/// `── Notifications ──` section (same blank-gap + divider treatment as the
+/// Layout tab's Docks section).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GeneralRow {
+    FileOpen,
+    SoundDone,
+    SoundBlocked,
+    TestSound,
+}
+
 /// A selectable row in the Modules tab (docs/13 §3.6): a module, or one of the
 /// settings it declares (indented beneath it while the module is enabled).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,6 +114,22 @@ pub enum ModuleRow {
 const MODULE_SETTING_MAX: usize = 512;
 
 impl App {
+    /// The General tab's ordered selectable rows.
+    pub fn general_rows(&self) -> Vec<GeneralRow> {
+        vec![
+            GeneralRow::FileOpen,
+            GeneralRow::SoundDone,
+            GeneralRow::SoundBlocked,
+            GeneralRow::TestSound,
+        ]
+    }
+
+    /// Index of the first notification row (where the `── Notifications ──`
+    /// divider goes), mirroring `dock_section_start` in the Layout tab.
+    pub fn general_section_start(&self) -> usize {
+        1
+    }
+
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
     /// dock section (used to draw the `── Docks ──` divider) is `dock_section_start`.
     pub fn layout_rows(&self) -> Vec<LayoutRow> {
@@ -138,11 +166,12 @@ impl App {
         }
     }
 
+    /// Open Settings on the **first** tab (General). Switching to Theme still
+    /// preselects the active palette, via `settings_set_tab`.
     pub fn open_settings(&mut self) {
-        let cursor = theme_cursor(&self.config.theme);
         self.settings = Some(SettingsUi {
-            tab: SettingsTab::Theme,
-            cursor,
+            tab: SettingsTab::General,
+            cursor: 0,
             capturing: false,
         });
     }
@@ -155,9 +184,9 @@ impl App {
     /// Number of selectable control rows in `tab` (for cursor clamping + render).
     pub fn settings_rows(&self, tab: SettingsTab) -> usize {
         match tab {
+            SettingsTab::General => self.general_rows().len(),
             SettingsTab::Theme => theme::THEMES.len(),
             SettingsTab::Layout => self.layout_rows().len(),
-            SettingsTab::Notifications => 3,
             SettingsTab::Keys => crate::app::Cmd::ALL.len(),
             SettingsTab::Modules => self.module_rows().len(),
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
@@ -266,6 +295,10 @@ impl App {
                         | Some(LayoutRow::RightWidth)
                         | Some(LayoutRow::Dock(_))
                 ),
+                // The file-open chooser only moves via its `‹ ›` arrows.
+                Some(SettingsTab::General) => {
+                    self.general_rows().get(i) == Some(&GeneralRow::FileOpen)
+                }
                 // Number/enum module settings likewise only move via `‹ ›`.
                 Some(SettingsTab::Modules) => self.module_row_is_slider(i),
                 _ => false,
@@ -316,9 +349,8 @@ impl App {
             // radio tabs: ‹ › move the selection like up/down
             SettingsTab::Theme | SettingsTab::Language => self.settings_move(delta),
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
-            SettingsTab::Notifications if cursor < 2 => self.toggle_notify(cursor),
-            SettingsTab::Notifications => {} // the Test row only reacts to Enter/click
-            SettingsTab::Keys => {}          // rebind is Enter (capture), not ‹ ›
+            SettingsTab::General => self.adjust_general(cursor, delta),
+            SettingsTab::Keys => {} // rebind is Enter (capture), not ‹ ›
             SettingsTab::Integrations => self.settings_activate(cursor),
             SettingsTab::Modules => self.toggle_module(cursor, Some(delta)),
         }
@@ -336,8 +368,11 @@ impl App {
                 self.apply_language(crate::i18n::LANGS[cursor.min(crate::i18n::LANGS.len() - 1)])
             }
             SettingsTab::Layout => self.activate_layout(cursor),
-            SettingsTab::Notifications if cursor == 2 => self.test_sound(),
-            SettingsTab::Notifications => self.toggle_notify(cursor),
+            // Enter/click: the Test row rings the chime, everything else steps.
+            SettingsTab::General => match self.general_rows().get(cursor).copied() {
+                Some(GeneralRow::TestSound) => self.test_sound(),
+                _ => self.adjust_general(cursor, 1),
+            },
             // Enter on a Keys row starts capturing the next key as its binding.
             SettingsTab::Keys => {
                 if let Some(ui) = self.settings.as_mut() {
@@ -586,6 +621,38 @@ impl App {
         }
     }
 
+    /// Cycle the default file-open action (docs/38): read-only → each detected
+    /// editor → back. The order matches the `‹ ›` slider in Settings → Layout.
+    fn cycle_file_open(&mut self, delta: i32) {
+        let mut opts: Vec<String> = vec![config::FILE_OPEN_READONLY.to_string()];
+        opts.extend(self.editors.iter().map(|(cmd, _)| cmd.clone()));
+        let n = opts.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let cur = opts
+            .iter()
+            .position(|o| *o == self.config.layout.file_open)
+            .unwrap_or(0) as i32;
+        let next = (((cur + delta) % n + n) % n) as usize;
+        self.config.layout.file_open = opts[next].clone();
+        config::save(&self.config);
+    }
+
+    /// The current file-open choice as a display string: `read-only`, an editor's
+    /// label, or the raw command if a configured editor is no longer installed.
+    pub fn file_open_label(&self) -> String {
+        let choice = &self.config.layout.file_open;
+        if choice == config::FILE_OPEN_READONLY {
+            return "read-only".to_string();
+        }
+        self.editors
+            .iter()
+            .find(|(cmd, _)| cmd == choice)
+            .map(|(_, label)| label.clone())
+            .unwrap_or_else(|| choice.clone())
+    }
+
     /// Cycle the configured shell (applies to newly opened panes). Windows-only.
     #[cfg(windows)]
     fn cycle_shell(&mut self, delta: i32) {
@@ -615,16 +682,25 @@ impl App {
         }
     }
 
-    fn toggle_notify(&mut self, cursor: usize) {
-        match cursor {
-            0 => self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done,
-            1 => {
-                self.config.notifications.sound_on_blocked =
-                    !self.config.notifications.sound_on_blocked
+    /// General tab ‹ ›/Enter/click on a row: step the file-open choice, flip a
+    /// sound toggle, or ring the test chime.
+    fn adjust_general(&mut self, cursor: usize, delta: i32) {
+        match self.general_rows().get(cursor).copied() {
+            Some(GeneralRow::FileOpen) => self.cycle_file_open(delta),
+            Some(GeneralRow::SoundDone) => {
+                self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done;
+                config::save(&self.config);
             }
-            _ => {}
+            Some(GeneralRow::SoundBlocked) => {
+                self.config.notifications.sound_on_blocked =
+                    !self.config.notifications.sound_on_blocked;
+                config::save(&self.config);
+            }
+            // The Test row fires on Enter/click only (see `settings_activate`) —
+            // arrows must not ring it, or holding ‹ › would spam the chime.
+            Some(GeneralRow::TestSound) => {}
+            None => {}
         }
-        config::save(&self.config);
     }
 
     /// Play the retro chime once so the user can hear it before turning it on.
@@ -661,27 +737,138 @@ fn lang_cursor(code: &str) -> usize {
 mod tests {
     use super::*;
 
-    // The Notifications tab is three rows: the two sound toggles (persisted)
-    // and a Test row that rings the chime immediately, regardless of toggles.
+    // The General tab is the file-open chooser plus the Notifications section:
+    // the two sound toggles (persisted) and a Test row that rings the chime
+    // immediately, regardless of the toggles.
     #[test]
-    fn notifications_tab_toggles_sounds_and_tests_the_chime() {
-        let _env = crate::persist::test_env("notify-tab");
+    fn general_tab_toggles_sounds_and_tests_the_chime() {
+        let _env = crate::persist::test_env("general-tab");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
         app.open_settings();
         if let Some(ui) = app.settings.as_mut() {
-            ui.tab = SettingsTab::Notifications;
+            ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::Notifications), 3);
-        app.settings_activate(0);
-        assert!(app.config.notifications.sound_on_done, "row 0 toggles done");
-        app.settings_activate(1);
-        assert!(
-            app.config.notifications.sound_on_blocked,
-            "row 1 toggles blocked"
-        );
+        assert_eq!(app.settings_rows(SettingsTab::General), 4);
+        let rows = app.general_rows();
+        assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
+
+        let done = rows
+            .iter()
+            .position(|r| *r == GeneralRow::SoundDone)
+            .unwrap();
+        let blocked = rows
+            .iter()
+            .position(|r| *r == GeneralRow::SoundBlocked)
+            .unwrap();
+        let test = rows
+            .iter()
+            .position(|r| *r == GeneralRow::TestSound)
+            .unwrap();
+
+        app.settings_activate(done);
+        assert!(app.config.notifications.sound_on_done, "toggles done");
+        app.settings_activate(blocked);
+        assert!(app.config.notifications.sound_on_blocked, "toggles blocked");
+
         assert!(!app.pending_sound);
-        app.settings_activate(2);
+        // Arrows must NOT ring the chime (only Enter/click does).
+        app.settings_adjust(test, 1);
+        assert!(!app.pending_sound, "‹ › on the Test row does not ring");
+        app.settings_activate(test);
         assert!(app.pending_sound, "the Test row rings the chime");
+    }
+
+    /// The General tab renders the file-open chooser, then a `Notify` section
+    /// divider, then the sound rows — the Docks-section treatment (docs/15).
+    #[test]
+    fn general_tab_renders_file_open_then_a_notify_section() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("general-render");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(120, 40, tx).unwrap();
+        app.editors = vec![("vim".into(), "vim".into())];
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+        }
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let text: Vec<String> = (0..buf.area.height)
+            .map(|r| {
+                (0..buf.area.width)
+                    .map(|c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect();
+        let all = text.join("\n");
+        if std::env::var("SHOW_UI").is_ok() {
+            println!("{all}");
+        }
+        assert!(all.contains("General"), "the General tab is in the strip");
+        assert!(all.contains("Open files with"), "file-open row drawn");
+        assert!(all.contains("read-only"), "its current value drawn");
+        assert!(all.contains("Notify"), "the notifications section divider");
+
+        // Order: file-open row, then the divider, then the sound rows.
+        let row_of = |needle: &str| text.iter().position(|l| l.contains(needle));
+        let (fo, div, snd) = (
+            row_of("Open files with"),
+            row_of("Notify"),
+            row_of("Test sound"),
+        );
+        assert!(fo < div && div < snd, "file-open → divider → sounds");
+        // A blank line separates the chooser from the section header.
+        let (fo, div) = (fo.unwrap(), div.unwrap());
+        assert!(div >= fo + 2, "a blank gap sits above the section divider");
+    }
+
+    /// Notifications is no longer its own tab: General leads the tab strip and
+    /// the sound settings live inside it.
+    #[test]
+    fn general_replaces_the_notifications_tab() {
+        assert_eq!(
+            SettingsTab::ALL[0],
+            SettingsTab::General,
+            "General is first"
+        );
+        assert_eq!(SettingsTab::ALL[1], SettingsTab::Theme, "before Theme");
+        assert_eq!(SettingsTab::ALL.len(), 7, "still seven tabs");
+    }
+
+    /// The General tab's "Open files with" slider cycles read-only → each detected
+    /// editor → back, and steps backward with wraparound.
+    #[test]
+    fn general_file_open_cycles_through_editors() {
+        let _env = crate::persist::test_env("file-open-cycle");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.editors = vec![("vim".into(), "vim".into()), ("nano".into(), "nano".into())];
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+        }
+        let idx = app
+            .general_rows()
+            .iter()
+            .position(|r| *r == GeneralRow::FileOpen)
+            .expect("the General tab has a file-open row");
+
+        assert_eq!(app.config.layout.file_open, "readonly", "starts read-only");
+        app.settings_adjust(idx, 1);
+        assert_eq!(app.config.layout.file_open, "vim");
+        app.settings_adjust(idx, 1);
+        assert_eq!(app.config.layout.file_open, "nano");
+        app.settings_adjust(idx, 1);
+        assert_eq!(
+            app.config.layout.file_open, "readonly",
+            "wraps back to read-only"
+        );
+        app.settings_adjust(idx, -1);
+        assert_eq!(
+            app.config.layout.file_open, "nano",
+            "steps backward with wrap"
+        );
     }
 }

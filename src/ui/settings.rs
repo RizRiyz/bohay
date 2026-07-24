@@ -3,7 +3,7 @@
 //! when open; returns the hit-test rects `render()` stores on the `App`.
 
 use super::*;
-use crate::app::{LayoutRow, ModuleRow, SettingsTab};
+use crate::app::{GeneralRow, LayoutRow, ModuleRow, SettingsTab};
 use crate::module::manifest::SettingKind;
 use ratatui::widgets::{Borders, Clear};
 
@@ -388,30 +388,85 @@ fn draw_content(
                 }
             }
         }
-        SettingsTab::Notifications => {
+        SettingsTab::General => {
+            // The file-open chooser, then a blank gap + `── Notifications ──`
+            // divider and the sound rows, mirroring the Layout tab's Docks section.
+            let rows = app.general_rows();
+            let sec = app.general_section_start();
             let n = &app.config.notifications;
-            let rows = [
-                (cat.set_sound_done, toggle(n.sound_on_done, t)),
-                (cat.set_sound_blocked, toggle(n.sound_on_blocked, t)),
-                (
-                    cat.set_test_sound,
-                    Line::from(Span::styled(
-                        format!("[ ♪ {} ]", cat.act_play),
-                        Style::new().fg(t.accent).bold(),
+            let file_open = app.file_open_label();
+            let mut y = area.y;
+            for (i, row) in rows.iter().enumerate() {
+                if i == sec {
+                    y += 1; // blank line before the section
+                    if y >= area.bottom() {
+                        break;
+                    }
+                    hline(f, area.x, y, area.width, t);
+                    let label = format!(" {} ", cat.tab_notify);
+                    let w = (display_width(&label) as u16).min(area.width);
+                    f.render_widget(
+                        Paragraph::new(Span::styled(
+                            label,
+                            Style::new().fg(t.subtext0).bg(t.surface0),
+                        )),
+                        Rect::new(area.x + 2, y, w, 1),
+                    );
+                    y += 1;
+                }
+                if y >= area.bottom() {
+                    break;
+                }
+                match row {
+                    GeneralRow::FileOpen => {
+                        let r = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_file_open,
+                            file_open.clone(),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, r));
+                    }
+                    GeneralRow::SoundDone => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_sound_done,
+                        toggle(n.sound_on_done, t),
+                        t,
                     )),
-                ),
-            ];
-            for (i, (label, val)) in rows.into_iter().enumerate() {
-                ctls.push(ctl_row(
-                    f,
-                    area,
-                    area.y + i as u16,
-                    i,
-                    cursor,
-                    label,
-                    val,
-                    t,
-                ));
+                    GeneralRow::SoundBlocked => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_sound_blocked,
+                        toggle(n.sound_on_blocked, t),
+                        t,
+                    )),
+                    GeneralRow::TestSound => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_test_sound,
+                        Line::from(Span::styled(
+                            format!("[ ♪ {} ]", cat.act_play),
+                            Style::new().fg(t.accent).bold(),
+                        )),
+                        t,
+                    )),
+                }
+                y += 1;
             }
         }
         SettingsTab::Integrations => {

@@ -55,6 +55,12 @@ pub struct LayoutConfig {
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
+    /// Default action when a file is opened from the FILES tree (docs/38):
+    /// `"readonly"` (the native viewer) or an editor run-command such as `"vim"`
+    /// / `"emacs -nw"`. A plain click uses this; Shift+click always reads it
+    /// read-only, and the right-click menu picks per file.
+    #[serde(default = "default_file_open")]
+    pub file_open: String,
     /// Lines of scrollback kept per pane. **The main memory dial**: scrollback
     /// dominates per-pane cost (measured ~10 MB per pane at 5 000 lines / 120
     /// columns), and it is the only thing that scales with session age. The
@@ -120,7 +126,7 @@ impl SidebarsConfig {
 }
 
 /// Sound alerts. The retro chime is optional, so both default to **off** —
-/// nothing rings until the user turns it on in Settings → Notifications.
+/// nothing rings until the user turns it on in Settings → General.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct NotifyConfig {
     /// Play the retro chime when an agent finishes a working stretch.
@@ -139,6 +145,11 @@ fn default_lang() -> String {
 }
 fn default_shell_choice() -> String {
     "default".to_string()
+}
+/// The file-viewer sentinel for "open read-only in the native viewer".
+pub const FILE_OPEN_READONLY: &str = "readonly";
+fn default_file_open() -> String {
+    FILE_OPEN_READONLY.to_string()
 }
 fn default_sidebar_width() -> u16 {
     SIDEBAR_WIDTH_DEFAULT
@@ -176,6 +187,7 @@ impl Default for LayoutConfig {
             row_gap: 0,
             show_titles: true,
             resume_in_new_workspace: true,
+            file_open: default_file_open(),
             scrollback: default_scrollback(),
         }
     }

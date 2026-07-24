@@ -248,11 +248,19 @@ const ogImage = 'https://bohay.dev/og.png';
           <p>Close the terminal and nothing stops. Open it again and every pane, tab, and layout is right where you left it.</p>
           <span class="card-go">How sessions work</span>
         </a>
-        <a class="card s2" href="/docs/guides/agents/#session-resume--the-flagship">
-          <div class="card-ic">↺</div>
-          <h3>Your agents remember too</h3>
-          <p>After a restart, each agent reloads its own chat history by itself. You never paste a session flag or lose the thread.</p>
-          <span class="card-go">About resume</span>
+        <a class="card s4" href="/docs/guides/files/">
+          <div class="card-ic">■</div>
+          <h3>Read the files your agents touch</h3>
+          <p>A file tree in the sidebar, tinted by git status so you see what changed at a glance. Click a file to read it in a fast built in viewer that updates itself as an agent edits, or open it straight in vim, nano, or whatever your editor is.</p>
+          <div class="fx-tree" aria-hidden="true">
+            <span class="fx-tr">▾ src</span>
+            <span class="fx-tr in">■ files.rs<b class="fx-git m">M</b></span>
+            <span class="fx-tr in">■ viewer.rs<b class="fx-git a">A</b></span>
+          </div>
+          <div class="fx-open" aria-hidden="true">
+            <span>read-only</span><span>vim</span><span>nano</span><span>$EDITOR</span>
+          </div>
+          <span class="card-go">Browse and open files</span>
         </a>
         <a class="card s4" href="/docs/guides/orchestration/">
           <div class="card-ic">◇</div>
@@ -264,6 +272,12 @@ const ogImage = 'https://bohay.dev/og.png';
             <span class="fx-task"><i class="fx-td q"></i>Integration tests<b class="fx-tag q">queued</b></span>
           </div>
           <span class="card-go">Meet the task board</span>
+        </a>
+        <a class="card s2" href="/docs/guides/agents/#session-resume--the-flagship">
+          <div class="card-ic">↺</div>
+          <h3>Your agents remember too</h3>
+          <p>After a restart, each agent reloads its own chat history by itself. You never paste a session flag or lose the thread.</p>
+          <span class="card-go">About resume</span>
         </a>
         <a class="card s3" href="/docs/guides/git/">
           <div class="card-ic">⎇</div>
@@ -1193,8 +1207,9 @@ const ogImage = 'https://bohay.dev/og.png';
       .features h2 { text-align: center; font-size: 1.95rem; margin-bottom: 0.7rem; letter-spacing: -0.02em; }
       .feat-sub { text-align: center; color: var(--sub); max-width: 40rem; margin: 0 auto 2.4rem; font-size: 1.04rem; line-height: 1.6; }
 
-      /* Bento grid: two wide "featured" cards (s4) set diagonally, with s2/s3
-         fillers so every row sums to 6 columns. */
+      /* Bento grid: wide "featured" cards (s4) set diagonally, with s2/s3
+         fillers. Every row MUST sum to exactly 6 columns or the grid leaves
+         holes. Current rows: 4+2 / 2+4 / 4+2 / 3+3. */
       .features .grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.85rem; }
       .card {
         position: relative; overflow: hidden;
@@ -1254,10 +1269,31 @@ const ogImage = 'https://bohay.dev/og.png';
       .fx-tag.run { color: #c6ff1a; background: rgb(198 255 26 / 0.14); }
       .fx-tag.q { color: #9a9aa2; background: rgb(154 154 162 / 0.13); }
 
+      /* Featured card 3: a mini file tree (git tinted) + the "open with" chips. */
+      .fx-tree { display: flex; flex-direction: column; gap: 0.34rem; margin-top: 0.55rem; align-self: stretch; }
+      .fx-tr {
+        display: flex; align-items: center; gap: 0.55rem;
+        font: 0.76rem 'JetBrains Mono Variable', monospace; color: var(--text);
+        background: #0c0c11; border: 1px solid var(--line); border-radius: 0.55rem; padding: 0.4rem 0.72rem;
+      }
+      .fx-tr.in { margin-left: 1.15rem; }
+      .fx-git { margin-left: auto; font-size: 0.62rem; font-weight: 600; padding: 0.12rem 0.5rem; border-radius: 999px; }
+      .fx-git.m { color: #ff9e0a; background: rgb(255 158 10 / 0.14); }
+      .fx-git.a { color: #30d159; background: rgb(48 209 89 / 0.14); }
+      .fx-open { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
+      .fx-open span {
+        font: 0.71rem 'JetBrains Mono Variable', monospace; color: var(--sub);
+        background: #0c0c11; border: 1px solid var(--line); border-radius: 999px; padding: 0.3rem 0.68rem;
+      }
+      .card:hover .fx-open span:nth-child(2) { color: var(--accent); border-color: rgb(198 255 26 / 0.4); }
+
       @media (max-width: 980px) {
         .features .grid { grid-template-columns: repeat(2, 1fr); }
         .card.s2, .card.s3 { grid-column: span 1; }
         .card.s4 { grid-column: span 2; }
+        /* An odd number of half cards would leave a trailing hole: let the last
+           one run full width so the grid still ends flush. */
+        .card.s3:last-child { grid-column: span 2; }
       }
       @media (max-width: 560px) {
         .features .grid { grid-template-columns: 1fr; }

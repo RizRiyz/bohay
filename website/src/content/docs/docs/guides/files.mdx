@@ -1,0 +1,81 @@
+---
+title: Browsing & Opening Files
+description: A file tree in the sidebar, a fast read-only viewer, and opening any file straight into vim, nano, or your own $EDITOR.
+---
+
+An agent edits files and you want to *see* them, without leaving bohay and
+without losing the result to scrollback. The **FILES** dock puts your project's
+tree in a sidebar, and any file opens either in bohay's own read-only viewer or
+in a real editor.
+
+## The FILES dock
+
+Press **`Ctrl+Space e`** to show or hide it, or place it from
+**Settings → Layout** like any other dock. It follows the active workspace, so
+switching projects re-roots the tree.
+
+Folders expand and collapse in place. Names are tinted by git status as you
+work: amber for modified, green for added or untracked, coral for deleted or
+conflicted, mint for renamed, with a letter badge and a mark on any folder that
+contains changes. Files created outside bohay, by an agent or a command in a
+pane, show up on their own within a couple of seconds.
+
+**Right-click a row** for New file, New folder, Rename, Copy path, and Delete
+(Delete always asks first).
+
+## Opening a file
+
+| Gesture | What happens |
+|---|---|
+| **Click** | opens using your default (see below) |
+| **Shift+click** | always opens the **read-only viewer** in a pane beside the focus |
+| **Right-click** | pick per file: read-only, or any editor you have installed |
+
+Shift+click is the fixed "just let me look at this" gesture. It stays read-only
+no matter what you set as the default, which is what you want when you are
+reading a file next to a running agent.
+
+## The read-only viewer
+
+Fast, native, and deliberately read-only. It never blocks on a large file, caps
+what it will load into memory, and detects binaries instead of spraying them at
+your terminal. An open file **re-reads itself when it changes on disk**, so a
+file an agent is editing stays current in front of you.
+
+| Key | Action |
+|---|---|
+| `j` / `k`, `↓` / `↑` | line down / up |
+| `d` / `u` | half page down / up |
+| Space / PageUp | page down / up |
+| `g` / `G` | top / bottom |
+| `h` / `l` | scroll sideways when wrapping is off |
+| `w` | toggle soft wrap |
+| `/`, then `n` / `N` | search, next / previous match |
+| `y` or `c` | copy the whole file |
+| `q` / `Esc` | close |
+
+Dragging across the text selects and copies it, the same as in any pane.
+
+## Opening in vim, nano, or your editor
+
+bohay looks for **vim, nvim, nano, vi, helix, micro, and emacs** on your `PATH`,
+and also honours **`$EDITOR`**. Only editors you actually have are offered, so
+there are no dead options in the menu.
+
+An editor opens in a **new tab** at full width, running as a real terminal
+program. The tab is titled after the editor, and when you quit the editor the
+tab closes itself.
+
+To set what a plain click does, go to **Settings → General → "Open files with"**
+and step through the choices with `‹ ›`: **read-only** (the default) or any
+detected editor. To override it for one file, right-click that file and pick
+from the menu.
+
+If you set an editor and later uninstall it, bohay falls back to the read-only
+viewer rather than doing nothing.
+
+## What this is not
+
+The viewer does not do syntax coloring, and it does not show a diff. To see what
+changed, use the [git tab](/docs/guides/git/), which lists changed files and the
+commit flow. To edit, open the file in an editor as above.
