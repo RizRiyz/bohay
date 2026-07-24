@@ -10,16 +10,17 @@ import '@fontsource/ibm-plex-mono/700.css';
 import Logo from '../assets/logo.svg';
 // Authentic brand marks (24×24 SVGs) for the "works with" grid. The `-color`
 // ones carry their own fills; the rest are `currentColor` (recolored via CSS,
-// flagged `mono`). `hook` marks agents that also get session resume + events.
+// flagged `mono`). `hook` marks agents that get native session resume (a dot in
+// the grid); most of them also report precise events via the optional hook.
 import IconClaudeCode from '../assets/icons/claudecode-color.svg';
 import IconCopilot from '../assets/icons/githubcopilot.svg';
 import IconCodex from '../assets/icons/codex-color.svg';
 import IconOpencode from '../assets/icons/opencode.svg';
 import IconCursor from '../assets/icons/cursor.svg';
-import IconGemini from '../assets/icons/geminicli-color.svg';
 import IconKimi from '../assets/icons/kimi-color.svg';
 import IconAmp from '../assets/icons/amp-color.svg';
 import IconGrok from '../assets/icons/grok.svg';
+import IconPi from '../assets/icons/pi.svg';
 import IconQwen from '../assets/icons/qwen-color.svg';
 
 const GITHUB = 'https://github.com/RizRiyz/bohay';
@@ -30,7 +31,7 @@ const AGENTS = [
   { name: 'Codex', Icon: IconCodex, hook: true },
   { name: 'opencode', Icon: IconOpencode, mono: true, hook: true },
   { name: 'Cursor', Icon: IconCursor, mono: true },
-  { name: 'Gemini', Icon: IconGemini },
+  { name: 'Pi', Icon: IconPi, mono: true, hook: true },
   { name: 'Kimi', Icon: IconKimi, hook: true },
   { name: 'Amp', Icon: IconAmp },
   { name: 'Grok', Icon: IconGrok, mono: true, hook: true },
@@ -417,9 +418,10 @@ const ogImage = 'https://bohay.dev/og.png';
         ))}
       </div>
       <p class="note">
-        …plus <strong>Aider</strong>, <strong>Droid</strong>, and any agent bohay
-        recognizes on screen. Live status for all, zero setup. The
-        <span class="hookdot">●</span> agents also resume sessions &amp; report precise events.
+        …plus <strong>Gemini</strong>, <strong>Aider</strong>, <strong>Droid</strong>,
+        and any agent bohay recognizes on screen. Live status for all, zero setup.
+        The <span class="hookdot">●</span> agents also resume your sessions after a
+        restart, and most report precise events through the optional hook.
         <a href="/docs/reference/agents/">Full matrix →</a>
       </p>
     </section>

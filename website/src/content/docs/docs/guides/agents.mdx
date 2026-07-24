@@ -10,8 +10,8 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Kimi, Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a live
-state:
+Kimi, Grok, Pi, Cursor, Gemini, Aider, Amp, Droid) appears in the sidebar with a
+live state:
 
 | State | Meaning | How it's detected |
 |---|---|---|
@@ -48,9 +48,9 @@ each pane and matches the program name. A pane running `claude` is Claude Code;
 a pane that merely prints the word "claude" is a shell.
 
 That distinction matters more than it sounds. Names like `amp`, `cursor`,
-`droid` and `grok` are ordinary English words, so reading them off the screen
-turns "for example" into Amp and "cursor is out of bounds" into Cursor. Your
-sidebar fills with agents that were never running.
+`droid`, `grok` and `pi` are ordinary English words, so reading them off the
+screen turns "for example" into Amp and "cursor is out of bounds" into Cursor.
+Your sidebar fills with agents that were never running.
 
 The scan covers every pane at once, a couple of times a second, off the render
 path, so it costs nothing you can feel.
@@ -85,6 +85,8 @@ command for you:
 | Codex | its rollout files |
 | opencode | its session storage |
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
+| Grok | its session directory (`~/.grok/sessions`) |
+| Pi | its session store (`~/.pi/agent/sessions`) |
 | Cursor | resume command (when the session id is known) |
 
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar

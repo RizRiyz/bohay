@@ -5,8 +5,8 @@
 //! merely *prints* "claude" is a shell. Where processes can't be seen (Windows,
 //! a remote pane) it falls back to text, ranked by how deliberate that text is —
 //! spawn command, then OSC title, then output — with names that double as
-//! ordinary words (`amp`, `cursor`, `droid`, `grok`) believed only from the
-//! first two. Identity is configurable: see `[identity]` in the manifests.
+//! ordinary words (`amp`, `cursor`, `droid`, `grok`, `pi`) believed only from
+//! the first two. Identity is configurable: see `[identity]` in the manifests.
 //!
 //! **What state is it in?** Inferred from what's on screen via a small
 //! **manifest** engine: a set of rules, each tied to a screen region (the OSC
@@ -114,6 +114,14 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         name: "grok",
         distinct: &[],
         ambiguous: &["grok"],
+    },
+    // Pi (pi.dev): the npm binary is distinctive, but the bare brand name is an
+    // ordinary word (and a substring of "api"/"pip"…), so believe it only from
+    // the spawn command or OSC title — never incidental output.
+    KnownAgent {
+        name: "pi",
+        distinct: &["pi-coding-agent"],
+        ambiguous: &["pi"],
     },
 ];
 
@@ -1148,6 +1156,20 @@ mod tests {
         assert_eq!(
             named(Some("zsh"), "you have to grok it first\n", "zsh"),
             "zsh"
+        );
+        // "pi" is an ordinary word (and hides in "api"/"pip"): incidental output
+        // must not name it, but the spawn command and its own title do.
+        assert_eq!(
+            named(Some("zsh"), "pip install requests\n", "zsh"),
+            "zsh",
+            "the word pi in output must not name the pi agent"
+        );
+        assert_eq!(named(Some("zsh"), "", "pi"), "pi", "command names it");
+        assert_eq!(named(Some("pi"), "", "zsh"), "pi", "title names it");
+        assert_eq!(
+            named(Some("zsh"), "pi-coding-agent starting\n", "zsh"),
+            "pi",
+            "the npm binary is distinctive enough to trust from output"
         );
         assert_eq!(named(Some("amp"), "", "zsh"), "amp", "title names it");
         assert_eq!(named(Some("zsh"), "", "droid"), "droid", "command names it");

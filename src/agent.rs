@@ -93,6 +93,15 @@ static SOURCES: &[SessionSource] = &[
         }),
         resume: |q| format!("grok --resume {q}\r"),
     },
+    SessionSource {
+        name: "pi",
+        discover: Some(Discovery {
+            base: pi_base,
+            recent: pi_recent,
+            latest: pi_latest,
+        }),
+        resume: |q| format!("pi --session {q}\r"),
+    },
     // Resume-only (no readable session store): usable when a hook reports the id.
     SessionSource {
         name: "cursor",
@@ -796,6 +805,108 @@ fn grok_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
     out
 }
 
+// ── Pi (pi.dev, earendil-works) ───────────────────────────────────────────────
+// Sessions are JSONL files under `<base>/<encoded-cwd>/<uuid>.jsonl` (base =
+// `~/.pi/agent/sessions`, overridable via `PI_CODING_AGENT_SESSION_DIR`). The
+// first line is a self-describing header — `{"type":"session","id":"<uuid>",
+// "cwd":"<path>",…}` — so, like codex, we read the real cwd from the file rather
+// than trust the directory encoding. Match by cwd, newest wins. Resume:
+// `pi --session <id>` (the flag accepts a full or partial UUID).
+
+fn pi_base() -> PathBuf {
+    if let Some(d) = std::env::var_os("PI_CODING_AGENT_SESSION_DIR") {
+        return PathBuf::from(d);
+    }
+    home().join(".pi").join("agent").join("sessions")
+}
+
+/// `(mtime, path)` for every `*.jsonl` under `base`, one level of cwd-dirs deep
+/// (plus any at the root, defensively). Stat-only, so callers read only the
+/// newest few and the every-4s scan stays bounded.
+fn pi_session_files(base: &Path) -> Vec<(SystemTime, PathBuf)> {
+    fn collect(dir: &Path, out: &mut Vec<(SystemTime, PathBuf)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                if let Ok(mtime) = e.metadata().and_then(|m| m.modified()) {
+                    out.push((mtime, path));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    collect(base, &mut out); // stray files at the root
+    if let Ok(rd) = std::fs::read_dir(base) {
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                collect(&e.path(), &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Read a session's `id` + `cwd` from its header (the first line carrying both).
+/// `None` if unreadable / malformed / missing either field.
+fn read_pi_session(path: &Path) -> Option<(String, PathBuf)> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file)
+        .lines()
+        .take(5)
+        .map_while(Result::ok)
+    {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let id = v.get("id").and_then(|x| x.as_str());
+        let cwd = v.get("cwd").and_then(|x| x.as_str());
+        if let (Some(id), Some(cwd)) = (id, cwd) {
+            return Some((id.to_string(), PathBuf::from(cwd)));
+        }
+    }
+    None
+}
+
+fn pi_latest(base: &Path, cwd: &Path) -> Option<String> {
+    let mut files = pi_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    for (_, path) in files {
+        if let Some((id, dir)) = read_pi_session(&path) {
+            if dir == cwd {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+fn pi_recent(base: &Path, limit: usize) -> Vec<SessionInfo> {
+    let mut files = pi_session_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (updated, path) in files {
+        if out.len() >= limit {
+            break; // newest-first; read only the distinct projects we return
+        }
+        if let Some((id, cwd)) = read_pi_session(&path) {
+            if seen.insert(cwd.clone()) {
+                out.push(SessionInfo {
+                    agent: "pi".to_string(),
+                    session_id: id,
+                    cwd,
+                    updated,
+                });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,6 +943,10 @@ mod tests {
             .unwrap()
             .contains("grok --resume"));
         assert!(is_resumable("grok"));
+        assert!(resume_command("pi", "0198abcd-1234-7890-abcd-ef0123456789")
+            .unwrap()
+            .contains("pi --session"));
+        assert!(is_resumable("pi"));
         assert!(resume_command("cursor-agent", "z")
             .unwrap()
             .contains("cursor-agent --resume"));
@@ -1007,6 +1122,60 @@ mod tests {
         assert!(recent
             .iter()
             .any(|s| s.cwd == Path::new("/very/long/path/to/api")));
+    }
+
+    #[test]
+    fn pi_discovers_session_by_cwd_from_header() {
+        // Sessions nest under <base>/<encoded-cwd>/<uuid>.jsonl; the first line is
+        // the self-describing header carrying `id` + `cwd`. Match by cwd, newest
+        // wins, one per project, and skip a malformed file.
+        let base = tmp("pi");
+        let app = base.join("-work-app");
+        let api = base.join("-work-api");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&api).unwrap();
+        fs::write(
+            app.join("aaaa.jsonl"),
+            "{\"type\":\"session\",\"version\":3,\"id\":\"aaaa\",\"cwd\":\"/work/app\"}\n\
+             {\"type\":\"message\",\"id\":\"01\",\"parentId\":null}\n",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // A newer session in the same project must win.
+        fs::write(
+            app.join("cccc.jsonl"),
+            "{\"type\":\"session\",\"id\":\"cccc\",\"cwd\":\"/work/app\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            api.join("bbbb.jsonl"),
+            "{\"type\":\"session\",\"id\":\"bbbb\",\"cwd\":\"/work/api\"}\n",
+        )
+        .unwrap();
+        fs::write(api.join("broken.jsonl"), "{ not json").unwrap();
+
+        assert_eq!(
+            pi_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("cccc"),
+            "newest session for the project wins"
+        );
+        assert_eq!(
+            pi_latest(&base, Path::new("/work/api")).as_deref(),
+            Some("bbbb")
+        );
+        assert!(pi_latest(&base, Path::new("/no/such")).is_none());
+
+        let recent = pi_recent(&base, 10);
+        assert_eq!(recent.len(), 2, "one per project, malformed file skipped");
+        assert!(recent.iter().all(|s| s.agent == "pi"));
+        assert_eq!(
+            recent
+                .iter()
+                .find(|s| s.cwd == Path::new("/work/app"))
+                .unwrap()
+                .session_id,
+            "cccc"
+        );
     }
 
     #[test]
