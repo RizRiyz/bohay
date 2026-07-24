@@ -3482,6 +3482,135 @@ mod tests {
         assert_eq!(sess.session_id, "abc-123");
     }
 
+    /// Two agent panes in one folder must not both restore the *same* session.
+    ///
+    /// With no hook-reported id, `persist::snapshot` falls back to
+    /// `agent::latest_session(agent, cwd)` — "the newest session for this agent
+    /// in this folder". That key is identical for every pane sharing a cwd, and
+    /// tabs are not part of it at all, so both panes recorded the same session
+    /// id and restored into the same conversation: the reported "a session from
+    /// another pane/tab was resumed here". It also corrupts the transcript, as
+    /// two agents then append to one file. A pane with no session of its own has
+    /// to come back as a plain shell instead.
+    #[test]
+    fn two_panes_in_one_folder_do_not_resume_the_same_session() {
+        let _env = crate::persist::test_env("dup-session");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let ids = app.layout().leaves();
+        assert_eq!(ids.len(), 2, "two panes in one tab");
+
+        // Both panes share a cwd (a split inherits it), which is the whole key.
+        let cwd = app.panes.get(&ids[0]).unwrap().cwd.clone();
+        assert_eq!(app.panes.get(&ids[1]).unwrap().cwd, cwd, "same folder");
+
+        // A Claude store holding exactly one session for that folder.
+        let store = std::env::temp_dir().join(format!("bohay-dupsess-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let enc: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | '.') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let proj = store.join("projects").join(enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("only-session.jsonl"), "{}").unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &store);
+
+        // Neither pane has a hook-reported session, so both fall back to the guess.
+        for id in &ids {
+            let st = app.status.get_mut(id).unwrap();
+            st.agent = "claude".into();
+            st.agent_session = None;
+        }
+
+        let snap = crate::persist::snapshot(&app);
+        let sessions: Vec<Option<String>> = snap.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .map(|(_, ps)| ps.agent_session.as_ref().map(|(_, sid)| sid.clone()))
+            .collect();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&store);
+
+        let claimed: Vec<&String> = sessions.iter().flatten().collect();
+        assert!(
+            claimed.len() <= 1,
+            "one session must not be claimed by two panes, got {sessions:?}"
+        );
+    }
+
+    /// A hook-reported session belongs to its pane and must never be taken by
+    /// another pane's cwd guess — even when the guesser is resolved first.
+    /// Precise ids are claimed in a pass of their own before any guessing.
+    #[test]
+    fn a_hook_reported_session_outranks_another_panes_guess() {
+        let _env = crate::persist::test_env("dup-session-hook");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let mut ids = app.layout().leaves();
+        ids.sort_by_key(|p| p.0);
+        let (older, newer) = (ids[0], ids[1]);
+
+        let cwd = app.panes.get(&older).unwrap().cwd.clone();
+        let store = std::env::temp_dir().join(format!("bohay-hooksess-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let enc: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | '.') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let proj = store.join("projects").join(enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("owned.jsonl"), "{}").unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &store);
+
+        // The *newer* pane owns the session (the hook said so); the older pane
+        // has none and would otherwise guess that very id first.
+        for id in [older, newer] {
+            app.status.get_mut(&id).unwrap().agent = "claude".into();
+        }
+        app.status.get_mut(&older).unwrap().agent_session = None;
+        app.status.get_mut(&newer).unwrap().agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "owned".into(),
+        });
+
+        let snap = crate::persist::snapshot(&app);
+        let by_pane: std::collections::HashMap<u32, Option<String>> = snap.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .map(|(raw, ps)| (*raw, ps.agent_session.as_ref().map(|(_, s)| s.clone())))
+            .collect();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&store);
+
+        assert_eq!(
+            by_pane.get(&newer.0),
+            Some(&Some("owned".to_string())),
+            "the pane the hook named keeps its own session"
+        );
+        assert_eq!(
+            by_pane.get(&older.0),
+            Some(&None),
+            "the other pane must not steal it, and restores as a plain shell"
+        );
+    }
+
     #[test]
     fn detect_tick_keeps_session_brand_when_screen_lacks_name() {
         // Regression: a pane with a resolved agent_session (from the integration

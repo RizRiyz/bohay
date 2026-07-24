@@ -2,6 +2,7 @@
 //! `~/.config/bohay/session.json` and restore it on launch. Captures structure
 //! + cwds only — restore re-spawns shells. See docs/09.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
+use crate::ids::PaneId;
 use crate::layout::LayoutTree;
 
 const SNAPSHOT_VERSION: u32 = 1;
@@ -226,7 +228,58 @@ pub fn client_socket_path() -> PathBuf {
 }
 
 /// Build a snapshot from the live app.
+/// Resolve every pane's native agent session for the snapshot, guaranteeing
+/// that **no two panes claim the same session**.
+///
+/// A hook-reported id names its own pane exactly, so those are claimed first and
+/// always win. Every other pane falls back to `agent::latest_session(agent,
+/// cwd)`, which answers "the newest session for this agent in this folder" — a
+/// key shared by *every* pane in that folder, with tabs not part of it at all.
+/// Unchecked, several panes record the same id and all restore into one
+/// conversation: a session reappears in a pane it was never in, the same
+/// conversation shows up in two tabs, and the transcript is corrupted once two
+/// agents append to it.
+///
+/// A pane whose guess is already taken records nothing and restores as a plain
+/// shell. Losing a resume is much better than duplicating a live session, and
+/// the guess was never evidence that *this* pane owned it. Contested guesses go
+/// to the lowest pane id — the oldest pane, most likely the one that started the
+/// session — which also keeps successive saves stable.
+fn resolve_pane_sessions(app: &App) -> HashMap<PaneId, Option<(String, String)>> {
+    let mut out: HashMap<PaneId, Option<(String, String)>> = HashMap::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+    let mut ids: Vec<PaneId> = app.status.keys().copied().collect();
+    ids.sort_by_key(|p| p.0);
+
+    // Pass 1: precise, hook-reported sessions take their id outright.
+    for id in &ids {
+        if let Some(a) = app.status.get(id).and_then(|s| s.agent_session.as_ref()) {
+            claimed.insert(a.session_id.clone());
+            out.insert(*id, Some((a.agent.clone(), a.session_id.clone())));
+        }
+    }
+    // Pass 2: everyone else guesses from their cwd, and only an unclaimed guess
+    // survives (`HashSet::insert` reports whether it was new).
+    for id in &ids {
+        if out.contains_key(id) {
+            continue;
+        }
+        let Some(st) = app.status.get(id) else {
+            continue;
+        };
+        let guess = app
+            .panes
+            .get(id)
+            .and_then(|p| crate::agent::latest_session(&st.agent, &p.cwd))
+            .filter(|sid| claimed.insert(sid.clone()))
+            .map(|sid| (st.agent.clone(), sid));
+        out.insert(*id, guess);
+    }
+    out
+}
+
 pub fn snapshot(app: &App) -> SessionSnapshot {
+    let sessions = resolve_pane_sessions(app);
     let mut workspaces = Vec::new();
     for ws in &app.workspaces {
         let mut tabs = Vec::new();
@@ -277,18 +330,9 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                         ));
                     }
                     app.panes.get(&id).map(|p| {
-                        let agent_session = app.status.get(&id).and_then(|s| {
-                            // A hook-reported session is precise; otherwise
-                            // discover the agent's latest session from its
-                            // on-disk store, keyed by this pane's cwd.
-                            s.agent_session
-                                .as_ref()
-                                .map(|a| (a.agent.clone(), a.session_id.clone()))
-                                .or_else(|| {
-                                    crate::agent::latest_session(&s.agent, &p.cwd)
-                                        .map(|sid| (s.agent.clone(), sid))
-                                })
-                        });
+                        // Resolved once for the whole snapshot so no two panes
+                        // can claim the same session (see `resolve_pane_sessions`).
+                        let agent_session = sessions.get(&id).cloned().flatten();
                         // Capture the visible screen (cap size to keep saves light).
                         let screen = p
                             .engine
