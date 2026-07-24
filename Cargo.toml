@@ -30,6 +30,8 @@ exclude = [
     "/RELEASING.md",
     "/scripts",
     "/website",
+    "/flake.nix",
+    "/flake.lock",
 ]
 
 [[bin]]

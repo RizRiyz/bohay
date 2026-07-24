@@ -30,6 +30,24 @@ Pick whichever channel you prefer:
     ```
     Works on any platform with Rust ≥ 1.82: pure Rust, no C toolchain needed.
   </TabItem>
+  <TabItem label="Nix">
+    Try it without installing:
+    ```sh
+    nix run github:RizRiyz/bohay
+    ```
+    Add it to a flake-based NixOS or Home Manager config via the flake's
+    `packages.default`, or drop into a dev shell with the Rust toolchain and
+    everything bohay needs:
+    ```sh
+    nix develop github:RizRiyz/bohay
+    ```
+    The package **bakes in the tools bohay calls at runtime** (`git`, `gh`,
+    `ps`, `ssh`), so the git tab and agent detection work on NixOS out of the
+    box, where nothing is on a global `PATH`. Prefer this over `install.sh` on
+    NixOS: the script's static binary does run (and lands in `~/.local/bin`), but
+    it installs imperatively, outside Nix, and wires up none of those runtime
+    tools.
+  </TabItem>
   <TabItem label="Windows">
     ```powershell
     irm https://bohay.dev/install.ps1 | iex
