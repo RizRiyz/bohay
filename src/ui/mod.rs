@@ -111,6 +111,23 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         return;
     }
 
+    // No nodes at all (docs/43 §3.3): the last one was closed, so the session is
+    // over and every client has been told to detach. A client can still be
+    // attached for the frame or two before it goes (or attach fresh via
+    // `bohay attach` / `--remote` before opening a folder), and every draw fn
+    // below assumes an active node — `app.ws()` indexes `workspaces[active_ws]`.
+    // One guard here covers the whole tree rather than each call site.
+    if app.workspaces.is_empty() {
+        let msg = "no folders open — run `bohay` in a folder";
+        let y = area.y + area.height / 2;
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(msg, Style::new().fg(t.overlay1))))
+                .alignment(ratatui::layout::Alignment::Center),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        return;
+    }
+
     // Compact (touch) mode on a narrow phone screen (docs/18): no sidebars, one
     // full-screen pane, a `≡` switcher for navigation. A vertical split doesn't
     // change the width, so decide it from `area.width` here — early enough that

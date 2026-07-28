@@ -18,6 +18,14 @@ impl App {
     /// Returns whether anything the sidebar shows changed, so the loop repaints a
     /// silent agent's Working→Done transition even when no other event fires.
     pub fn detect_tick(&mut self, now: Instant) -> bool {
+        // No node open (docs/43 §3.3 — the session was closed). Closing the last
+        // node also closed every pane, so there is nothing to classify, and
+        // `layout()` below would index an empty `workspaces`. The server keeps
+        // ticking here with no clients attached, so this is a live path, not a
+        // theoretical one.
+        if self.workspaces.is_empty() {
+            return false;
+        }
         // Refresh working directories ~once a second so spaces follow the user.
         // The file-viewer upkeep rides the same 1s cadence — sub-second freshness
         // buys nothing (a node switch or an on-disk edit showing within a second
@@ -251,9 +259,26 @@ impl App {
     // ── api dispatch ──────────────────────────────────────────────────────────
 
     pub fn handle_api(&mut self, req: &ApiRequest) -> String {
-        // No active session (the last workspace was closed and the app is quitting) —
-        // most methods reach `layout()`, which would index an empty `workspaces`.
-        if self.workspaces.is_empty() {
+        // No node open: most methods reach `layout()`, which would index an empty
+        // `workspaces`. This was written when an empty session only ever existed
+        // for the moment before the app quit; since docs/43 §3.3 a server *stays*
+        // empty after its last node closes, so the methods that open one — the
+        // only way back — must get through, or the server is a brick that only
+        // `server stop` can clear.
+        // Only methods that are safe with no node: they either take an explicit
+        // path or touch no node at all. Notably absent is `workspace.new`, which
+        // derives its folder from the focused pane and would fall back to the
+        // *server's* cwd — the very thing §3.3 removed.
+        const WITHOUT_NODE: &[&str] = &[
+            "ping",
+            "server.stop",
+            "workspace.open",
+            "node.open",
+            "workspace.list",
+            "node.list",
+            "worktree.open",
+        ];
+        if self.workspaces.is_empty() && !WITHOUT_NODE.contains(&req.method.as_str()) {
             return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
         }
         match self.dispatch(&req.method, &req.params) {
@@ -416,9 +441,25 @@ impl App {
                 // when `bohay` attaches to a running server from a new folder, so the
                 // launch directory shows up as a workspace.
                 let path = PathBuf::from(req_str(p, "path")?);
-                match self.workspaces.iter().position(|w| w.cwd == path) {
+                match self
+                    .workspaces
+                    .iter()
+                    .position(|w| crate::platform::same_path(&w.cwd, &path))
+                {
                     Some(i) => self.active_ws = i,
-                    None => self.create_workspace_at(path),
+                    // Report a failed open instead of answering with the
+                    // *previously* active node, which read as success and left
+                    // the caller (and the user) looking at the wrong folder.
+                    None if !self.create_workspace_at(path.clone()) => {
+                        return Err((
+                            "spawn_failed".to_string(),
+                            format!(
+                                "couldn't open {} — the shell failed to start there",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    None => {}
                 }
                 Ok(json!({"type":"workspace","workspace": self.active_ws.to_string()}))
             }
@@ -1000,7 +1041,15 @@ impl App {
             }
             "worktree.open" => {
                 let path = param_path(p)?;
-                self.create_workspace_at(path);
+                if !self.create_workspace_at(path.clone()) {
+                    return Err((
+                        "spawn_failed".to_string(),
+                        format!(
+                            "couldn't open {} — the shell failed to start there",
+                            path.display()
+                        ),
+                    ));
+                }
                 Ok(json!({"type":"ok"}))
             }
             "worktree.remove" => {
@@ -1020,7 +1069,11 @@ impl App {
                     }
                 }
                 // Close the workspace opened at this worktree, if any.
-                if let Some(i) = self.workspaces.iter().position(|w| w.cwd == path) {
+                if let Some(i) = self
+                    .workspaces
+                    .iter()
+                    .position(|w| crate::platform::same_path(&w.cwd, &path))
+                {
                     self.close_workspace(i);
                 }
                 Ok(json!({"type":"ok"}))

@@ -143,6 +143,23 @@ pub fn run() -> Result<()> {
             );
             break;
         }
+        // The last node closed (docs/43 §3.3): the *session* is over, so every
+        // window goes away — not just the foreground one, which would leave other
+        // clients staring at a session with nothing in it. The server stays up
+        // with no nodes; `server stop` is still what ends it.
+        if app.end_session {
+            app.end_session = false;
+            broadcast(&mut clients, ServerMessage::Detach);
+            clients.clear();
+            foreground = None;
+            // Persist immediately rather than waiting out the 2s debounce: the
+            // snapshot is now empty, which *removes* `session.json`, and a kill
+            // inside that window would otherwise leave the closed nodes on disk
+            // to be restored on the next start.
+            persist::save(&app);
+            app.session_dirty = false;
+            last_save = Instant::now();
+        }
         if app.detach_requested {
             app.detach_requested = false;
             if let Some(id) = foreground.take() {

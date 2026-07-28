@@ -361,9 +361,6 @@ fn autodetect_and_attach() -> Result<()> {
         spawn_server()?;
         wait_for_socket(&sock)?;
     }
-    // A fresh server already opened the launch folder (its `App::new` uses the cwd
-    // it inherited). When attaching to an *existing* server, ask it to open (or
-    // focus) the folder we launched in, so `bohay <in a new folder>` adds it.
     if !fresh {
         // An upgraded binary silently attaching to an older running server means
         // none of the new version shows up — tell the user how to load it (the
@@ -376,8 +373,12 @@ fn autodetect_and_attach() -> Result<()> {
             );
             thread::sleep(Duration::from_millis(2000));
         }
-        open_cwd_workspace();
     }
+    // Always ask the server to open the launch folder. A *fresh* server may have
+    // restored a saved session (`restore_or_new`), in which case it never saw
+    // this cwd — so this cannot be skipped on the fresh path. Idempotent: if the
+    // folder is already a workspace, the server just focuses it.
+    open_cwd_workspace();
     ipc::client::run(&sock)
 }
 

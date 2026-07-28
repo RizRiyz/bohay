@@ -1,6 +1,44 @@
 //! OS-specific bits, isolated here so core modules stay portable (docs/03 §7).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Do two paths name the same folder? (docs/43 WIN-6.)
+///
+/// Node lookup used to compare `PathBuf`s with `==`, so any difference in
+/// *spelling* read as "not open" and bohay added a duplicate node instead of
+/// focusing the existing one. Windows has many spellings for one path — case
+/// (`C:\Proj` vs `c:\proj`, which the filesystem treats as equal), the `\\?\`
+/// verbatim prefix that `canonicalize` returns, `/` accepted in place of `\`,
+/// and trailing separators — and every one of them defeated `==`.
+///
+/// Deliberately **lexical only, no IO**: this runs on user actions that can
+/// repeat, and a `canonicalize` per candidate would put syscalls on that path
+/// for no gain (the client always sends `std::env::current_dir()`, which is
+/// already resolved). Consequence: two *different* spellings that only a
+/// symlink resolve would unify (`/tmp` vs `/private/tmp` on macOS) still
+/// compare unequal. That is the intended trade.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    path_key(a) == path_key(b)
+}
+
+/// The comparison key for [`same_path`] — normalized spelling, never displayed.
+/// The node keeps the user's original spelling for its label and pane cwd.
+fn path_key(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    // `\\?\C:\proj` and `C:\proj` are the same folder.
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    #[cfg(windows)]
+    // Windows accepts `/` as a separator and is case-insensitive.
+    let s = s.replace('/', "\\").to_lowercase();
+    // Drop trailing separators so `proj\` == `proj`, but never eat a bare root
+    // (`/` or `C:\`), which would make every root compare equal to the empty path.
+    let sep: &[char] = &['/', '\\'];
+    let trimmed = s.trim_end_matches(sep);
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        return s.to_string();
+    }
+    trimmed.to_string()
+}
 
 /// The user's home directory, cross-platform (`$HOME`, else `%USERPROFILE%`).
 pub fn home_dir() -> Option<PathBuf> {
@@ -436,6 +474,63 @@ mod tests {
         assert_eq!(super::resolve_shell("default"), "/bin/sh");
         assert_eq!(super::resolve_shell("zsh"), "/bin/sh");
         std::env::remove_var("BOHAY_SHELL");
+    }
+
+    #[test]
+    fn same_path_ignores_verbatim_prefix_and_trailing_separator() {
+        use std::path::Path;
+        // The `\\?\` prefix `canonicalize` returns names the same folder.
+        assert!(super::same_path(
+            Path::new(r"\\?\C:\proj"),
+            Path::new(r"C:\proj")
+        ));
+        // A trailing separator is not a different folder.
+        assert!(super::same_path(
+            Path::new("/work/app/"),
+            Path::new("/work/app")
+        ));
+        // ...but a bare root must not collapse to the empty path.
+        assert!(!super::same_path(Path::new("/"), Path::new("")));
+        // Genuinely different folders still differ.
+        assert!(!super::same_path(
+            Path::new("/work/app"),
+            Path::new("/work/api")
+        ));
+        assert!(!super::same_path(
+            Path::new("/work/app"),
+            Path::new("/work/app2")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn same_path_folds_case_and_separators_on_windows() {
+        use std::path::Path;
+        // Windows paths are case-insensitive; `PathBuf` comparison is not.
+        assert!(super::same_path(
+            Path::new(r"C:\Users\Riz\proj"),
+            Path::new(r"c:\users\riz\proj")
+        ));
+        // Windows accepts `/` as a separator.
+        assert!(super::same_path(
+            Path::new("C:/proj"),
+            Path::new(r"C:\proj")
+        ));
+        // A bare drive root keeps its separator rather than collapsing.
+        assert!(super::same_path(Path::new(r"C:\"), Path::new(r"c:\")));
+        assert!(!super::same_path(Path::new(r"C:\"), Path::new(r"D:\")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_path_stays_case_sensitive_on_unix() {
+        use std::path::Path;
+        // Unix filesystems can be case-sensitive, so folding case here would
+        // wrongly merge two real, distinct folders.
+        assert!(!super::same_path(
+            Path::new("/work/App"),
+            Path::new("/work/app")
+        ));
     }
 
     #[cfg(windows)]

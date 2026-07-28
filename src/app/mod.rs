@@ -825,6 +825,11 @@ pub struct App {
     pub last_cursor: Option<(u16, u16)>,
     /// Foreground client asked to detach (prefix+q). Distinct from quit.
     pub detach_requested: bool,
+    /// The last node was closed, ending the session (docs/43 §3.3). *Every*
+    /// client detaches, so the window closes, while the server stays up with no
+    /// nodes — distinct from `detach_requested` (one client leaves, session
+    /// continues) and from `should_quit` (the server itself exits).
+    pub end_session: bool,
     /// Force the next frame to be a **full** repaint (not a diff), so a terminal
     /// whose screen was damaged outside bohay's knowledge — a window move/resize,
     /// regaining focus, another program's output — repaints cleanly. The render
@@ -1101,6 +1106,7 @@ impl App {
             orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
+            end_session: false,
             force_redraw: false,
             pending_notify: Vec::new(),
             pending_sound: false,
@@ -1455,6 +1461,7 @@ impl App {
             orch_area: Rect::ZERO,
             last_cursor: None,
             detach_requested: false,
+            end_session: false,
             force_redraw: false,
             pending_notify: Vec::new(),
             pending_sound: false,
@@ -1936,26 +1943,36 @@ impl App {
 
     /// Open `cwd` as a new **static** workspace (a workspace) and focus it. The folder
     /// is fixed — its name/cwd won't change as the pane's process `cd`s around.
-    pub fn create_workspace_at(&mut self, cwd: PathBuf) {
+    ///
+    /// Returns whether the node was opened. Opening fails when the shell can't
+    /// spawn there (a folder that vanished, no permission, a bad `config.shell`).
+    /// That used to be swallowed: the caller carried on, `active_ws` still
+    /// pointed at whatever was focused before, and the user saw the *previous*
+    /// folder with no error anywhere — indistinguishable from bohay ignoring
+    /// them. A toast is raised here so every caller reports it the same way.
+    pub fn create_workspace_at(&mut self, cwd: PathBuf) -> bool {
         let name = ws_name(&cwd);
         let branch = git_branch(&cwd);
-        if let Some(id) = self.spawn_into(cwd.clone()) {
-            self.workspaces.push(Workspace {
-                name,
-                worktree: worktree_membership(&cwd),
-                cwd,
-                branch,
-                git_ahead_behind: None,
-                tabs: vec![Tab::panes(TileLayout::new(id))],
-                active_tab: 0,
-            });
-            self.active_ws = self.workspaces.len() - 1;
-            let ws = self.active_ws;
-            self.emit_event(
-                "workspace.created",
-                serde_json::json!({"workspace": ws.to_string()}),
-            );
-        }
+        let Some(id) = self.spawn_into(cwd.clone()) else {
+            self.show_toast(format!("couldn't open {} — shell failed to start", name));
+            return false;
+        };
+        self.workspaces.push(Workspace {
+            name,
+            worktree: worktree_membership(&cwd),
+            cwd,
+            branch,
+            git_ahead_behind: None,
+            tabs: vec![Tab::panes(TileLayout::new(id))],
+            active_tab: 0,
+        });
+        self.active_ws = self.workspaces.len() - 1;
+        let ws = self.active_ws;
+        self.emit_event(
+            "workspace.created",
+            serde_json::json!({"workspace": ws.to_string()}),
+        );
+        true
     }
 
     /// The order the WORKSPACES sidebar draws nodes in: each linked worktree is
@@ -2740,7 +2757,9 @@ impl App {
         // Per the Layout setting, reuse the session's own workspace (or the workspace at
         // its cwd); otherwise open it as a tab in the currently active workspace.
         let target = if self.config.layout.resume_in_new_workspace {
-            self.workspaces.iter().position(|w| w.cwd == s.cwd)
+            self.workspaces
+                .iter()
+                .position(|w| crate::platform::same_path(&w.cwd, &s.cwd))
         } else {
             Some(self.active_ws)
         };
@@ -3013,21 +3032,26 @@ impl App {
         }
     }
 
-    /// The last workspace just closed. In server mode the session keeps running
-    /// with a fresh workspace (detached clients can come back to a live server;
-    /// only `server stop` ends it); in `--local` this quits the app. If the
-    /// fresh spawn fails we still quit rather than serve an empty, unrenderable
-    /// state.
+    /// The last node just closed, so the **session** is over (docs/43 §3.3).
+    ///
+    /// This used to reset to a fresh node at `std::env::current_dir()` — the
+    /// *server's* cwd, i.e. the folder it was first launched from. Closing every
+    /// node therefore resurrected the folder you closed first, the window never
+    /// went away, and the snapshot kept that folder so it came back after a
+    /// restart too. It also made `persist::save`'s empty-snapshot branch — which
+    /// exists precisely because "the user deliberately closed everything" must
+    /// not resurrect anything — unreachable in server mode.
+    ///
+    /// Now the *window* ends and the *server* survives, which is what
+    /// `server_mode` was for: clients detach, no node is recreated, and the empty
+    /// snapshot clears `session.json`. `server stop` still ends the server, and a
+    /// later `bohay` attaches and opens its launch folder fresh. `--local` has no
+    /// server to outlive, so it quits like a normal terminal app.
     fn all_workspaces_closed(&mut self) {
+        self.session_dirty = true;
         if self.server_mode {
-            let cwd = std::env::current_dir()
-                .ok()
-                .or_else(crate::platform::home_dir)
-                .unwrap_or_else(|| PathBuf::from("/"));
-            self.create_workspace_at(cwd);
-            self.session_dirty = true;
-        }
-        if self.workspaces.is_empty() {
+            self.end_session = true;
+        } else {
             self.should_quit = true;
         }
     }
@@ -3654,23 +3678,143 @@ mod tests {
         assert!(app.toast.is_none());
     }
 
+    /// The reported bug (docs/43 §3.3): open projectA then projectB, close
+    /// projectA, then close projectB — and **projectA came back** while the app
+    /// refused to close. `all_workspaces_closed` reset to a fresh node at
+    /// `std::env::current_dir()`, which in the server is the folder it was
+    /// launched from, i.e. projectA.
+    ///
+    /// The server still outlives its windows (that part was always intended);
+    /// what ends now is the *session*.
     #[test]
-    fn server_mode_outlives_the_last_workspace() {
+    fn closing_the_last_node_ends_the_session_without_resurrecting_one() {
         let _env = crate::persist::test_env("server-outlives");
-        // A server session keeps running when its last workspace closes: it
-        // resets to a fresh workspace instead of setting `should_quit`, so a
-        // detached client always has a live server to come back to.
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.server_mode = true;
-        let id = app.layout().focus;
-        app.handle_event(AppEvent::PtyExit(id)); // the only pane's shell exits
-        assert!(!app.should_quit, "a server session outlives its windows");
-        assert_eq!(app.workspaces.len(), 1, "reset to a fresh workspace");
-        let fresh = app.layout().focus;
+
+        // A second node, so this mirrors the report (close one, then the other)
+        // rather than the single-node case.
+        let dir = std::env::temp_dir().join("bohay-lastnode-4b1c9f");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        assert!(app.create_workspace_at(dir.clone()));
+        assert_eq!(app.workspaces.len(), 2);
+
+        // Close them both, ending with the last one.
+        app.close_workspace(0);
+        assert_eq!(app.workspaces.len(), 1, "the other node stays open");
+        app.close_workspace(0);
+
         assert!(
-            app.panes.contains_key(&fresh),
-            "the fresh workspace has a live pane"
+            app.workspaces.is_empty(),
+            "no node is resurrected — least of all the server's launch folder"
+        );
+        assert!(
+            !app.should_quit,
+            "the server itself still outlives its windows; `server stop` ends it"
+        );
+        assert!(
+            app.end_session,
+            "every client is told to detach, so the window actually closes"
+        );
+
+        // The server keeps ticking after the session ends, with no clients
+        // attached. `detect_tick` reaches `layout()`, so an unguarded empty
+        // session panics the whole server here — which is exactly what happened,
+        // and what no assertion above would have caught.
+        for _ in 0..3 {
+            assert!(
+                !app.detect_tick(Instant::now()),
+                "an empty session has nothing to detect"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no node open, the socket API must answer with an error rather than
+    /// indexing an empty `workspaces` and taking the server down. `handle_api`
+    /// already guards this centrally; the session can now *stay* empty rather
+    /// than being a brief pre-quit window, so this pins that guard in place.
+    #[test]
+    fn node_scoped_api_reports_no_session_instead_of_panicking() {
+        let _env = crate::persist::test_env("api-no-node");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.server_mode = true;
+        app.close_workspace(0);
+        assert!(app.workspaces.is_empty());
+
+        let call = |app: &mut App, method: &str, params: serde_json::Value| {
+            let (reply, _r) = std::sync::mpsc::channel();
+            let resp = app.handle_api(&crate::ipc::api::ApiRequest {
+                id: "1".into(),
+                method: method.into(),
+                params,
+                reply,
+            });
+            serde_json::from_str::<serde_json::Value>(&resp).unwrap()
+        };
+
+        for method in ["tab.list", "tab.new", "tab.close", "tab.rename"] {
+            let res = call(&mut app, method, serde_json::json!({}));
+            assert_eq!(
+                res.pointer("/error/code").and_then(|v| v.as_str()),
+                Some("no_session"),
+                "{method} must report the empty session, not panic: {res}"
+            );
+        }
+
+        // ...but the methods that *open* a node have to get through, or an empty
+        // server is a brick only `server stop` can clear. This is the recovery
+        // path a client takes when it attaches after a session ended, and the
+        // blanket guard used to swallow it.
+        let res = call(&mut app, "workspace.list", serde_json::json!({}));
+        assert!(
+            res.get("error").is_none(),
+            "listing nodes with none open is not an error: {res}"
+        );
+
+        let dir = std::env::temp_dir().join("bohay-recover-4b1c9f");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let res = call(
+            &mut app,
+            "workspace.open",
+            serde_json::json!({ "path": dir.display().to_string() }),
+        );
+        assert!(
+            res.get("error").is_none(),
+            "an empty server must still be able to open a folder: {res}"
+        );
+        assert_eq!(app.workspaces.len(), 1, "the session is back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same empty session must render. A client can still be attached for the
+    /// frame or two before it detaches, and `bohay attach` / `--remote` can attach
+    /// before any folder is opened — every draw fn below `render` assumes a node.
+    #[test]
+    fn an_empty_session_still_renders() {
+        let _env = crate::persist::test_env("render-no-node");
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.server_mode = true;
+        app.close_workspace(0);
+        assert!(app.workspaces.is_empty());
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("no folders open"),
+            "the empty session says so instead of drawing a broken frame"
         );
     }
 
@@ -4580,6 +4724,101 @@ mod tests {
             app.resize_drag.is_none(),
             "body click did not start a resize"
         );
+    }
+
+    /// A node that can't be opened must say so. `create_workspace_at` used to
+    /// swallow a failed shell spawn: it returned normally, `active_ws` still
+    /// pointed at the previously focused node, and the user was left looking at
+    /// the *wrong folder* with no error anywhere.
+    ///
+    /// An unresolvable shell is the failure that actually reaches this branch,
+    /// and it is the plausible Windows one: `resolve_shell` tries `pwsh.exe`,
+    /// then `powershell.exe`, then `%COMSPEC%`, and a bad `config.shell` or
+    /// `BOHAY_SHELL` defeats all three. (A *missing directory*, by contrast,
+    /// still spawns — the child only fails once it execs — so it is deliberately
+    /// not what this asserts on.)
+    #[test]
+    fn failing_to_open_a_node_is_reported_not_swallowed() {
+        let _env = crate::persist::test_env("ws-open-failure");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        let before = app.workspaces.len();
+        let active_before = app.active_ws;
+
+        app.config.shell = "bohay-not-a-real-shell-4b1c9f".to_string();
+        assert!(
+            !app.create_workspace_at(std::env::temp_dir()),
+            "opening a node whose shell cannot start must report failure"
+        );
+        assert_eq!(app.workspaces.len(), before, "no half-built node is added");
+        assert_eq!(app.active_ws, active_before, "focus must not move");
+        // The socket API must not answer with the *previously* active node, which
+        // read as success to `bohay` itself and to any scripting agent.
+        let (reply, _r) = std::sync::mpsc::channel();
+        let resp = app.handle_api(&crate::ipc::api::ApiRequest {
+            id: "1".into(),
+            method: "workspace.open".into(),
+            params: serde_json::json!({ "path": std::env::temp_dir().display().to_string() }),
+            reply,
+        });
+        let res: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(
+            res.pointer("/error/code").and_then(|v| v.as_str()),
+            Some("spawn_failed"),
+            "a failed open is an API error, not a fake success: {res}"
+        );
+
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("couldn't open")),
+            "the user is told, rather than silently shown the previous folder"
+        );
+    }
+
+    /// docs/43 WIN-6: `workspace.open` matched nodes with raw `PathBuf` equality,
+    /// so a different *spelling* of an open folder added a duplicate node instead
+    /// of focusing it.
+    ///
+    /// The spelling used here is the `\\?\` verbatim prefix, because it is the
+    /// one that discriminates on *every* platform: `Path`'s own `==` already
+    /// normalizes trailing separators, and case-folding is Windows-only (both
+    /// are covered directly in `platform`'s tests). Without `same_path` this
+    /// test sees two nodes.
+    #[test]
+    fn opening_an_already_open_node_focuses_it_instead_of_duplicating() {
+        let _env = crate::persist::test_env("ws-open-dedupe");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+
+        let dir = std::env::temp_dir().join("bohay-dedupe-4b1c9f");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        assert!(app.create_workspace_at(dir.clone()), "first open succeeds");
+        let count = app.workspaces.len();
+        let opened = app.active_ws;
+
+        // The same folder as `canonicalize` would hand it back on Windows.
+        let spelled = format!(r"\\?\{}", dir.display());
+        let (reply, _r) = std::sync::mpsc::channel();
+        let resp = app.handle_api(&crate::ipc::api::ApiRequest {
+            id: "1".into(),
+            method: "workspace.open".into(),
+            params: serde_json::json!({ "path": spelled }),
+            reply,
+        });
+        let res: serde_json::Value = serde_json::from_str(&resp).unwrap();
+
+        assert!(
+            res.get("error").is_none(),
+            "re-opening an open node is not an error: {res}"
+        );
+        assert_eq!(
+            app.workspaces.len(),
+            count,
+            "the existing node is focused, not duplicated"
+        );
+        assert_eq!(app.active_ws, opened, "focus lands on the existing node");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The reported bug: a relocated WORKSPACES dock's rows opened files instead

@@ -96,19 +96,19 @@ impl App {
             let live = self
                 .panes
                 .iter()
-                .find(|(_, p)| p.cwd == path)
+                .find(|(_, p)| crate::platform::same_path(&p.cwd, &path))
                 .map(|(&pid, _)| pid);
             match live {
                 Some(pid) => self.focus_pane_global(pid),
-                None => {
-                    self.create_workspace_at(path.clone());
-                    if self.ws().cwd != path {
-                        return Err((
-                            "spawn_failed".to_string(),
-                            "the worker pane didn't start".to_string(),
-                        ));
-                    }
+                // `create_workspace_at` now reports this directly, so the old
+                // "did the active node's cwd change?" probe is gone.
+                None if !self.create_workspace_at(path.clone()) => {
+                    return Err((
+                        "spawn_failed".to_string(),
+                        "the worker pane didn't start".to_string(),
+                    ));
                 }
+                None => {}
             }
             path
         } else {
