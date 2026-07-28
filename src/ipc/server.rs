@@ -149,8 +149,21 @@ pub fn run() -> Result<()> {
         // with no nodes; `server stop` is still what ends it.
         if app.end_session {
             app.end_session = false;
-            broadcast(&mut clients, ServerMessage::Detach);
-            clients.clear();
+            // NOT `broadcast`: that uses `try_send` on a capacity-1 channel and
+            // drops the message when the slot is occupied — which is routine
+            // (see `behind`). A dropped frame is self-healing; a dropped Detach
+            // is not, and would strand the client on a session with no nodes.
+            // `ServerShutdown` survives the same hazard only because the process
+            // then exits and closes every socket; here the server keeps running.
+            //
+            // So block until the writer thread takes it — on a detached thread,
+            // never on this loop, since a wedged client (a stalled ssh link)
+            // would otherwise hang the whole server.
+            for (_, tx) in clients.drain() {
+                thread::spawn(move || {
+                    let _ = tx.send(ServerMessage::Detach);
+                });
+            }
             foreground = None;
             // Persist immediately rather than waiting out the 2s debounce: the
             // snapshot is now empty, which *removes* `session.json`, and a kill
@@ -529,6 +542,9 @@ mod shutdown {
 #[cfg(test)]
 mod tests {
     use super::needs_render;
+    use super::ServerMessage;
+    use std::sync::mpsc;
+    use std::thread;
 
     /// A client that dropped a diff must get its full-frame resync even when the
     /// screen goes quiet. The resync only ships from inside a render, so a
@@ -550,5 +566,42 @@ mod tests {
             !needs_render(false, false, false),
             "nothing to do means no frame"
         );
+    }
+
+    /// Ending a session must actually reach the client (docs/43 §3.3). The frame
+    /// channel is `sync_channel(1)`, and `broadcast` uses `try_send`, which drops
+    /// the message when that single slot is occupied — routine enough that the
+    /// loop tracks it as `behind`. A dropped *frame* is self-healing; a dropped
+    /// *Detach* strands the client on a session with no nodes, which is the
+    /// original "the app is not closing" symptom. `ServerShutdown` survives the
+    /// same hazard only because the process then exits and closes every socket.
+    #[test]
+    fn ending_a_session_delivers_detach_even_when_the_channel_is_full() {
+        use std::sync::mpsc::TrySendError;
+
+        let (tx, rx) = mpsc::sync_channel::<ServerMessage>(1);
+        // A queued frame occupies the only slot.
+        tx.try_send(ServerMessage::Sound).expect("slot is free");
+
+        // What the old path did: silently drop it.
+        assert!(
+            matches!(
+                tx.try_send(ServerMessage::Detach),
+                Err(TrySendError::Full(_))
+            ),
+            "a full channel is exactly the case that used to lose the Detach"
+        );
+
+        // What it does now: block until the writer drains — off-thread, so a
+        // wedged client can never hang the server loop.
+        let h = thread::spawn(move || {
+            let _ = tx.send(ServerMessage::Detach);
+        });
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Sound));
+        assert!(
+            matches!(rx.recv().unwrap(), ServerMessage::Detach),
+            "the client is told to detach even though the channel was full"
+        );
+        h.join().unwrap();
     }
 }
