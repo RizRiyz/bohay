@@ -52,11 +52,28 @@ pub struct VisibleRow {
     pub loading: bool,
 }
 
+/// What was open in one folder, parked while a different node is active.
+///
+/// The dock is a single tree shared by every node, so switching nodes re-roots
+/// it. Discarding this state made the user lose their place: come back to a node
+/// and every directory they had opened was collapsed again, with no record of
+/// what they had been tracking.
+#[derive(Default)]
+struct TreeView {
+    expanded: HashSet<PathBuf>,
+    cursor: usize,
+    scroll: usize,
+}
+
 /// The FILES dock's state: which folder, which dirs are open, and the cursor.
 pub struct FileTree {
     root: PathBuf,
     dirs: HashMap<PathBuf, Dir>,
     expanded: HashSet<PathBuf>,
+    /// Per-folder view state for nodes that are not currently active, keyed by
+    /// root. Bounded by the number of folders visited this session, and each
+    /// entry is a handful of paths, so it stays small.
+    saved: HashMap<PathBuf, TreeView>,
     /// Directories whose read has been scheduled but not yet applied — so the
     /// app never schedules the same read twice.
     pending: HashSet<PathBuf>,
@@ -82,6 +99,7 @@ impl FileTree {
             root,
             dirs: HashMap::new(),
             expanded: HashSet::new(),
+            saved: HashMap::new(),
             pending: HashSet::new(),
             cursor: 0,
             scroll: 0,
@@ -96,18 +114,36 @@ impl FileTree {
         &self.root
     }
 
-    /// Point the tree at a new folder (the active node changed). Keeps nothing
-    /// open and resets the cursor; the dir cache is harmless to keep but the
-    /// expanded set must reset or a stale path could show under the wrong root.
+    /// Point the tree at a new folder (the active node changed).
+    ///
+    /// The outgoing folder's open directories, cursor and scroll are **parked**
+    /// under its own root and restored if the user comes back, so switching
+    /// nodes no longer collapses everything and loses their place. The expanded
+    /// set still cannot simply carry over — a path from the old root would show
+    /// under the wrong tree — but keying it by root gives correctness *and*
+    /// continuity. The dir cache is shared and harmless to keep.
     pub fn set_root(&mut self, root: PathBuf) {
         if root == self.root {
             return;
         }
-        self.root = root;
-        self.expanded.clear();
+        let parked = TreeView {
+            expanded: std::mem::take(&mut self.expanded),
+            cursor: self.cursor,
+            scroll: self.scroll,
+        };
+        let old = std::mem::replace(&mut self.root, root);
+        // The tree starts rooted at nothing (`App::new`), which is not a folder
+        // anyone returns to — don't keep a junk entry for it.
+        if !old.as_os_str().is_empty() {
+            self.saved.insert(old, parked);
+        }
+        let restored = self.saved.remove(&self.root).unwrap_or_default();
+        self.expanded = restored.expanded;
+        self.cursor = restored.cursor;
+        self.scroll = restored.scroll;
+        // Anything in flight was scheduled for the previous root; `needs_load`
+        // re-requests whatever the restored view needs.
         self.pending.clear();
-        self.cursor = 0;
-        self.scroll = 0;
         self.dirty = true;
     }
 
@@ -376,15 +412,77 @@ mod tests {
     }
 
     #[test]
-    fn set_root_resets_open_state_but_reader_sorts() {
+    fn set_root_shows_the_new_folder_not_the_old_one() {
         let mut t = FileTree::new(PathBuf::from("/r"));
         t.apply_dir(PathBuf::from("/r"), vec![e("x", true)]);
         t.toggle(&PathBuf::from("/r/x"));
         t.cursor = 5;
         t.set_root(PathBuf::from("/other"));
         assert_eq!(t.root(), Path::new("/other"));
-        // Nothing from the old root is expanded any more, and the cursor resets.
+        // A path from the old root must not show under the new one, and an
+        // unvisited folder opens at the top.
         assert!(t.needs_load().contains(&PathBuf::from("/other")));
+        assert!(!t.needs_load().contains(&PathBuf::from("/r/x")));
         assert_eq!(t.cursor, 0);
+    }
+
+    /// The reported bug: switching nodes collapsed everything, so coming back
+    /// lost track of which files you had opened. The view is parked per folder
+    /// and restored, while still never leaking a path across roots.
+    #[test]
+    fn returning_to_a_folder_restores_what_was_expanded() {
+        let mut t = FileTree::new(PathBuf::from("/a"));
+        t.apply_dir(PathBuf::from("/a"), vec![e("src", true), e("docs", true)]);
+        t.toggle(&PathBuf::from("/a/src"));
+        t.apply_dir(PathBuf::from("/a/src"), vec![e("deep", true)]);
+        t.toggle(&PathBuf::from("/a/src/deep"));
+        t.cursor = 3;
+        t.scroll = 1;
+
+        // Switch away: the other node starts clean, with nothing from /a open.
+        t.set_root(PathBuf::from("/b"));
+        assert_eq!(t.cursor, 0);
+        assert_eq!(t.scroll, 0);
+        assert!(!t.needs_load().contains(&PathBuf::from("/a/src")));
+
+        // ...and switch back: everything the user had open is open again.
+        t.set_root(PathBuf::from("/a"));
+        let rows: Vec<_> = t.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert!(
+            rows.contains(&"deep".to_string()),
+            "a nested expanded dir survives the round trip: {rows:?}"
+        );
+        assert_eq!(t.cursor, 3, "the cursor comes back too");
+        assert_eq!(t.scroll, 1, "and so does the scroll position");
+    }
+
+    /// Two nodes must keep *separate* view state, not share one set. Asserted on
+    /// each root's **child** rows, since a top-level entry is visible whether or
+    /// not it is expanded and so would pass even with the state discarded.
+    #[test]
+    fn each_folder_keeps_its_own_expanded_state() {
+        let mut t = FileTree::new(PathBuf::from("/a"));
+        t.apply_dir(PathBuf::from("/a"), vec![e("x", true)]);
+        t.toggle(&PathBuf::from("/a/x"));
+        t.apply_dir(PathBuf::from("/a/x"), vec![e("in_a", false)]);
+
+        t.set_root(PathBuf::from("/b"));
+        t.apply_dir(PathBuf::from("/b"), vec![e("y", true)]);
+        t.toggle(&PathBuf::from("/b/y"));
+        t.apply_dir(PathBuf::from("/b/y"), vec![e("in_b", false)]);
+        let rows: Vec<_> = t.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert!(rows.contains(&"in_b".to_string()), "/b's own dir is open");
+        assert!(
+            !rows.contains(&"in_a".to_string()),
+            "/a's state stays in /a"
+        );
+
+        t.set_root(PathBuf::from("/a"));
+        let rows: Vec<_> = t.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert!(rows.contains(&"in_a".to_string()), "/a's own state is back");
+        assert!(
+            !rows.contains(&"in_b".to_string()),
+            "/b's state stays in /b"
+        );
     }
 }
