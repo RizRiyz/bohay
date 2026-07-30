@@ -698,3 +698,58 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod theme_css {
+    /// Dev tool (not a CI check), mirroring `generate_preview`: emit every
+    /// palette in [`super::THEMES`] as CSS custom properties for the website's
+    /// theme picker, so bohay.dev shows the *real* palettes rather than
+    /// hand-copied approximations that drift.
+    ///
+    /// `cargo test emit_theme_css -- --ignored --nocapture > /tmp/themes.css`
+    #[test]
+    #[ignore]
+    fn emit_theme_css() {
+        fn hex(c: ratatui::style::Color) -> String {
+            match c {
+                ratatui::style::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                other => format!("/* {other:?} */ #000000"),
+            }
+        }
+        for name in super::THEMES {
+            let t = super::by_name(name);
+            // `html[...]` outranks the pages' own `:root` block, so a picked
+            // theme wins without relying on stylesheet order.
+            // `html[...]` outranks the pages' own `:root` block, so a picked
+            // theme wins without relying on stylesheet order.
+            println!("html[data-bh-theme='{name}'] {{");
+            // Page surfaces, darkest first.
+            println!("  --bg: {};", hex(t.crust));
+            println!("  --bg2: {};", hex(t.mantle));
+            println!("  --base: {};", hex(t.base));
+            println!("  --surface: {};", hex(t.surface0));
+            // The site's hairline is `surface1`; `border` is the brighter rule
+            // bohay uses for focused pane edges.
+            println!("  --line: {};", hex(t.surface1));
+            println!("  --border: {};", hex(t.border));
+            println!("  --overlay0: {};", hex(t.overlay0));
+            println!("  --overlay1: {};", hex(t.overlay1));
+            println!("  --sub: {};", hex(t.subtext0));
+            println!("  --sub2: {};", hex(t.subtext1));
+            println!("  --text: {};", hex(t.text));
+            println!("  --accent: {};", hex(t.accent));
+            println!("  --sel: {};", hex(t.sel_bg));
+            println!("  --green: {};", hex(t.green));
+            println!("  --mint: {};", hex(t.mint));
+            println!("  --amber: {};", hex(t.amber));
+            println!("  --coral: {};", hex(t.coral));
+            println!("}}");
+            // The website's theme-picker swatches, so the site never has to
+            // juggle `data-bh-theme` in JS just to read an accent colour.
+            println!(
+                ".td-sw[data-theme='{name}'] {{ background: {}; }}",
+                hex(t.accent)
+            );
+        }
+    }
+}

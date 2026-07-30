@@ -1,7 +1,12 @@
 ---
+import jetbrainsLatin from '@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2?url';
+import plexLatin600 from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-600-normal.woff2?url';
+import '../styles/themes.css';
+import { THEMES } from '../lib/themes';
 // The bohay product homepage — a custom landing page, independent of the
 // Starlight docs layout (docs live under /docs/…). Dark-first, the app's own
-// fluo-green (#c6ff1a) on near-black, terminal-native aesthetic.
+// terminal-native aesthetic. The palette is switchable: every colour comes
+// from tokens in styles/themes.css, generated from the app's own registry.
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import '@fontsource/ibm-plex-mono/500.css';
@@ -22,20 +27,33 @@ import IconAmp from '../assets/icons/amp-color.svg';
 import IconGrok from '../assets/icons/grok.svg';
 import IconPi from '../assets/icons/pi.svg';
 import IconQwen from '../assets/icons/qwen-color.svg';
+import IconGemini from '../assets/icons/geminicli-color.svg';
+import IconKiro from '../assets/icons/kiro-color.svg';
+import IconAider from '../assets/icons/aider.svg';
+// Droid's logo only exists as a raster. Its alpha channel is used as a CSS mask
+// so the mark still inherits `currentColor` like the inline SVGs do.
+import droidMask from '../assets/icons/droid-mask.png';
 
 const GITHUB = 'https://github.com/RizRiyz/bohay';
 
+// Every agent in `detect::KNOWN_AGENTS` (14), which CLAUDE.md requires this
+// grid to stay truthful to. `aider` and `droid` have no icon in assets/icons,
+// so they render a lettermark rather than being left out of the list.
 const AGENTS = [
   { name: 'Claude Code', Icon: IconClaudeCode, hook: true },
-  { name: 'Copilot', Icon: IconCopilot, mono: true, hook: true },
   { name: 'Codex', Icon: IconCodex, hook: true },
+  { name: 'Gemini', Icon: IconGemini },
+  { name: 'Aider', Icon: IconAider },
   { name: 'opencode', Icon: IconOpencode, mono: true, hook: true },
-  { name: 'Cursor', Icon: IconCursor, mono: true },
-  { name: 'Pi', Icon: IconPi, mono: true, hook: true },
+  { name: 'Copilot', Icon: IconCopilot, mono: true, hook: true },
   { name: 'Kimi', Icon: IconKimi, hook: true },
-  { name: 'Amp', Icon: IconAmp },
-  { name: 'Grok', Icon: IconGrok, mono: true, hook: true },
   { name: 'Qwen', Icon: IconQwen },
+  { name: 'Kiro', Icon: IconKiro },
+  { name: 'Cursor', Icon: IconCursor, mono: true },
+  { name: 'Amp', Icon: IconAmp },
+  { name: 'Droid', mask: droidMask.src },
+  { name: 'Grok', Icon: IconGrok, mono: true, hook: true },
+  { name: 'Pi', Icon: IconPi, mono: true, hook: true },
 ];
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -61,6 +79,15 @@ const ogImage = 'https://bohay.dev/og.png';
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    <!-- Preload the two faces that are on screen at first paint. Fontsource
+         ships `font-display: swap`, so without this every navigation paints in
+         the fallback mono and then reflows into the real face — the page-wide
+         blink. Preloading lets the font arrive before that first paint, so the
+         swap is never seen. Only the latin subsets, and only the weights the
+         chrome actually uses. -->
+    <link rel="preload" href={jetbrainsLatin} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={plexLatin600} as="font" type="font/woff2" crossorigin />
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/favicon.png" />
@@ -78,12 +105,24 @@ const ogImage = 'https://bohay.dev/og.png';
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage} />
+    <!-- Apply the saved palette *before first paint*. Astro defers normal
+         <script> tags, so the picker's own script at the end of <body> only runs
+         after the page has already painted in the default palette — which is the
+         noir flash you see on every navigation. `is:inline` keeps this as a
+         plain blocking script in <head>, so the first paint is already correct.
+         Deliberately tiny and dependency-free; it must not delay rendering. -->
+    <script is:inline>
+      try {
+        var t = localStorage.getItem('bohay-theme');
+        if (t) document.documentElement.setAttribute('data-bh-theme', t);
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <nav>
       <div class="nav-inner">
       <a class="brand" href="/">
-        <Logo width={28} height={28} class="mark" aria-hidden="true" />
+        <Logo width={34} height={34} class="mark" aria-hidden="true" />
         <span>bohay</span>
       </a>
       <div class="nav-links">
@@ -91,14 +130,13 @@ const ogImage = 'https://bohay.dev/og.png';
         <a href="/modules/">Modules</a>
         <a href="/compare/">Compare</a>
         <a href="/changelog/">Changelog</a>
-        <a href={GITHUB} class="gh">
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+        <a href={GITHUB} class="gh" aria-label="bohay on GitHub" title="GitHub">
+          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"
             ><path
               fill="currentColor"
               d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
             ></path></svg
           >
-          <span id="stars">GitHub</span>
         </a>
       </div>
       </div>
@@ -422,19 +460,18 @@ const ogImage = 'https://bohay.dev/og.png';
     <section class="agents-strip">
       <h2>Works with the agents you already use</h2>
       <div class="agent-grid">
-        {AGENTS.map(({ name, Icon, hook }) => (
+        {AGENTS.map(({ name, Icon, mask, letter, hook }) => (
           <div class={`atile${hook ? ' hook' : ''}`}>
             <span class={`aicon ic-${name.toLowerCase().replace(/[^a-z0-9]/g, '')}`} aria-label={name}>
-              <Icon />
+              {Icon ? <Icon /> : mask ? <i class="amask" style={`--m:url(${mask})`} /> : <b class="aletter">{letter}</b>}
             </span>
             <span class="aname">{name}</span>
           </div>
         ))}
       </div>
       <p class="note">
-        …plus <strong>Gemini</strong>, <strong>Aider</strong>, <strong>Droid</strong>,
-        and any agent bohay recognizes on screen. Live status for all, zero setup.
-        The <span class="hookdot">●</span> agents also resume your sessions after a
+        Live status for every one of them, zero setup. The
+        <span class="hookdot">●</span> agents also resume your sessions after a
         restart, and most report precise events through the optional hook.
         <a href="/docs/reference/agents/">Full matrix →</a>
       </p>
@@ -485,6 +522,34 @@ const ogImage = 'https://bohay.dev/og.png';
       </div>
     </footer>
 
+    <!-- Theme picker · floating dock, deliberately outside the nav. A custom
+         listbox (not a native select) so it matches the site, opens upward, and
+         previews each palette live on hover. -->
+    <!-- Brand context menu · right-click the wordmark for the logo assets, the
+         way most product sites expose their mark. Plain links + clipboard, no
+         dependency. -->
+    <div class="brandmenu" id="brandmenu" hidden>
+      <a class="bm-item" id="bm-png" href="/brand/bohay-logo.png" download="bohay-logo.png">Download PNG</a>
+      <a class="bm-item" id="bm-svg" href="/brand/bohay-logo.svg" download="bohay-logo.svg">Download SVG</a>
+      <button type="button" class="bm-item" id="bm-copy" data-src="/brand/bohay-logo.svg">Copy SVG</button>
+    </div>
+    <div class="theme-dock" id="theme-dock">
+      <ul class="td-list" id="td-list" role="listbox" aria-label="Color theme" hidden>
+        {THEMES.map((t) => (
+          <li>
+            <button type="button" class="td-opt" role="option" data-theme={t.id}>
+              <i class="td-sw" data-theme={t.id} aria-hidden="true"></i>
+              <span class="td-name">{t.label}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <button type="button" class="td-btn" id="td-btn" aria-expanded="false" aria-haspopup="listbox">
+        <i class="td-sw td-sw-cur" aria-hidden="true"></i>
+        <span id="td-cur">noir</span>
+        <span class="td-caret" aria-hidden="true">▴</span>
+      </button>
+    </div>
     <script>
       // ── The hero demo: a tiny state machine over three simulated agents. ──
       type AgentId = 'claude' | 'copilot' | 'codex';
@@ -939,14 +1004,6 @@ const ogImage = 'https://bohay.dev/og.png';
           setTimeout(() => (btn.textContent = '⧉'), 1200);
         } catch {}
       });
-      // Live star count (graceful: stays "GitHub" on failure).
-      fetch('https://api.github.com/repos/RizRiyz/bohay')
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          const el = document.getElementById('stars');
-          if (el && d?.stargazers_count != null) el.textContent = `★ ${d.stargazers_count}`;
-        })
-        .catch(() => {});
     </script>
 
     <!-- Global (not Astro-scoped): the demo builds rows/prompts at runtime via
@@ -956,96 +1013,119 @@ const ogImage = 'https://bohay.dev/og.png';
       :root {
         --bg: #070709;
         --bg2: #111116;
+        --base: #202028;
         --surface: #1a1a20;
         --line: #25252d;
-        --text: #e7e7ed;
+        --border: #383840;
+        --overlay0: #4a4a54;
+        --overlay1: #686873;
         --sub: #93939f;
+        --sub2: #b6b6c0;
+        --text: #e7e7ed;
         --accent: #c6ff1a;
-        --amber: #e09a4d;
+        --sel: #33450e;
+        --green: #8fbc7a;
         --mint: #6fc6a3;
+        --amber: #e09a4d;
+        --coral: #e06c66;
       }
       * { box-sizing: border-box; margin: 0; }
       html { scroll-behavior: smooth; }
+      /* Monospace throughout. This is a terminal program: the page should read
+         like one, and a single face across body, headings and code removes the
+         sans/mono seam that made the old page feel like a generic template. */
       body {
         background: var(--bg);
         color: var(--text);
-        font: 16px/1.65 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+        font: 13.5px/1.75 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+        -webkit-font-smoothing: antialiased;
       }
       a { color: inherit; text-decoration: none; }
       code, pre, .term { font-family: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace; }
-      /* Display face · big text (the name "bohay" + every heading) in IBM Plex Mono. */
+      /* Display face · the wordmark and headings. Tight tracking is what keeps a
+         monospace heading from looking like plain output. */
       h1, h2, h3, .brand, .foot-brand {
         font-family: 'IBM Plex Mono', ui-monospace, 'JetBrains Mono Variable', monospace;
-        line-height: 1.14; letter-spacing: -0.045em;
+        line-height: 1.15; letter-spacing: -0.03em; font-weight: 600;
       }
-      section, header.hero { max-width: 1060px; margin: 0 auto; padding: 4.5rem 1.5rem; }
+      /* Wide, as before, but the rhythm now comes from generous vertical space
+         between sections rather than from cards and shadows. */
+      section, header.hero { max-width: 1080px; margin: 0 auto; padding: 5.5rem 1.5rem; }
       .accent { color: var(--accent); }
       .dim { color: var(--sub); }
-      ::selection { background: #33450e; color: #e7e7ed; }
+      ::selection { background: var(--sel); color: var(--text); }
+      h2 { font-size: 1.45rem; letter-spacing: -0.035em; }
+      .feat-sub, .sub, .orch-text p, .ms-sub {
+        color: var(--sub); font-size: 0.85rem; line-height: 1.8;
+      }
 
       nav {
         position: sticky; top: 0; z-index: 10;
-        background: rgb(7 7 9 / 0.75);
-        backdrop-filter: blur(14px);
-        -webkit-backdrop-filter: blur(14px);
-        border-bottom: 1px solid rgb(37 37 45 / 0.6);
+        background: rgb(from var(--bg) r g b / 0.85);
+        border-bottom: 1px solid var(--line);
       }
       .nav-inner {
         display: flex; justify-content: space-between; align-items: center;
-        max-width: 1060px; margin: 0 auto; padding: 0.85rem 1.5rem;
+        max-width: 1080px; margin: 0 auto; padding: 0.85rem 1.5rem;
       }
-      .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.15rem; }
+      .brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 700; font-size: 1.45rem; letter-spacing: -0.05em; color: var(--text); }
       /* Inline SVG logo mark · crisp at any size, sits flush with the wordmark. */
       .mark { display: block; flex-shrink: 0; }
-      .side-brand .mark { border-radius: 3px; }
       .nav-links {
         display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.88rem;
         font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -0.01em;
       }
       .nav-links a:hover { color: var(--text); }
-      .gh { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid var(--line); padding: 0.35rem 0.75rem; border-radius: 999px; }
+      .gh {
+        display: inline-flex; align-items: center; justify-content: center;
+        border: 1px solid var(--line); padding: 0.4rem;
+        transition: border-color 0.15s, color 0.15s;
+      }
       .gh:hover { border-color: var(--accent); color: var(--accent); }
 
-      .hero { text-align: center; padding-top: 4.5rem; position: relative; }
-      .hero .glow {
-        position: absolute; inset: -20% 0 auto 0; height: 480px;
-        background: radial-gradient(ellipse 60% 55% at 50% 0%, rgb(198 255 26 / 0.09), transparent 70%);
-        pointer-events: none;
+      /* Centred, but with the radial green wash gone. The glow and the rounded
+         chrome were what made this read as a template, not the alignment. */
+      .hero { text-align: center; padding-top: 5rem; position: relative; }
+      .hero .glow { display: none; }
+      .hero h1 {
+        font-size: clamp(2rem, 5vw, 3.1rem); font-weight: 600; position: relative;
+        letter-spacing: -0.045em;
       }
-      .hero h1 { font-size: clamp(2.1rem, 5.6vw, 3.5rem); font-weight: 700; position: relative; }
-      .hero .sub { color: var(--sub); max-width: 40rem; margin: 1.2rem auto 0; font-size: 1.13rem; }
+      .hero .sub { color: var(--sub); max-width: 44rem; margin: 1.2rem auto 0; font-size: 0.95rem; line-height: 1.8; }
       .install {
-        display: inline-flex; align-items: center; gap: 0.75rem; margin-top: 2rem;
-        background: var(--bg2); border: 1px solid var(--line); border-radius: 0.6rem;
-        padding: 0.7rem 1rem; max-width: 100%;
+        display: inline-flex; align-items: center; gap: 0.85rem; margin-top: 2.2rem;
+        background: none; border: 1px solid var(--line);
+        padding: 0.65rem 0.95rem; max-width: 100%;
       }
-      .install code { color: var(--accent); font-size: 0.85rem; overflow-x: auto; white-space: nowrap; }
+      .install code { color: var(--accent); font-size: 0.82rem; overflow-x: auto; white-space: nowrap; }
+      .install code::before { content: '$ '; color: var(--sub); }
       .install button {
         background: none; border: 1px solid var(--line); color: var(--sub);
-        border-radius: 0.4rem; padding: 0.15rem 0.5rem; cursor: pointer; font-size: 0.9rem;
+        padding: 0.1rem 0.45rem; cursor: pointer; font-size: 0.75rem;
+        font-family: inherit; transition: border-color 0.15s, color 0.15s;
       }
       .install button:hover { color: var(--accent); border-color: var(--accent); }
-      .alt-install { color: var(--sub); font-size: 0.85rem; margin-top: 0.7rem; }
-      .alt-install code { color: var(--text); background: var(--bg2); padding: 0.1rem 0.4rem; border-radius: 0.3rem; }
+      .alt-install { color: var(--sub); font-size: 0.78rem; margin-top: 0.85rem; }
+      .alt-install code { color: var(--text); background: var(--bg2); padding: 0.1rem 0.4rem;  }
       .alt-install a { color: var(--accent); }
-      .cta { margin-top: 1.6rem; display: flex; gap: 0.8rem; justify-content: center; }
+      .cta { margin-top: 1.6rem; display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; }
       .btn {
-        display: inline-block; padding: 0.65rem 1.3rem; border-radius: 0.55rem;
-        border: 1px solid var(--line); font-weight: 600; font-size: 0.95rem;
+        display: inline-block; padding: 0.6rem 1.15rem;
+        border: 1px solid var(--line); font-weight: 500; font-size: 0.82rem;
+        transition: border-color 0.15s, color 0.15s;
       }
       .btn:hover { border-color: var(--accent); }
-      .btn.primary { background: var(--accent); color: #0b0b0f; border-color: var(--accent); }
-      .btn.primary:hover { filter: brightness(1.08); }
+      .btn.primary { background: none; color: var(--accent); border-color: rgb(from var(--accent) r g b / 0.45); }
+      .btn.primary:hover { border-color: var(--accent); }
       /* ── the live demo ── */
       .demo {
         margin-top: 3rem; text-align: left;
-        background: var(--bg2); border: 1px solid var(--line); border-radius: 0.9rem;
-        box-shadow: 0 24px 80px rgb(198 255 26 / 0.06), 0 12px 48px rgb(0 0 0 / 0.6);
+        background: var(--bg2); border: 1px solid var(--line);
         overflow: hidden; font-size: 0.8rem;
       }
       .demo-chrome {
         display: flex; align-items: center; gap: 0.45rem;
-        padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line); background: #0d0d11;
+        padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line); background: var(--bg2);
       }
       .tl { width: 11px; height: 11px; border-radius: 50%; }
       .tl.r { background: #e06c66; } .tl.y { background: #e0b34d; } .tl.g { background: #6fc6a3; }
@@ -1056,76 +1136,75 @@ const ogImage = 'https://bohay.dev/og.png';
       .demo-body { display: flex; min-height: 380px; }
       .demo-side {
         width: 190px; flex-shrink: 0; border-right: 1px solid var(--line);
-        background: #101014; padding: 0.8rem 0.55rem; display: flex; flex-direction: column; gap: 2px;
+        background: var(--bg2); padding: 0.8rem 0.55rem; display: flex; flex-direction: column; gap: 2px;
       }
       .side-brand {
         display: flex; align-items: center; gap: 0.4rem;
-        padding: 0.15rem 0.5rem 0.6rem; border-bottom: 1px solid #1b1b22; margin-bottom: 0.3rem;
+        padding: 0.15rem 0.5rem 0.6rem; border-bottom: 1px solid var(--surface); margin-bottom: 0.3rem;
       }
-      .side-brand img { border-radius: 3px; }
       .side-name { color: var(--accent); font-weight: 800; font-size: 0.82rem; letter-spacing: -0.01em; }
-      .side-ver { color: #4a4a54; font-size: 0.62rem; font-family: 'JetBrains Mono Variable', monospace; }
+      .side-ver { color: var(--overlay0); font-size: 0.62rem; font-family: 'JetBrains Mono Variable', monospace; }
       .menu-pill {
         margin-left: auto; background: none; border: 1px solid var(--line); color: var(--sub);
-        border-radius: 999px; padding: 0.08rem 0.55rem; cursor: pointer;
+         padding: 0.08rem 0.55rem; cursor: pointer;
         font: 0.62rem 'Inter Variable', sans-serif;
       }
-      .menu-pill:hover { color: var(--accent); border-color: #3a4514; }
+      .menu-pill:hover { color: var(--accent); border-color: rgb(from var(--accent) r g b / 0.75); }
       .side-label {
-        color: #686873; font-size: 0.62rem; font-weight: 700; text-transform: uppercase;
+        color: var(--overlay1); font-size: 0.62rem; font-weight: 700; text-transform: uppercase;
         letter-spacing: 0.1em; padding: 0.55rem 0.5rem 0.25rem;
       }
       .agents-label { display: flex; align-items: center; justify-content: space-between; }
       .afilter { display: flex; gap: 2px; text-transform: none; letter-spacing: 0; }
       .fchip {
-        background: none; border: 0; color: #4a4a54; cursor: pointer;
-        font: 0.6rem 'Inter Variable', sans-serif; padding: 0.05rem 0.3rem; border-radius: 0.25rem;
+        background: none; border: 0; color: var(--overlay0); cursor: pointer;
+        font: 0.6rem 'Inter Variable', sans-serif; padding: 0.05rem 0.3rem;
       }
       .fchip:hover { color: var(--sub); }
-      .fchip.on { color: var(--accent); background: #1d240b; }
+      .fchip.on { color: var(--accent); background: rgb(from var(--accent) r g b / 0.16); }
       .ws {
         display: flex; align-items: baseline; gap: 0.3rem; width: 100%;
         background: none; border: 0; cursor: pointer; text-align: left;
-        color: var(--sub); padding: 0.28rem 0.5rem; border-radius: 0.35rem;
+        color: var(--sub); padding: 0.28rem 0.5rem;
         font: 0.74rem 'JetBrains Mono Variable', monospace;
       }
-      .ws:hover { background: #1a1a20; color: var(--text); }
-      .ws.on { color: var(--text); background: #1a1a20; }
-      .ws-arrow { color: #686873; font-size: 0.62rem; }
-      .ws .branch { color: #686873; font-size: 0.68rem; }
+      .ws:hover { background: var(--surface); color: var(--text); }
+      .ws.on { color: var(--text); background: var(--surface); }
+      .ws-arrow { color: var(--overlay1); font-size: 0.62rem; }
+      .ws .branch { color: var(--overlay1); font-size: 0.68rem; }
       .ws .ab { margin-left: auto; color: var(--accent); font-size: 0.62rem; }
       .session-row {
         display: flex; align-items: center; gap: 0.5rem; width: 100%;
         background: none; border: 0; cursor: pointer; text-align: left;
-        color: #686873; padding: 0.3rem 0.5rem; border-radius: 0.4rem;
+        color: var(--overlay1); padding: 0.3rem 0.5rem;
         font: 0.74rem 'JetBrains Mono Variable', monospace;
       }
-      .session-row:hover { background: #1a1a20; color: var(--sub); }
+      .session-row:hover { background: var(--surface); color: var(--sub); }
       .session-row .proj { margin-left: auto; font-size: 0.62rem; }
       .agent {
         display: flex; align-items: center; gap: 0.5rem; width: 100%;
         background: none; border: 0; color: var(--text); cursor: pointer; text-align: left;
-        padding: 0.34rem 0.5rem; border-radius: 0.4rem;
+        padding: 0.34rem 0.5rem;
         font: 0.78rem 'JetBrains Mono Variable', monospace;
       }
-      .agent:hover { background: #1a1a20; }
-      .agent.focused { background: #1d240b; color: var(--accent); }
-      .agent .proj { margin-left: auto; color: #686873; font-size: 0.66rem; }
+      .agent:hover { background: var(--surface); }
+      .agent.focused { background: rgb(from var(--accent) r g b / 0.16); color: var(--accent); }
+      .agent .proj { margin-left: auto; color: var(--overlay1); font-size: 0.66rem; }
       .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
       .dot.working, .pt-dot.working { background: var(--amber); animation: pulse 1.6s infinite; }
       .dot.blocked, .pt-dot.blocked { background: #e06c66; animation: pulse 1s infinite; }
       .dot.done, .pt-dot.done { background: var(--mint); }
-      .dot.idle, .pt-dot.idle { background: #4a4a54; }
+      .dot.idle, .pt-dot.idle { background: var(--overlay0); }
 
       .demo-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
       .demo-tabs { display: flex; gap: 2px; padding: 0.45rem 0.6rem 0; border-bottom: 1px solid var(--line); }
       .demo-tabs .tab {
         color: var(--sub); font-size: 0.72rem; padding: 0.25rem 0.7rem;
-        border-radius: 0.4rem 0.4rem 0 0; font-family: 'JetBrains Mono Variable', monospace;
+         font-family: 'JetBrains Mono Variable', monospace;
         background: none; border: 0; cursor: pointer;
       }
       .demo-tabs .tab:hover { color: var(--text); }
-      .demo-tabs .tab.on { color: var(--text); background: #1a1a20; }
+      .demo-tabs .tab.on { color: var(--text); background: var(--surface); }
       .demo-tabs .tab.plus { cursor: default; }
       .demo-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
       /* `hidden` must always win · several demo elements set their own display. */
@@ -1136,36 +1215,36 @@ const ogImage = 'https://bohay.dev/og.png';
       .gtabs { display: flex; gap: 0.35rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
       .gtab {
         background: none; border: 1px solid var(--line); color: var(--sub); cursor: pointer;
-        border-radius: 999px; padding: 0.14rem 0.65rem;
+         padding: 0.14rem 0.65rem;
         font: 0.68rem 'JetBrains Mono Variable', monospace;
       }
       .gtab:hover { color: var(--text); }
-      .gtab.on { color: var(--accent); border-color: #3a4514; background: #131807; }
+      .gtab.on { color: var(--accent); border-color: rgb(from var(--accent) r g b / 0.75); background: rgb(from var(--accent) r g b / 0.12); }
       .gbody { flex: 1; font-size: 0.74rem; line-height: 1.8; overflow: hidden; }
       .grow {
         display: flex; align-items: baseline; gap: 0.45rem; width: 100%;
         color: var(--text); white-space: nowrap; overflow: hidden;
         background: none; border: 0; text-align: left; padding: 0.08rem 0.35rem;
-        border-radius: 0.35rem; font: 0.74rem/1.8 'JetBrains Mono Variable', monospace;
+         font: 0.74rem/1.8 'JetBrains Mono Variable', monospace;
       }
-      .grow-meta { margin-left: auto; color: #686873; font-size: 0.68rem; flex-shrink: 0; }
+      .grow-meta { margin-left: auto; color: var(--overlay1); font-size: 0.68rem; flex-shrink: 0; }
       .orow { cursor: pointer; }
-      .orow:hover { background: #1a1a20; }
-      .orow.sel { background: #1d240b; }
+      .orow:hover { background: var(--surface); }
+      .orow.sel { background: rgb(from var(--accent) r g b / 0.16); }
       .oheader { color: var(--text); font-size: 0.76rem; padding: 0.2rem 0.35rem 0.5rem; }
-      .oleases { color: var(--sub); font-size: 0.7rem; padding: 0.5rem 0.35rem 0.2rem; border-top: 1px solid #1b1b22; }
+      .oleases { color: var(--sub); font-size: 0.7rem; padding: 0.5rem 0.35rem 0.2rem; border-top: 1px solid var(--surface); }
       .c-amber { color: var(--amber); }
       .demo-panes { flex: 1; display: flex; gap: 0; min-height: 0; }
       .pane {
         flex: 1; display: flex; flex-direction: column; min-width: 0; cursor: pointer;
-        border: 1px solid transparent; border-radius: 0.5rem; margin: 0.5rem;
+        border: 1px solid transparent;  margin: 0.5rem;
       }
-      .pane.focused { border-color: rgb(198 255 26 / 0.45); }
+      .pane.focused { border-color: rgb(from var(--accent) r g b / 0.45); }
       .pane-title {
         display: flex; align-items: center; gap: 0.45rem;
         color: var(--sub); font-size: 0.7rem; padding: 0.4rem 0.7rem;
         font-family: 'JetBrains Mono Variable', monospace;
-        border-bottom: 1px solid #1b1b22;
+        border-bottom: 1px solid var(--surface);
       }
       .pt-dot { width: 7px; height: 7px; border-radius: 50%; }
       .pane-body {
@@ -1174,38 +1253,38 @@ const ogImage = 'https://bohay.dev/og.png';
       }
       .tline { color: var(--text); animation: rise 0.25s ease-out; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
-      .c-dim { color: #686873; } .c-acc { color: var(--accent); }
+      .c-dim { color: var(--overlay1); } .c-acc { color: var(--accent); }
       .c-grn { color: var(--mint); } .c-mint { color: var(--mint); }
-      .perm { border: 1px solid #3a2020; background: #180f0f; border-radius: 0.5rem; padding: 0.7rem 0.85rem; margin-top: 0.4rem; }
+      .perm { border: 1px solid rgb(from var(--coral) r g b / 0.35); background: rgb(from var(--coral) r g b / 0.10);  padding: 0.7rem 0.85rem; margin-top: 0.4rem; }
       .perm-q { color: var(--text); margin-bottom: 0.55rem; }
       .perm-btn {
         display: block; width: 100%; text-align: left; background: none; border: 0;
-        color: var(--sub); cursor: pointer; padding: 0.2rem 0.4rem; border-radius: 0.3rem;
+        color: var(--sub); cursor: pointer; padding: 0.2rem 0.4rem;
         font: 0.74rem 'JetBrains Mono Variable', monospace;
       }
       .perm-btn.yes { color: var(--accent); }
-      .perm-btn:hover { background: #24140f; }
+      .perm-btn:hover { background: rgb(from var(--coral) r g b / 0.18); }
       .demo-status {
         display: flex; align-items: center; gap: 0.5rem;
         border-top: 1px solid var(--line); padding: 0.42rem 0.8rem;
         color: var(--sub); font-size: 0.7rem; font-family: 'JetBrains Mono Variable', monospace;
       }
-      .demo-status .pill { background: var(--accent); color: #0b0b0f; border-radius: 0.3rem; padding: 0 0.4rem; font-weight: 700; }
-      .demo-status .sep { color: #4a4a54; }
+      .demo-status .pill { background: var(--accent); color: var(--bg);  padding: 0 0.4rem; font-weight: 700; }
+      .demo-status .sep { color: var(--overlay0); }
       @media (max-width: 700px) {
         .demo-side { display: none; }
         .demo-panes { flex-direction: column; }
       }
 
       .problem { text-align: center; }
-      .beats { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.6rem; color: var(--sub); font-size: 1.05rem; font-style: italic; }
+      .beats { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.6rem; color: var(--sub); font-size: 0.9rem; }
       .beats .dot { color: var(--accent); }
       .problem > p { color: var(--sub); margin-top: 0.8rem; }
-      .problem .turn { color: var(--text); font-size: 1.15rem; max-width: 36rem; margin: 1.6rem auto 0; }
+      .problem .turn { color: var(--text); font-size: 1rem; max-width: 40rem; margin: 1.6rem auto 0; }
 
-      .agents-strip h2 { text-align: center; font-size: 1.9rem; margin-bottom: 2.2rem; }
-      .features h2 { text-align: center; font-size: 1.95rem; margin-bottom: 0.7rem; letter-spacing: -0.02em; }
-      .feat-sub { text-align: center; color: var(--sub); max-width: 40rem; margin: 0 auto 2.4rem; font-size: 1.04rem; line-height: 1.6; }
+      .agents-strip h2 { text-align: center; font-size: 1.45rem; margin-bottom: 2rem; }
+      .features h2 { text-align: center; font-size: 1.45rem; margin-bottom: 0.6rem; letter-spacing: -0.035em; }
+      .feat-sub { text-align: center; color: var(--sub); max-width: 44rem; margin: 0 auto 2.6rem; font-size: 0.85rem; line-height: 1.8; }
 
       /* Bento grid: wide "featured" cards (s4) set diagonally, with s2/s3
          fillers. Every row MUST sum to exactly 6 columns or the grid leaves
@@ -1214,24 +1293,23 @@ const ogImage = 'https://bohay.dev/og.png';
       .card {
         position: relative; overflow: hidden;
         display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem;
-        background: linear-gradient(180deg, #131318, #0d0d12);
-        border: 1px solid var(--line); border-radius: 1rem;
-        padding: 1.5rem 1.55rem;
-        transition: border-color 0.18s, transform 0.18s, box-shadow 0.18s;
+        background: none;
+        border: 1px solid var(--line);
+        padding: 1.4rem 1.45rem;
+        transition: border-color 0.18s;
       }
       .card.s2 { grid-column: span 2; }
       .card.s3 { grid-column: span 3; }
       .card.s4 { grid-column: span 4; }
-      .card:hover { border-color: rgb(198 255 26 / 0.42); transform: translateY(-3px); box-shadow: 0 18px 44px rgb(0 0 0 / 0.4); }
+      .card:hover { border-color: rgb(from var(--accent) r g b / 0.5); }
       .card-ic {
-        width: 42px; height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center;
-        font-size: 1.2rem; color: var(--accent); margin-bottom: 0.3rem;
-        background: rgb(198 255 26 / 0.1); border: 1px solid rgb(198 255 26 / 0.22);
-        transition: transform 0.25s, background 0.25s;
+        display: flex; align-items: center;
+        font-size: 0.95rem; color: var(--accent); margin-bottom: 0.15rem;
+        background: none; border: 0;
       }
-      .card:hover .card-ic { transform: scale(1.08); background: rgb(198 255 26 / 0.17); }
-      .card h3 { font-size: 1.08rem; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
-      .card p { color: var(--sub); font-size: 0.92rem; line-height: 1.62; margin: 0; }
+
+      .card h3 { font-size: 0.95rem; font-weight: 600; letter-spacing: -0.02em; margin: 0; }
+      .card p { color: var(--sub); font-size: 0.82rem; line-height: 1.8; margin: 0; }
       .card-go {
         margin-top: auto; padding-top: 0.5rem; color: var(--accent); font-size: 0.8rem; font-weight: 600;
         font-family: 'IBM Plex Mono', monospace;
@@ -1245,13 +1323,13 @@ const ogImage = 'https://bohay.dev/og.png';
       .fx-chip {
         display: inline-flex; align-items: center; gap: 0.42rem;
         font: 0.72rem 'JetBrains Mono Variable', monospace; color: var(--sub);
-        background: #0c0c11; border: 1px solid var(--line); border-radius: 999px; padding: 0.32rem 0.72rem;
+        background: var(--bg2); border: 1px solid var(--line);  padding: 0.32rem 0.72rem;
       }
       .fx-chip i { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
       .fx-chip.blocked i { background: #ff9e0a; }
-      .fx-chip.working i { background: #c6ff1a; }
-      .fx-chip.done i { background: #30d159; }
-      .fx-chip.idle i { background: #6a6a72; }
+      .fx-chip.working i { background: var(--accent); }
+      .fx-chip.done i { background: var(--green); }
+      .fx-chip.idle i { background: var(--overlay0); }
       .card:hover .fx-chip.blocked i { animation: pulse 1s infinite; }
       .card:hover .fx-chip.working i { animation: pulse 1.6s infinite; }
 
@@ -1260,32 +1338,32 @@ const ogImage = 'https://bohay.dev/og.png';
       .fx-task {
         display: flex; align-items: center; gap: 0.55rem;
         font: 0.76rem 'JetBrains Mono Variable', monospace; color: var(--text);
-        background: #0c0c11; border: 1px solid var(--line); border-radius: 0.55rem; padding: 0.42rem 0.72rem;
+        background: var(--bg2); border: 1px solid var(--line);  padding: 0.42rem 0.72rem;
       }
       .fx-td { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-      .fx-td.done { background: #30d159; } .fx-td.run { background: #c6ff1a; } .fx-td.q { background: #6a6a72; }
-      .fx-tag { margin-left: auto; font-size: 0.62rem; font-weight: 600; padding: 0.12rem 0.5rem; border-radius: 999px; }
-      .fx-tag.done { color: #30d159; background: rgb(48 209 89 / 0.14); }
-      .fx-tag.run { color: #c6ff1a; background: rgb(198 255 26 / 0.14); }
-      .fx-tag.q { color: #9a9aa2; background: rgb(154 154 162 / 0.13); }
+      .fx-td.done { background: var(--green); } .fx-td.run { background: var(--accent); } .fx-td.q { background: var(--overlay0); }
+      .fx-tag { margin-left: auto; font-size: 0.62rem; font-weight: 600; padding: 0.12rem 0.5rem;  }
+      .fx-tag.done { color: var(--green); background: rgb(48 209 89 / 0.14); }
+      .fx-tag.run { color: var(--accent); background: rgb(from var(--accent) r g b / 0.14); }
+      .fx-tag.q { color: var(--overlay1); background: rgb(154 154 162 / 0.13); }
 
       /* Featured card 3: a mini file tree (git tinted) + the "open with" chips. */
       .fx-tree { display: flex; flex-direction: column; gap: 0.34rem; margin-top: 0.55rem; align-self: stretch; }
       .fx-tr {
         display: flex; align-items: center; gap: 0.55rem;
         font: 0.76rem 'JetBrains Mono Variable', monospace; color: var(--text);
-        background: #0c0c11; border: 1px solid var(--line); border-radius: 0.55rem; padding: 0.4rem 0.72rem;
+        background: var(--bg2); border: 1px solid var(--line);  padding: 0.4rem 0.72rem;
       }
       .fx-tr.in { margin-left: 1.15rem; }
-      .fx-git { margin-left: auto; font-size: 0.62rem; font-weight: 600; padding: 0.12rem 0.5rem; border-radius: 999px; }
+      .fx-git { margin-left: auto; font-size: 0.62rem; font-weight: 600; padding: 0.12rem 0.5rem;  }
       .fx-git.m { color: #ff9e0a; background: rgb(255 158 10 / 0.14); }
-      .fx-git.a { color: #30d159; background: rgb(48 209 89 / 0.14); }
+      .fx-git.a { color: var(--green); background: rgb(48 209 89 / 0.14); }
       .fx-open { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
       .fx-open span {
         font: 0.71rem 'JetBrains Mono Variable', monospace; color: var(--sub);
-        background: #0c0c11; border: 1px solid var(--line); border-radius: 999px; padding: 0.3rem 0.68rem;
+        background: var(--bg2); border: 1px solid var(--line);  padding: 0.3rem 0.68rem;
       }
-      .card:hover .fx-open span:nth-child(2) { color: var(--accent); border-color: rgb(198 255 26 / 0.4); }
+      .card:hover .fx-open span:nth-child(2) { color: var(--accent); border-color: rgb(from var(--accent) r g b / 0.4); }
 
       @media (max-width: 980px) {
         .features .grid { grid-template-columns: repeat(2, 1fr); }
@@ -1301,20 +1379,19 @@ const ogImage = 'https://bohay.dev/og.png';
       }
 
       .orch { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; align-items: center; }
-      .orch h2 { font-size: 1.9rem; margin-bottom: 1rem; }
+      .orch h2 { font-size: 1.45rem; margin-bottom: 1rem; }
       .orch p { color: var(--sub); margin-bottom: 1.5rem; }
       .orch p strong { color: var(--text); }
 
       /* Orchestration board card · clean rows, colored pills, no scroll. */
       .orch-card {
-        background: linear-gradient(180deg, #131318, var(--bg2));
-        border: 1px solid var(--line); border-radius: 0.9rem; overflow: hidden;
-        box-shadow: 0 20px 60px rgb(0 0 0 / 0.4), 0 0 0 1px rgb(198 255 26 / 0.04);
+        background: none;
+        border: 1px solid var(--line);  overflow: hidden;
         font-family: 'JetBrains Mono Variable', monospace;
       }
       .oc-head {
         display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
-        padding: 0.85rem 1.1rem; border-bottom: 1px solid var(--line); background: #101015;
+        padding: 0.85rem 1.1rem; border-bottom: 1px solid var(--line); background: var(--bg2);
         flex-wrap: wrap;
       }
       .oc-title { color: var(--accent); font-weight: 700; font-size: 0.9rem; letter-spacing: 0.02em; }
@@ -1323,27 +1400,27 @@ const ogImage = 'https://bohay.dev/og.png';
       .d { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
       .d.done { background: var(--mint); }
       .d.run { background: var(--amber); }
-      .d.queue { background: #4a4a54; }
+      .d.queue { background: var(--overlay0); }
       .oc-rows { padding: 0.5rem 0.6rem; }
       .oc-row {
         display: flex; align-items: center; gap: 0.6rem;
-        padding: 0.42rem 0.55rem; border-radius: 0.5rem; font-size: 0.78rem;
+        padding: 0.42rem 0.55rem;  font-size: 0.78rem;
       }
       .oc-row + .oc-row { margin-top: 1px; }
-      .oc-row:hover { background: #16161d; }
+      .oc-row:hover { background: var(--bg2); }
       .oc-row b { color: var(--sub); font-weight: 500; min-width: 1.4rem; }
       .pill {
         font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.05em;
-        padding: 0.1rem 0.5rem; border-radius: 999px; font-weight: 600; flex-shrink: 0;
+        padding: 0.1rem 0.5rem;  font-weight: 600; flex-shrink: 0;
       }
       .pill.done { color: var(--mint); background: rgb(111 198 163 / 0.13); }
       .pill.run { color: var(--amber); background: rgb(224 154 77 / 0.14); }
-      .pill.queue { color: var(--sub); background: #1e1e26; }
+      .pill.queue { color: var(--sub); background: var(--surface); }
       .oc-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .oc-meta { margin-left: auto; color: #686873; font-size: 0.7rem; flex-shrink: 0; }
+      .oc-meta { margin-left: auto; color: var(--overlay1); font-size: 0.7rem; flex-shrink: 0; }
       .oc-leases {
         display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap;
-        padding: 0.7rem 1.1rem; border-top: 1px solid var(--line); background: #0f0f14;
+        padding: 0.7rem 1.1rem; border-top: 1px solid var(--line); background: var(--bg2);
       }
       .oc-lk { color: var(--accent); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em; }
       .lease { color: var(--sub); font-size: 0.72rem; }
@@ -1352,64 +1429,74 @@ const ogImage = 'https://bohay.dev/og.png';
       /* "Works with" · a tidy 5-by-2 grid of agent tiles. Each brand mark sits
          on a matching rounded backdrop so the mismatched logos read uniformly. */
       .agent-grid {
-        display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.8rem;
-        max-width: 780px; margin: 0 auto;
+        display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.5rem 0.8rem;
+        max-width: 100%; margin: 0;
       }
       .atile {
         position: relative;
-        display: flex; flex-direction: column; align-items: center; gap: 0.72rem;
-        padding: 1.2rem 0.5rem 0.95rem; background: var(--bg2);
-        border: 1px solid var(--line); border-radius: 0.9rem;
-        transition: border-color 0.15s, transform 0.15s, background 0.15s;
+        display: flex; flex-direction: column; align-items: center; gap: 0.6rem;
+        padding: 1.5rem 0.5rem 1.2rem; background: none; border: 0;
       }
-      .atile:hover { border-color: rgb(198 255 26 / 0.5); transform: translateY(-3px); background: #121109; }
+      
       .aicon {
         display: flex; align-items: center; justify-content: center;
-        width: 46px; height: 46px; border-radius: 12px;
-        background: #17171e; border: 1px solid var(--line);
-        font-size: 25px; color: #d2d2da;
-        transition: color 0.15s, background 0.15s, border-color 0.15s;
+        background: none; border: 0;
+        font-size: 34px; color: var(--sub2);
+        transition: color 0.18s;
       }
       .aicon svg { display: block; width: 1em; height: 1em; }
+      /* Raster logo drawn as a mask, so it takes `currentColor` and goes accent
+         on hover exactly like the inline SVG marks. */
+      .amask {
+        display: block; width: 1em; height: 1em; background: currentColor;
+        -webkit-mask: var(--m) center / contain no-repeat;
+        mask: var(--m) center / contain no-repeat;
+      }
+      /* Lettermark for agents with no icon file: same size and colour as a
+         real mark, so the row stays even. */
+      .aletter { font-weight: 600; font-size: 0.72em; line-height: 1; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
       /* Flatten every mark to one light color (Cursor-style), green on hover. */
       .aicon svg path { fill: currentColor; }
-      .atile:hover .aicon { color: var(--accent); background: #191c0f; border-color: rgb(198 255 26 / 0.32); }
+      .atile:hover .aicon { color: var(--accent); }
       /* Badge logos = colored square + inner glyph. Hide the square so only the
          glyph shows as a clean monochrome mark. */
       .ic-codex svg path[fill='#fff'],
       .ic-gemini svg path[fill^='url'] { display: none; }
-      .aname { color: var(--sub); font-size: 0.78rem; text-align: center; }
+      /* Kiro is a purple badge + a white phantom + black details. Dropping the
+         badge and punching the details back out in the page colour is what makes
+         the phantom readable; the blanket `fill: currentColor` had merged all
+         three into one solid blob. */
+      .ic-kiro svg path[fill='#9046FF'] { display: none; }
+      .ic-kiro svg path[fill='#000'] { fill: var(--bg); }
+      .aname { color: var(--sub); font-size: 0.75rem; text-align: center; letter-spacing: -0.01em; }
       .atile:hover .aname { color: var(--text); }
       .atile.hook::after {
-        content: ''; position: absolute; top: 0.6rem; right: 0.6rem;
-        width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
-        box-shadow: 0 0 6px rgb(198 255 26 / 0.6);
+        content: ''; position: absolute; top: 1.15rem; right: calc(50% - 34px);
+        width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
       }
-      @media (max-width: 720px) { .agent-grid { grid-template-columns: repeat(3, 1fr); max-width: 460px; } }
+      @media (max-width: 720px) { .agent-grid { grid-template-columns: repeat(3, 1fr); } }
       @media (max-width: 440px) { .agent-grid { grid-template-columns: repeat(2, 1fr); } }
       .agents-strip .note {
-        text-align: center; color: var(--sub); margin: 1.7rem auto 0;
-        max-width: 44rem; font-size: 0.92rem; line-height: 1.7;
+        text-align: center; color: var(--sub); margin: 2rem auto 0;
+        max-width: 44rem; font-size: 0.82rem; line-height: 1.8;
       }
       .agents-strip .note strong { color: var(--text); font-weight: 600; }
       .agents-strip .note a { color: var(--accent); }
       .hookdot { color: var(--accent); }
 
-      .cask { display: inline-block; background: var(--bg2); border: 1px solid var(--line); border-radius: 0.5rem; padding: 0.5rem 0.8rem; font-size: 0.8rem; color: var(--accent); }
+      .cask { display: inline-block; background: var(--bg2); border: 1px solid var(--line);  padding: 0.5rem 0.8rem; font-size: 0.8rem; color: var(--accent); }
 
       /* ── the bohay-notch macOS showcase (matches bohay-notch/) ── */
       .macshow { text-align: center; }
       .ms-title { font-size: clamp(1.7rem, 4vw, 2.1rem); margin-bottom: 0.8rem; }
-      .ms-sub { color: var(--sub); max-width: 42rem; margin: 0 auto 2.4rem; font-size: 1.02rem; line-height: 1.65; }
+      .ms-sub { color: var(--sub); max-width: 44rem; margin: 0 auto 2.6rem; font-size: 0.85rem; line-height: 1.8; }
       .ms-sub strong { color: var(--text); }
       .ms-sub b { color: var(--accent); font-weight: 600; }
 
-      .mac { --amber: #ff9e0a; --grn: #c6ff1a; --done: #30d159; max-width: 860px; margin: 0 auto; }
+      .mac { --amber: #ff9e0a; --grn: var(--accent); --done: #30d159; max-width: 860px; margin: 0 auto; }
       .screen {
-        position: relative; aspect-ratio: 16 / 10; border-radius: 20px; overflow: hidden;
-        background: #0a0a0d;
-        box-shadow: 0 40px 100px rgb(0 0 0 / 0.6), 0 0 0 6px #16161c, 0 0 0 7px #050507,
-          inset 0 0 60px rgb(0 0 0 / 0.4);
+        position: relative; aspect-ratio: 16 / 10; border-radius: 20px;  overflow: hidden;
+        background: var(--bg);
       }
       .menubar {
         display: flex; justify-content: space-between; align-items: center;
@@ -1438,11 +1525,10 @@ const ogImage = 'https://bohay.dev/og.png';
       .termwin {
         position: relative; z-index: 1;
         width: 100%; max-width: 610px; height: 84%; display: flex; flex-direction: column;
-        background: rgb(14 14 19 / 0.96); backdrop-filter: blur(8px);
+        background: rgb(14 14 19 / 0.96);
         border: 1px solid rgb(255 255 255 / 0.12); border-radius: 10px;
-        overflow: hidden; box-shadow: 0 30px 70px rgb(0 0 0 / 0.55); transition: box-shadow 0.2s;
+        overflow: hidden; transition: box-shadow 0.2s;
       }
-      .termwin.flash { box-shadow: 0 0 0 1.5px var(--accent), 0 24px 60px rgb(0 0 0 / 0.5); }
       .tw-bar { display: flex; align-items: center; gap: 0.4rem; padding: 0.45rem 0.7rem; border-bottom: 1px solid rgb(255 255 255 / 0.06); }
       .tw-title { margin-left: 0.5rem; font: 0.68rem 'JetBrains Mono Variable', monospace; color: rgb(255 255 255 / 0.6); }
       .tw-body { flex: 1; display: flex; min-height: 0; }
@@ -1451,33 +1537,33 @@ const ogImage = 'https://bohay.dev/og.png';
       .tw-agent {
         display: flex; align-items: center; gap: 0.4rem; width: 100%;
         background: none; border: 0; cursor: pointer; text-align: left; color: rgb(255 255 255 / 0.7);
-        padding: 0.3rem 0.4rem; border-radius: 0.35rem; font: 0.72rem 'JetBrains Mono Variable', monospace;
+        padding: 0.3rem 0.4rem;  font: 0.72rem 'JetBrains Mono Variable', monospace;
       }
       .tw-agent:hover { background: rgb(255 255 255 / 0.05); color: #fff; }
-      .tw-agent.on { background: #1d240b; color: var(--accent); }
+      .tw-agent.on { background: rgb(from var(--accent) r g b / 0.16); color: var(--accent); }
       .tsd { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
       .tsd.working { background: var(--grn); } .tsd.blocked { background: var(--amber); animation: pulse 1s infinite; }
-      .tsd.done { background: var(--done); } .tsd.idle { background: #6a6a72; }
+      .tsd.done { background: var(--done); } .tsd.idle { background: var(--overlay0); }
       .tw-pane { flex: 1; padding: 0.6rem 0.85rem; font: 0.72rem/1.9 'JetBrains Mono Variable', monospace; overflow: hidden; }
       .tw-pane .tline { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); animation: rise 0.25s ease-out; }
       .jtoast {
         position: absolute; bottom: 1rem; left: 50%; transform: translateX(-50%) translateY(6px);
-        background: rgb(198 255 26 / 0.14); color: var(--accent); border: 1px solid rgb(198 255 26 / 0.3);
+        background: rgb(from var(--accent) r g b / 0.14); color: var(--accent); border: 1px solid rgb(from var(--accent) r g b / 0.3);
         border-radius: 999px; padding: 0.28rem 0.9rem; font: 0.72rem 'JetBrains Mono Variable', monospace;
         opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 8;
       }
       .jtoast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
       /* capability buttons */
-      .caps { display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; margin: 1.8rem auto 0; }
+      .caps { display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; max-width: 860px; margin: 1.8rem auto 0; }
       .cap {
         display: flex; flex-direction: column; align-items: flex-start; gap: 0.1rem;
-        background: var(--bg2); border: 1px solid var(--line); border-radius: 0.7rem;
+        background: var(--bg2); border: 1px solid var(--line);
         padding: 0.6rem 1rem; cursor: pointer; text-align: left; min-width: 158px;
         transition: border-color 0.15s, background 0.15s, transform 0.15s;
       }
-      .cap:hover { border-color: rgb(198 255 26 / 0.45); transform: translateY(-2px); }
-      .cap.on { border-color: var(--accent); background: #14140f; }
+      .cap:hover { border-color: rgb(from var(--accent) r g b / 0.45); transform: translateY(-2px); }
+      .cap.on { border-color: var(--accent); background: var(--surface); }
       .cap b { font-family: 'IBM Plex Mono', monospace; font-size: 0.92rem; color: var(--text); }
       .cap.on b { color: var(--accent); }
       .cap span { font-size: 0.72rem; color: var(--sub); }
@@ -1489,11 +1575,10 @@ const ogImage = 'https://bohay.dev/og.png';
       /* The island · one black element, top-anchored, that grows on open. */
       .island {
         position: absolute; top: 0; left: 50%; transform: translateX(-50%);
-        width: 132px; height: 30px; background: #000;
+        width: 132px; height: 30px; background: #000; border-radius: 0 0 11px 11px;
         border: 0.5px solid rgb(255 255 255 / 0.08); border-top: 0;
-        border-radius: 0 0 11px 11px; z-index: 20; overflow: hidden;
+         z-index: 20; overflow: hidden;
         transition: width 0.34s cubic-bezier(0.22, 1, 0.36, 1), height 0.34s cubic-bezier(0.22, 1, 0.36, 1);
-        box-shadow: 0 12px 40px rgb(0 0 0 / 0.5);
       }
       /* Height is set from content by JS (sizeIsland) so the panel hugs each
          view · no dead space below the shorter approve card. */
@@ -1501,7 +1586,7 @@ const ogImage = 'https://bohay.dev/og.png';
       .ncamera {
         position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
         width: 7px; height: 7px; border-radius: 50%;
-        background: #050505; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08); z-index: 5;
+        background: #050505; z-index: 5;
       }
       .island :is(.nmodel, .nproj, .nhead, .ncost, .nctx-n, .nopt, .ncard-q, .ncard-ctx, .fstat, .ftot-l) {
         font-family: 'Inter Variable', system-ui, sans-serif;
@@ -1544,8 +1629,8 @@ const ogImage = 'https://bohay.dev/og.png';
 
       .nrows { padding: 0 6px; }
       .nrow {
-        display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 10px; border-radius: 7px;
-        background: none; border: 0; text-align: left; cursor: pointer;
+        display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 10px;
+        background: none; border: 0; border-radius: 7px; text-align: left; cursor: pointer;
         transition: background 0.12s;
       }
       .nrow:hover { background: rgb(255 255 255 / 0.05); }
@@ -1569,9 +1654,9 @@ const ogImage = 'https://bohay.dev/og.png';
         font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 999px; white-space: nowrap;
       }
       .npill.blocked { color: var(--amber); background: rgb(255 158 10 / 0.15); }
-      .npill.working { color: var(--grn); background: rgb(198 255 26 / 0.15); }
+      .npill.working { color: var(--grn); background: rgb(from var(--accent) r g b / 0.15); }
       .npill.done { color: var(--done); background: rgb(48 209 89 / 0.15); }
-      .npill.idle { color: #9a9aa2; background: rgb(154 154 162 / 0.13); }
+      .npill.idle { color: var(--overlay1); background: rgb(154 154 162 / 0.13); }
 
       .nfoot {
         display: flex; align-items: center; gap: 12px; padding: 8px 16px 0;
@@ -1599,9 +1684,9 @@ const ogImage = 'https://bohay.dev/og.png';
       .nnum { font-family: 'JetBrains Mono Variable', monospace; font-size: 11px; font-weight: 700; width: 14px; color: rgb(255 255 255 / 0.55); }
       .nopt-l { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .nkey { font-size: 9px; color: rgb(255 255 255 / 0.5); }
-      .nopt.allow { background: rgb(198 255 26 / 0.16); }
+      .nopt.allow { background: rgb(from var(--accent) r g b / 0.16); }
       .nopt.allow .nnum { color: var(--accent); }
-      .nopt.allow:hover { background: rgb(198 255 26 / 0.26); }
+      .nopt.allow:hover { background: rgb(from var(--accent) r g b / 0.26); }
       .nopt.deny { background: rgb(209 56 51 / 0.16); }
       .nopt.deny .nnum { color: #f26b61; }
       .nopt.deny:hover { background: rgb(209 56 51 / 0.26); }
@@ -1611,16 +1696,16 @@ const ogImage = 'https://bohay.dev/og.png';
       .cta-card {
         position: relative; overflow: hidden; text-align: center;
         max-width: 720px; margin: 0 auto;
-        background: linear-gradient(180deg, #14141a, #0c0c11);
-        border: 1px solid var(--line); border-radius: 1.4rem;
+        background: none;
+        border: 1px solid var(--line);
         padding: 3.2rem 2rem 2.8rem;
       }
       .cta-badge {
         display: inline-block; font: 0.72rem 'IBM Plex Mono', monospace; color: var(--accent);
-        background: rgb(198 255 26 / 0.1); border: 1px solid rgb(198 255 26 / 0.25);
-        padding: 0.3rem 0.85rem; border-radius: 999px; margin-bottom: 1.3rem;
+        background: rgb(from var(--accent) r g b / 0.1); border: 1px solid rgb(from var(--accent) r g b / 0.25);
+        padding: 0.3rem 0.85rem;  margin-bottom: 1.3rem;
       }
-      .cta-card h2 { font-size: clamp(1.7rem, 4vw, 2.25rem); letter-spacing: -0.02em; margin: 0 0 0.9rem; }
+      .cta-card h2 { font-size: clamp(1.35rem, 3vw, 1.7rem); letter-spacing: -0.035em; margin: 0 0 0.9rem; }
       .cta-card p { color: var(--sub); max-width: 40rem; margin: 0 auto; font-size: 1.03rem; line-height: 1.62; }
       .cta-actions { display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; margin-top: 1.9rem; }
       .cta-actions .btn { display: inline-flex; align-items: center; gap: 0.55rem; padding: 0.72rem 1.5rem; font-size: 0.98rem; transition: border-color 0.15s, filter 0.15s, transform 0.15s; }
@@ -1633,11 +1718,11 @@ const ogImage = 'https://bohay.dev/og.png';
       .cta-repo-path {
         font: 0.78rem 'JetBrains Mono Variable', monospace; color: var(--text);
         background: var(--bg2); border: 1px solid var(--line);
-        padding: 0.2rem 0.6rem; border-radius: 0.4rem;
+        padding: 0.2rem 0.6rem;
       }
       .cta-mini a { color: var(--sub); }
       .cta-mini a:hover { color: var(--accent); }
-      .cta-mini .sep { color: #4a4a54; }
+      .cta-mini .sep { color: var(--overlay0); }
 
       footer { border-top: 1px solid var(--line); margin-top: 2rem; }
       .foot-inner {
@@ -1652,7 +1737,7 @@ const ogImage = 'https://bohay.dev/og.png';
       @media (max-width: 900px) {
         .orch, .notch { grid-template-columns: 1fr; }
         section, header.hero { padding: 3rem 1.25rem; }
-        .agent-grid { grid-template-columns: repeat(3, 1fr); }
+        .agent-grid { grid-template-columns: repeat(4, 1fr); }
       }
       @media (max-width: 480px) {
         .agent-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1665,6 +1750,185 @@ const ogImage = 'https://bohay.dev/og.png';
         .nav-inner { flex-wrap: wrap; row-gap: 0.45rem; padding-top: 0.7rem; padding-bottom: 0.7rem; }
         .nav-links { gap: 0.9rem; font-size: 0.78rem; flex-wrap: wrap; justify-content: flex-end; }
       }
+
+      /* Brand context menu (right-click the wordmark). Same square, hairline
+         language as the theme dock. */
+      .brandmenu {
+        position: fixed; z-index: 60; min-width: 158px; padding: 0.25rem;
+        background: rgb(from var(--bg2) r g b / 0.98);
+        border: 1px solid var(--line);
+        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      }
+      .brandmenu[hidden] { display: none; }
+      .bm-item {
+        display: block; width: 100%; padding: 0.3rem 0.6rem;
+        background: none; border: 0; text-align: left; cursor: pointer;
+        color: var(--sub); font: inherit; font-size: 0.76rem; white-space: nowrap;
+      }
+      .bm-item:hover, .bm-item:focus-visible {
+        background: rgb(from var(--accent) r g b / 0.14); color: var(--text); outline: none;
+      }
+      .brand { cursor: pointer; }
+
+      /* Theme picker · floating dock, bottom-right, opening upward. Names only:
+         descriptions wrapped and forced scrollbars, and the list is short enough
+         to show all palettes at once, so there is nothing to scroll. Hovering a
+         name previews that palette on the page immediately. */
+      .theme-dock { position: fixed; z-index: 40; right: 1.1rem; bottom: 1.1rem; }
+      .td-btn {
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.42rem 0.7rem; cursor: pointer;
+        background: rgb(from var(--bg2) r g b / 0.94);
+        border: 1px solid var(--line); color: var(--text);
+        font: inherit; font-size: 0.78rem;
+        backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+        transition: border-color 0.15s;
+      }
+      .td-btn:hover, .td-btn[aria-expanded='true'] { border-color: var(--accent); }
+      .td-caret { color: var(--sub); font-size: 0.6rem; transition: transform 0.18s; }
+      .td-btn[aria-expanded='true'] .td-caret { transform: rotate(180deg); }
+      .td-sw {
+        width: 9px; height: 9px; flex-shrink: 0; display: block;
+        background: var(--accent); border: 1px solid rgb(from var(--text) r g b / 0.25);
+      }
+      /* Grows upward from the button. No max-height and no overflow, so every
+         palette is visible and no scrollbar ever appears. */
+      .td-list {
+        position: absolute; bottom: calc(100% + 0.4rem); right: 0;
+        margin: 0; padding: 0.3rem; list-style: none;
+        background: rgb(from var(--bg2) r g b / 0.98);
+        border: 1px solid var(--line);
+        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      }
+      .td-list[hidden] { display: none; }
+      .td-opt {
+        display: flex; align-items: center; gap: 0.6rem; width: 100%;
+        padding: 0.26rem 0.75rem 0.26rem 0.5rem; cursor: pointer;
+        background: none; border: 0; text-align: left;
+        color: var(--sub); font: inherit; font-size: 0.78rem;
+        white-space: nowrap;
+      }
+      .td-opt:hover, .td-opt:focus-visible { background: rgb(from var(--accent) r g b / 0.14); color: var(--text); outline: none; }
+      .td-opt[aria-selected='true'] { color: var(--accent); }
     </style>
+
+    <script>
+      // Theme picker · palettes come from bohay's own registry, generated into
+      // styles/themes.css, so what you preview is what the app ships. Applying a
+      // theme sets `data-bh-theme` on <html>, which outranks each page's :root.
+      //
+      // Hovering a name previews it immediately; the choice is only committed on
+      // click, so moving away or closing restores what you had.
+      (() => {
+        const KEY = 'bohay-theme';
+        const dock = document.getElementById('theme-dock');
+        const btn = document.getElementById('td-btn');
+        const list = document.getElementById('td-list');
+        const label = document.getElementById('td-cur');
+        if (!dock || !btn || !list || !label) return;
+        const opts = [...list.querySelectorAll('.td-opt')];
+        const root = document.documentElement;
+
+        let committed = localStorage.getItem(KEY) || 'noir';
+
+        // Preview only: paints the page without touching the committed choice.
+        const paint = (id) => root.setAttribute('data-bh-theme', id);
+
+        const commit = (id) => {
+          committed = id;
+          localStorage.setItem(KEY, id);
+          paint(id);
+          const o = opts.find((x) => x.dataset.theme === id);
+          label.textContent = o ? o.querySelector('.td-name').textContent : id;
+          opts.forEach((x) => x.setAttribute('aria-selected', String(x.dataset.theme === id)));
+        };
+
+        const open = (yes) => {
+          list.hidden = !yes;
+          btn.setAttribute('aria-expanded', String(yes));
+          if (yes) (opts.find((o) => o.getAttribute('aria-selected') === 'true') || opts[0])?.focus();
+          else paint(committed); // closing always restores the committed palette
+        };
+
+
+        commit(committed);
+
+        btn.addEventListener('click', () => open(list.hidden));
+        opts.forEach((o) => {
+          // Live preview on hover and on keyboard focus.
+          o.addEventListener('mouseenter', () => paint(o.dataset.theme));
+          o.addEventListener('focus', () => paint(o.dataset.theme));
+          o.addEventListener('click', () => {
+            commit(o.dataset.theme);
+            open(false);
+            btn.focus();
+          });
+        });
+        // Leaving the list without choosing puts the committed palette back.
+        list.addEventListener('mouseleave', () => {
+          if (!list.hidden && !list.contains(document.activeElement)) paint(committed);
+        });
+        document.addEventListener('click', (e) => {
+          if (!dock.contains(e.target)) open(false);
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && !list.hidden) { open(false); btn.focus(); }
+        });
+        list.addEventListener('keydown', (e) => {
+          const i = opts.indexOf(document.activeElement);
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            const next = e.key === 'ArrowDown' ? i + 1 : i - 1;
+            opts[(next + opts.length) % opts.length].focus();
+          }
+        });
+      })();
+    </script>
+
+    <script>
+      // Right-click the wordmark for the brand assets. Downloads are plain
+      // `download` links; the copy reads the built SVG and writes the markup to
+      // the clipboard so it can be pasted straight into a design tool.
+      (() => {
+        const brand = document.querySelector('.brand');
+        const menu = document.getElementById('brandmenu');
+        const copy = document.getElementById('bm-copy');
+        if (!brand || !menu) return;
+
+        const close = () => { menu.hidden = true; };
+
+        brand.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          menu.hidden = false;
+          // Place at the cursor, then nudge back inside the viewport.
+          const r = menu.getBoundingClientRect();
+          const x = Math.min(e.clientX, window.innerWidth - r.width - 8);
+          const y = Math.min(e.clientY, window.innerHeight - r.height - 8);
+          menu.style.left = `${Math.max(8, x)}px`;
+          menu.style.top = `${Math.max(8, y)}px`;
+        });
+
+        copy?.addEventListener('click', async () => {
+          const label = copy.textContent;
+          try {
+            const svg = await fetch(copy.dataset.src).then((r) => r.text());
+            await navigator.clipboard.writeText(svg);
+            copy.textContent = 'Copied';
+          } catch {
+            copy.textContent = 'Copy failed';
+          }
+          setTimeout(() => {
+            copy.textContent = label;
+            close();
+          }, 900);
+        });
+
+        // Downloads can close immediately; the browser handles the rest.
+        menu.querySelectorAll('a.bm-item').forEach((a) => a.addEventListener('click', close));
+        document.addEventListener('click', (e) => { if (!menu.contains(e.target)) close(); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+        window.addEventListener('blur', close);
+      })();
+    </script>
   </body>
 </html>

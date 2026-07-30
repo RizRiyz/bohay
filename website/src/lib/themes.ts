@@ -1,0 +1,30 @@
+/**
+ * bohay's shipped palettes, mirroring `THEMES` and `describe()` in
+ * `src/ui/theme.rs`. The colours themselves live in `../styles/themes.css`,
+ * which is generated from that same Rust registry:
+ *
+ *   cargo test emit_theme_css -- --ignored --nocapture > website/src/styles/themes.css
+ *
+ * Keep this list in the registry's order so the picker reads the way Settings
+ * does in the app.
+ */
+export const THEMES: { id: string; label: string; note: string }[] = [
+  { id: 'noir', label: 'noir', note: 'near-black, fluo-green accent' },
+  { id: 'ocean', label: 'ocean', note: 'deep cmd-blue, cyan accent' },
+  { id: 'dracula', label: 'dracula', note: 'indigo dark, violet accent' },
+  { id: 'nord', label: 'nord', note: 'cool arctic blue-grey' },
+  { id: 'catppuccin-mocha', label: 'catppuccin mocha', note: 'darkest Catppuccin, mauve' },
+  { id: 'catppuccin-macchiato', label: 'catppuccin macchiato', note: 'softer dark Catppuccin' },
+  { id: 'catppuccin-frappe', label: 'catppuccin frappe', note: 'lightest dark Catppuccin' },
+  { id: 'gruvbox', label: 'gruvbox', note: 'retro warm dark, yellow accent' },
+  { id: 'sunset', label: 'sunset', note: 'neon synthwave, hot-pink' },
+  { id: 'homebrew', label: 'homebrew', note: 'classic green-on-black' },
+  { id: 'grass', label: 'grass', note: 'green field, pale-yellow text' },
+  { id: 'redsands', label: 'redsands', note: 'warm dark red, orange accent' },
+  { id: 'catppuccin-latte', label: 'catppuccin latte', note: 'light Catppuccin, warm' },
+  { id: 'gruvbox-light', label: 'gruvbox light', note: 'Gruvbox on cream, burnt orange' },
+  { id: 'mono', label: 'mono', note: 'grayscale, no accent color' },
+];
+
+/** The palette the site opens with, matching bohay's own default. */
+export const DEFAULT_THEME = 'noir';

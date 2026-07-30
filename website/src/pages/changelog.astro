@@ -1,4 +1,8 @@
 ---
+import jetbrainsLatin from '@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2?url';
+import plexLatin600 from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-600-normal.woff2?url';
+import '../styles/themes.css';
+import { THEMES } from '../lib/themes';
 // The /changelog page: every release rendered as a timeline.
 //
 // The notes come from `changelog/<tag>.md` **in the repo**, which is the same
@@ -75,6 +79,15 @@ const entries = await Promise.all(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    <!-- Preload the two faces that are on screen at first paint. Fontsource
+         ships `font-display: swap`, so without this every navigation paints in
+         the fallback mono and then reflows into the real face — the page-wide
+         blink. Preloading lets the font arrive before that first paint, so the
+         swap is never seen. Only the latin subsets, and only the weights the
+         chrome actually uses. -->
+    <link rel="preload" href={jetbrainsLatin} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={plexLatin600} as="font" type="font/woff2" crossorigin />
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="canonical" href="https://bohay.dev/changelog/" />
@@ -90,12 +103,24 @@ const entries = await Promise.all(
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage} />
+    <!-- Apply the saved palette *before first paint*. Astro defers normal
+         <script> tags, so the picker's own script at the end of <body> only runs
+         after the page has already painted in the default palette — which is the
+         noir flash you see on every navigation. `is:inline` keeps this as a
+         plain blocking script in <head>, so the first paint is already correct.
+         Deliberately tiny and dependency-free; it must not delay rendering. -->
+    <script is:inline>
+      try {
+        var t = localStorage.getItem('bohay-theme');
+        if (t) document.documentElement.setAttribute('data-bh-theme', t);
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <nav>
       <div class="nav-inner">
         <a class="brand" href="/">
-          <Logo width={28} height={28} class="mark" aria-hidden="true" />
+          <Logo width={34} height={34} class="mark" aria-hidden="true" />
           <span>bohay</span>
         </a>
         <div class="nav-links">
@@ -103,15 +128,15 @@ const entries = await Promise.all(
           <a href="/modules/">Modules</a>
           <a href="/compare/">Compare</a>
           <a href="/changelog/" aria-current="page">Changelog</a>
-          <a href={GITHUB} class="gh">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+  
+        <a href={GITHUB} class="gh" aria-label="bohay on GitHub" title="GitHub">
+            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"
               ><path
                 fill="currentColor"
                 d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
               ></path></svg
             >
-            <span id="stars">GitHub</span>
-          </a>
+            </a>
         </div>
       </div>
     </nav>
@@ -177,53 +202,84 @@ const entries = await Promise.all(
       </div>
     </footer>
 
+    <!-- Theme picker · floating dock, deliberately outside the nav. A custom
+         listbox (not a native select) so it matches the site, opens upward, and
+         previews each palette live on hover. -->
+    <!-- Brand context menu · right-click the wordmark for the logo assets, the
+         way most product sites expose their mark. Plain links + clipboard, no
+         dependency. -->
+    <div class="brandmenu" id="brandmenu" hidden>
+      <a class="bm-item" id="bm-png" href="/brand/bohay-logo.png" download="bohay-logo.png">Download PNG</a>
+      <a class="bm-item" id="bm-svg" href="/brand/bohay-logo.svg" download="bohay-logo.svg">Download SVG</a>
+      <button type="button" class="bm-item" id="bm-copy" data-src="/brand/bohay-logo.svg">Copy SVG</button>
+    </div>
+    <div class="theme-dock" id="theme-dock">
+      <ul class="td-list" id="td-list" role="listbox" aria-label="Color theme" hidden>
+        {THEMES.map((t) => (
+          <li>
+            <button type="button" class="td-opt" role="option" data-theme={t.id}>
+              <i class="td-sw" data-theme={t.id} aria-hidden="true"></i>
+              <span class="td-name">{t.label}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <button type="button" class="td-btn" id="td-btn" aria-expanded="false" aria-haspopup="listbox">
+        <i class="td-sw td-sw-cur" aria-hidden="true"></i>
+        <span id="td-cur">noir</span>
+        <span class="td-caret" aria-hidden="true">▴</span>
+      </button>
+    </div>
     <script>
-      // Live star count (graceful: stays "GitHub" on failure).
-      fetch('https://api.github.com/repos/RizRiyz/bohay')
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          const el = document.getElementById('stars');
-          if (el && d?.stargazers_count != null) el.textContent = `★ ${d.stargazers_count}`;
-        })
-        .catch(() => {});
     </script>
 
     <style is:global>
       :root {
         --bg: #070709;
         --bg2: #111116;
+        --base: #202028;
+        --surface: #1a1a20;
         --line: #25252d;
-        --text: #e7e7ed;
+        --border: #383840;
+        --overlay0: #4a4a54;
+        --overlay1: #686873;
         --sub: #93939f;
+        --sub2: #b6b6c0;
+        --text: #e7e7ed;
         --accent: #c6ff1a;
+        --sel: #33450e;
+        --green: #8fbc7a;
+        --mint: #6fc6a3;
         --amber: #e09a4d;
+        --coral: #e06c66;
       }
       * { box-sizing: border-box; margin: 0; }
       html { scroll-behavior: smooth; }
       body {
         background: var(--bg); color: var(--text);
-        font: 16px/1.65 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+        font: 13.5px/1.75 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
       }
       a { color: inherit; text-decoration: none; }
+      h2 { font-size: 1.45rem; letter-spacing: -0.035em; }
+
       h1, h2, h3, .brand, .foot-brand {
         font-family: 'IBM Plex Mono', ui-monospace, 'JetBrains Mono Variable', monospace;
         line-height: 1.14; letter-spacing: -0.045em;
       }
-      section, header.page-hero { max-width: 1060px; margin: 0 auto; padding: 4rem 1.5rem; }
+      section, header.page-hero { max-width: 1080px; margin: 0 auto; padding: 4rem 1.5rem; }
       .dim { color: var(--sub); }
-      ::selection { background: #33450e; color: #e7e7ed; }
+      ::selection { background: var(--sel); color: var(--text); }
 
       /* nav */
       nav {
-        position: sticky; top: 0; z-index: 10; background: rgb(7 7 9 / 0.75);
-        backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-        border-bottom: 1px solid rgb(37 37 45 / 0.6);
+        position: sticky; top: 0; z-index: 10; background: rgb(from var(--bg) r g b / 0.85);
+        border-bottom: 1px solid var(--line);
       }
       .nav-inner {
         display: flex; justify-content: space-between; align-items: center;
-        max-width: 1060px; margin: 0 auto; padding: 0.85rem 1.5rem;
+        max-width: 1080px; margin: 0 auto; padding: 0.85rem 1.5rem;
       }
-      .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 700; font-size: 1.15rem; }
+      .brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 700; font-size: 1.45rem; letter-spacing: -0.05em; color: var(--text); }
       .mark { display: block; flex-shrink: 0; }
       .nav-links {
         display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.88rem;
@@ -231,28 +287,32 @@ const entries = await Promise.all(
       }
       .nav-links a:hover { color: var(--text); }
       .nav-links a[aria-current='page'] { color: var(--accent); }
-      .gh { display: inline-flex; align-items: center; gap: 0.4rem; border: 1px solid var(--line); padding: 0.35rem 0.75rem; border-radius: 999px; }
+      .gh {
+        display: inline-flex; align-items: center; justify-content: center;
+        border: 1px solid var(--line); padding: 0.4rem;
+        transition: border-color 0.15s, color 0.15s;
+      }
       .gh:hover { border-color: var(--accent); color: var(--accent); }
 
       /* hero */
       .page-hero { text-align: center; position: relative; padding-top: 4.5rem; padding-bottom: 1.5rem; }
-      .page-hero .glow {
+      .page-hero .glow { display: none;
         position: absolute; inset: -20% 0 auto 0; height: 460px; pointer-events: none;
-        background: radial-gradient(ellipse 60% 55% at 50% 0%, rgb(198 255 26 / 0.09), transparent 70%);
+        background: radial-gradient(ellipse 60% 55% at 50% 0%, rgb(from var(--accent) r g b / 0.09), transparent 70%);
       }
       .eyebrow { font-family: 'IBM Plex Mono', monospace; color: var(--accent); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase; position: relative; }
-      .page-hero h1 { font-size: clamp(2rem, 5.4vw, 3.1rem); font-weight: 700; margin-top: 0.6rem; position: relative; }
-      .page-hero p { color: var(--sub); max-width: 40rem; margin: 1.2rem auto 0; font-size: 1.08rem; position: relative; }
+      .page-hero h1 { font-size: clamp(1.9rem, 4.6vw, 2.8rem); font-weight: 600; letter-spacing: -0.045em; margin-top: 0.6rem; position: relative; }
+      .page-hero p { color: var(--sub); max-width: 46rem; margin: 1.1rem auto 0; font-size: 0.9rem; line-height: 1.8; position: relative; }
       .hero-cta { margin-top: 1.6rem; position: relative; }
 
       .btn {
         display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1.35rem;
-        border-radius: 0.6rem; border: 1px solid var(--line); font-weight: 600; font-size: 0.92rem;
+         border: 1px solid var(--line); font-weight: 600; font-size: 0.92rem;
         font-family: 'IBM Plex Mono', monospace; transition: border-color 0.15s, transform 0.15s, filter 0.15s;
       }
       .btn:hover { transform: translateY(-2px); border-color: var(--accent); color: var(--accent); }
-      .btn.primary { background: var(--accent); color: #0b0b0f; border-color: var(--accent); }
-      .btn.primary:hover { filter: brightness(1.08); color: #0b0b0f; }
+      .btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+      .btn.primary:hover { filter: brightness(1.08); color: var(--bg); }
 
       /* timeline */
       .log { max-width: 800px; padding-top: 1rem; }
@@ -267,24 +327,23 @@ const entries = await Promise.all(
       }
       .entry:last-child .rail::before {
         bottom: auto; height: 26px;
-        background: linear-gradient(var(--line), transparent);
+        background: none;
       }
       .dot {
         position: absolute; left: 5px; top: 24px; width: 12px; height: 12px; border-radius: 50%;
-        background: var(--bg2); border: 2px solid #34343e;
+        background: var(--bg2); border: 2px solid var(--border);
       }
       .dot.latest {
         background: var(--accent); border-color: var(--accent);
-        box-shadow: 0 0 0 4px rgb(198 255 26 / 0.16);
       }
       .card {
         min-width: 0;
-        border: 1px solid var(--line); border-radius: 1rem;
-        background: linear-gradient(180deg, #131318, #0d0d12);
+        border: 1px solid var(--line);
+        background: none;
         padding: 1.35rem 1.6rem 1.15rem; margin-bottom: 1.7rem;
         transition: border-color 0.18s, transform 0.18s;
       }
-      .card:hover { border-color: rgb(198 255 26 / 0.28); transform: translateY(-2px); }
+      .card:hover { border-color: rgb(from var(--accent) r g b / 0.28); transform: translateY(-2px); }
       .chead { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
       .version {
         font-family: 'IBM Plex Mono', monospace; font-weight: 700; font-size: 1.12rem;
@@ -293,9 +352,9 @@ const entries = await Promise.all(
       .version:hover { text-decoration: underline; }
       .badge {
         font-family: 'IBM Plex Mono', monospace; font-size: 0.6rem; text-transform: uppercase;
-        letter-spacing: 0.09em; padding: 0.18rem 0.5rem; border-radius: 999px; line-height: 1;
+        letter-spacing: 0.09em; padding: 0.18rem 0.5rem;  line-height: 1;
       }
-      .badge.latest { background: var(--accent); color: #0b0b0f; font-weight: 700; }
+      .badge.latest { background: var(--accent); color: var(--bg); font-weight: 700; }
       .badge.pre { border: 1px solid var(--amber); color: var(--amber); }
       .date {
         margin-left: auto; color: var(--sub); font-size: 0.8rem;
@@ -328,17 +387,17 @@ const entries = await Promise.all(
       }
       .notes li strong { color: var(--text); }
       .notes a {
-        color: var(--accent); border-bottom: 1px solid rgb(198 255 26 / 0.28);
+        color: var(--accent); border-bottom: 1px solid rgb(from var(--accent) r g b / 0.28);
         transition: border-color 0.15s;
       }
       .notes a:hover { border-bottom-color: var(--accent); }
       .notes code {
         font-family: 'JetBrains Mono Variable', ui-monospace, monospace; font-size: 0.86em;
-        color: #d7ffb0; background: rgb(198 255 26 / 0.07);
-        border: 1px solid rgb(198 255 26 / 0.14); padding: 0.05rem 0.35rem; border-radius: 0.35rem;
+        color: var(--accent); background: rgb(from var(--accent) r g b / 0.07);
+        border: 1px solid rgb(from var(--accent) r g b / 0.14); padding: 0.05rem 0.35rem;
       }
       .notes pre {
-        background: #0a0a0d; border: 1px solid var(--line); border-radius: 0.6rem;
+        background: var(--bg); border: 1px solid var(--line);
         padding: 0.9rem 1rem; overflow-x: auto; margin: 0.7rem 0;
       }
       .notes pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 0.85em; }
@@ -350,7 +409,7 @@ const entries = await Promise.all(
       /* footer */
       footer { border-top: 1px solid var(--line); margin-top: 2rem; }
       .foot-inner {
-        max-width: 1060px; margin: 0 auto; padding: 2rem 1.5rem;
+        max-width: 1080px; margin: 0 auto; padding: 2rem 1.5rem;
         display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;
       }
       .foot-brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 700; }
@@ -370,6 +429,185 @@ const entries = await Promise.all(
         .nav-inner { flex-wrap: wrap; row-gap: 0.45rem; padding-top: 0.7rem; padding-bottom: 0.7rem; }
         .nav-links { gap: 0.9rem; font-size: 0.78rem; flex-wrap: wrap; justify-content: flex-end; }
       }
+
+      /* Brand context menu (right-click the wordmark). Same square, hairline
+         language as the theme dock. */
+      .brandmenu {
+        position: fixed; z-index: 60; min-width: 158px; padding: 0.25rem;
+        background: rgb(from var(--bg2) r g b / 0.98);
+        border: 1px solid var(--line);
+        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      }
+      .brandmenu[hidden] { display: none; }
+      .bm-item {
+        display: block; width: 100%; padding: 0.3rem 0.6rem;
+        background: none; border: 0; text-align: left; cursor: pointer;
+        color: var(--sub); font: inherit; font-size: 0.76rem; white-space: nowrap;
+      }
+      .bm-item:hover, .bm-item:focus-visible {
+        background: rgb(from var(--accent) r g b / 0.14); color: var(--text); outline: none;
+      }
+      .brand { cursor: pointer; }
+
+      /* Theme picker · floating dock, bottom-right, opening upward. Names only:
+         descriptions wrapped and forced scrollbars, and the list is short enough
+         to show all palettes at once, so there is nothing to scroll. Hovering a
+         name previews that palette on the page immediately. */
+      .theme-dock { position: fixed; z-index: 40; right: 1.1rem; bottom: 1.1rem; }
+      .td-btn {
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.42rem 0.7rem; cursor: pointer;
+        background: rgb(from var(--bg2) r g b / 0.94);
+        border: 1px solid var(--line); color: var(--text);
+        font: inherit; font-size: 0.78rem;
+        backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+        transition: border-color 0.15s;
+      }
+      .td-btn:hover, .td-btn[aria-expanded='true'] { border-color: var(--accent); }
+      .td-caret { color: var(--sub); font-size: 0.6rem; transition: transform 0.18s; }
+      .td-btn[aria-expanded='true'] .td-caret { transform: rotate(180deg); }
+      .td-sw {
+        width: 9px; height: 9px; flex-shrink: 0; display: block;
+        background: var(--accent); border: 1px solid rgb(from var(--text) r g b / 0.25);
+      }
+      /* Grows upward from the button. No max-height and no overflow, so every
+         palette is visible and no scrollbar ever appears. */
+      .td-list {
+        position: absolute; bottom: calc(100% + 0.4rem); right: 0;
+        margin: 0; padding: 0.3rem; list-style: none;
+        background: rgb(from var(--bg2) r g b / 0.98);
+        border: 1px solid var(--line);
+        backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      }
+      .td-list[hidden] { display: none; }
+      .td-opt {
+        display: flex; align-items: center; gap: 0.6rem; width: 100%;
+        padding: 0.26rem 0.75rem 0.26rem 0.5rem; cursor: pointer;
+        background: none; border: 0; text-align: left;
+        color: var(--sub); font: inherit; font-size: 0.78rem;
+        white-space: nowrap;
+      }
+      .td-opt:hover, .td-opt:focus-visible { background: rgb(from var(--accent) r g b / 0.14); color: var(--text); outline: none; }
+      .td-opt[aria-selected='true'] { color: var(--accent); }
     </style>
+
+    <script>
+      // Theme picker · palettes come from bohay's own registry, generated into
+      // styles/themes.css, so what you preview is what the app ships. Applying a
+      // theme sets `data-bh-theme` on <html>, which outranks each page's :root.
+      //
+      // Hovering a name previews it immediately; the choice is only committed on
+      // click, so moving away or closing restores what you had.
+      (() => {
+        const KEY = 'bohay-theme';
+        const dock = document.getElementById('theme-dock');
+        const btn = document.getElementById('td-btn');
+        const list = document.getElementById('td-list');
+        const label = document.getElementById('td-cur');
+        if (!dock || !btn || !list || !label) return;
+        const opts = [...list.querySelectorAll('.td-opt')];
+        const root = document.documentElement;
+
+        let committed = localStorage.getItem(KEY) || 'noir';
+
+        // Preview only: paints the page without touching the committed choice.
+        const paint = (id) => root.setAttribute('data-bh-theme', id);
+
+        const commit = (id) => {
+          committed = id;
+          localStorage.setItem(KEY, id);
+          paint(id);
+          const o = opts.find((x) => x.dataset.theme === id);
+          label.textContent = o ? o.querySelector('.td-name').textContent : id;
+          opts.forEach((x) => x.setAttribute('aria-selected', String(x.dataset.theme === id)));
+        };
+
+        const open = (yes) => {
+          list.hidden = !yes;
+          btn.setAttribute('aria-expanded', String(yes));
+          if (yes) (opts.find((o) => o.getAttribute('aria-selected') === 'true') || opts[0])?.focus();
+          else paint(committed); // closing always restores the committed palette
+        };
+
+
+        commit(committed);
+
+        btn.addEventListener('click', () => open(list.hidden));
+        opts.forEach((o) => {
+          // Live preview on hover and on keyboard focus.
+          o.addEventListener('mouseenter', () => paint(o.dataset.theme));
+          o.addEventListener('focus', () => paint(o.dataset.theme));
+          o.addEventListener('click', () => {
+            commit(o.dataset.theme);
+            open(false);
+            btn.focus();
+          });
+        });
+        // Leaving the list without choosing puts the committed palette back.
+        list.addEventListener('mouseleave', () => {
+          if (!list.hidden && !list.contains(document.activeElement)) paint(committed);
+        });
+        document.addEventListener('click', (e) => {
+          if (!dock.contains(e.target)) open(false);
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && !list.hidden) { open(false); btn.focus(); }
+        });
+        list.addEventListener('keydown', (e) => {
+          const i = opts.indexOf(document.activeElement);
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            const next = e.key === 'ArrowDown' ? i + 1 : i - 1;
+            opts[(next + opts.length) % opts.length].focus();
+          }
+        });
+      })();
+    </script>
+
+    <script>
+      // Right-click the wordmark for the brand assets. Downloads are plain
+      // `download` links; the copy reads the built SVG and writes the markup to
+      // the clipboard so it can be pasted straight into a design tool.
+      (() => {
+        const brand = document.querySelector('.brand');
+        const menu = document.getElementById('brandmenu');
+        const copy = document.getElementById('bm-copy');
+        if (!brand || !menu) return;
+
+        const close = () => { menu.hidden = true; };
+
+        brand.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          menu.hidden = false;
+          // Place at the cursor, then nudge back inside the viewport.
+          const r = menu.getBoundingClientRect();
+          const x = Math.min(e.clientX, window.innerWidth - r.width - 8);
+          const y = Math.min(e.clientY, window.innerHeight - r.height - 8);
+          menu.style.left = `${Math.max(8, x)}px`;
+          menu.style.top = `${Math.max(8, y)}px`;
+        });
+
+        copy?.addEventListener('click', async () => {
+          const label = copy.textContent;
+          try {
+            const svg = await fetch(copy.dataset.src).then((r) => r.text());
+            await navigator.clipboard.writeText(svg);
+            copy.textContent = 'Copied';
+          } catch {
+            copy.textContent = 'Copy failed';
+          }
+          setTimeout(() => {
+            copy.textContent = label;
+            close();
+          }, 900);
+        });
+
+        // Downloads can close immediately; the browser handles the rest.
+        menu.querySelectorAll('a.bm-item').forEach((a) => a.addEventListener('click', close));
+        document.addEventListener('click', (e) => { if (!menu.contains(e.target)) close(); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+        window.addEventListener('blur', close);
+      })();
+    </script>
   </body>
 </html>
