@@ -631,6 +631,14 @@ pub struct PaneStatus {
     /// `candidate_since` this is the hysteresis gate (see `QUIET_DWELL`).
     candidate: State,
     candidate_since: Instant,
+    /// IR-1: a hook-driven state hint (docs/48). A `Notification` hook sets
+    /// `(Blocked, when)`; `detect_tick` arbitrates it against the screen reading
+    /// (display-only, never touches `agent_session`): it promotes to Blocked when
+    /// the screen isn't already Working and the pane is still an agent, a visible
+    /// Working reading vetoes and clears it, a `Stop` hook clears it, and it
+    /// expires after a backstop TTL. Makes "agent needs input" robust to prompt
+    /// wording the screen rules miss, without the hook ever writing `state`.
+    hook_hint: Option<(State, Instant)>,
 }
 
 impl PaneStatus {
@@ -651,6 +659,7 @@ impl PaneStatus {
             notify_armed: true,
             candidate: State::Idle,
             candidate_since: Instant::now(),
+            hook_hint: None,
         }
     }
 }
@@ -4295,6 +4304,79 @@ mod tests {
         // classify() falls back to the shell command — the exact trigger.
         app.detect_tick(Instant::now());
         assert_eq!(app.status.get(&focus).unwrap().agent, "claude");
+    }
+
+    #[test]
+    fn ir1_permission_hook_promotes_a_missed_prompt_to_blocked() {
+        use crate::ui::theme::State;
+        let _env = crate::persist::test_env("ir1-blocked");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+
+        // Brand it as kimi with a live session (the hook path).
+        let (reply, _r) = mpsc::channel();
+        app.handle_api(&ApiRequest {
+            id: "1".into(),
+            method: "pane.report_session".into(),
+            params: json!({"pane": focus.0.to_string(), "agent": "kimi", "session_id": "s1"}),
+            reply,
+        });
+        // Kimi's real permission event fires with an explicit state (the verified
+        // schema, docs/48), but the on-screen prompt matches no detection rule —
+        // so screen scraping alone would read Idle.
+        let (reply2, _r2) = mpsc::channel();
+        app.handle_api(&ApiRequest {
+            id: "2".into(),
+            method: "pane.report_event".into(),
+            params: json!({"pane": focus.0.to_string(), "agent": "kimi", "kind": "PermissionRequest", "state": "blocked"}),
+            reply: reply2,
+        });
+
+        let t0 = app.last_detect_at;
+        app.detect_tick(t0 + std::time::Duration::from_millis(200));
+        let s = app.status.get(&focus).unwrap();
+        assert_eq!(
+            s.state,
+            State::Blocked,
+            "the permission hint promoted to blocked"
+        );
+        assert!(
+            s.agent_session.is_some(),
+            "the hint never touched the session (Law 1)"
+        );
+    }
+
+    #[test]
+    fn ir1_hint_never_blocks_a_shell_and_is_cleared_on_agent_exit() {
+        use crate::ui::theme::State;
+        let _env = crate::persist::test_env("ir1-veto");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+
+        // A stale Blocked hint on a pane that is actually a plain, quiet shell
+        // (the agent has exited). The scan sees only `zsh`.
+        {
+            let s = app.status.get_mut(&focus).unwrap();
+            s.agent = "zsh".into();
+            s.last_activity = Instant::now() - Duration::from_secs(5);
+            s.hook_hint = Some((State::Blocked, Instant::now()));
+        }
+        app.proc_commands.insert(focus, vec!["zsh".to_string()]);
+
+        let t0 = app.last_detect_at;
+        app.detect_tick(t0 + std::time::Duration::from_millis(200));
+        let s = app.status.get(&focus).unwrap();
+        assert_ne!(
+            s.state,
+            State::Blocked,
+            "a shell is never forced Blocked by a stale hint"
+        );
+        assert!(
+            s.hook_hint.is_none(),
+            "the hint was cleared for a non-agent"
+        );
     }
 
     #[test]

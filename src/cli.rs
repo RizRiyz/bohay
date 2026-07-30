@@ -153,6 +153,7 @@ server:
   integration install|uninstall <claude|copilot|codex|opencode|kimi|grok>
                              add/remove bohay's session-resume hook (uninstall
                              removes only bohay's hook, never the agent)
+  integration status         which hooks are installed + each agent's version
 ";
 
 pub fn run(args: &[String]) -> Result<i32> {
@@ -828,6 +829,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             );
             if let Some(t) = flag(args, "--tool") {
                 obj.insert("tool".to_string(), json!(t));
+            }
+            // IR-1 (docs/48): an optional agent-reported state hint (blocked/idle).
+            if let Some(s) = flag(args, "--state") {
+                obj.insert("state".to_string(), json!(s));
             }
             ("pane.report_event".into(), with_pane(obj))
         }

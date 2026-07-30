@@ -28,20 +28,33 @@ evt="$(printf '%s' "$input" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin); print(d.get("hook_event_name") or d.get("event") or "")
 except Exception: print("")' 2>/dev/null)"
+# Session id for resume — re-report on EVERY event so an id an agent mints on
+# `--resume` stays fresh (IR-2), not only at SessionStart. Idempotent.
+sid="$(printf '%s' "$input" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print(d.get("session_id") or d.get("sessionId") or d.get("id") or "")
+except Exception: print("")' 2>/dev/null)"
+[ -n "$sid" ] && bohay pane report --agent {agent} --session "$sid" >/dev/null 2>&1
+# Map the lifecycle event to a state hint (IR-1, docs/48). Only Blocked is
+# hook-driven — it is the state screen detection can miss; working/idle stay
+# screen-led. `Notification`/`PermissionRequest` = the agent is waiting on you;
+# `Stop`/`Interrupt` = the turn ended (clear the hint).
+state=""
 case "$evt" in
-  Notification|Stop|SubagentStop)
+  Notification|PermissionRequest) state="blocked" ;;
+  Stop|Interrupt) state="idle" ;;
+esac
+case "$evt" in
+  Notification|PermissionRequest|Stop|Interrupt|SubagentStop)
     msg="$(printf '%s' "$input" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin); print((d.get("message") or "")[:200])
 except Exception: print("")' 2>/dev/null)"
-    bohay pane report-event --agent {agent} --kind "$evt" --message "$msg" >/dev/null 2>&1
-    ;;
-  *)
-    sid="$(printf '%s' "$input" | python3 -c 'import sys,json
-try:
-    d=json.load(sys.stdin); print(d.get("session_id") or d.get("sessionId") or d.get("id") or "")
-except Exception: print("")' 2>/dev/null)"
-    [ -n "$sid" ] && bohay pane report --agent {agent} --session "$sid" >/dev/null 2>&1
+    if [ -n "$state" ]; then
+      bohay pane report-event --agent {agent} --kind "$evt" --message "$msg" --state "$state" >/dev/null 2>&1
+    else
+      bohay pane report-event --agent {agent} --kind "$evt" --message "$msg" >/dev/null 2>&1
+    fi
     ;;
 esac
 exit 0
@@ -79,12 +92,84 @@ export const bohay = async () => {
 }
 "#;
 
+// ── IR-6: agent version probe + gating (docs/48) ─────────────────────────────
+
+/// How to read an agent's version, and the minimum it must meet for native
+/// resume. `min` is `None` by default: we surface the version for visibility but
+/// never block a valid install on a number we are not certain of. Fill in a real
+/// minimum here only when it is known.
+struct VersionSpec {
+    binary: &'static str,
+    args: &'static [&'static str],
+    min: Option<(u64, u64, u64)>,
+}
+
+fn version_spec(agent: &str) -> Option<VersionSpec> {
+    let binary = match agent {
+        "claude" => "claude",
+        "copilot" => "copilot",
+        "codex" => "codex",
+        "opencode" => "opencode",
+        "kimi" => "kimi",
+        "grok" => "grok",
+        _ => return None,
+    };
+    Some(VersionSpec {
+        binary,
+        args: &["--version"],
+        min: None,
+    })
+}
+
+/// Run `<binary> --version` and parse the first `major.minor.patch` it prints.
+/// `None` when the binary is absent, errors, or prints nothing parseable — the
+/// caller then proceeds, so a probe miss is never a hard failure.
+fn detect_agent_version(spec: &VersionSpec) -> Option<(u64, u64, u64)> {
+    let out = std::process::Command::new(spec.binary)
+        .args(spec.args)
+        .output()
+        .ok()?;
+    parse_version_triple(&String::from_utf8_lossy(&out.stdout))
+        .or_else(|| parse_version_triple(&String::from_utf8_lossy(&out.stderr)))
+}
+
+/// Extract the first `major.minor[.patch]` triple from free text (patch defaults
+/// to 0). Robust to a leading `v` and surrounding words.
+fn parse_version_triple(text: &str) -> Option<(u64, u64, u64)> {
+    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .find_map(|token| {
+            let mut parts = token.splitn(3, '.');
+            let major: u64 = parts.next()?.parse().ok()?;
+            let minor: u64 = parts.next()?.parse().ok()?;
+            let patch: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+            Some((major, minor, patch))
+        })
+}
+
 pub fn run(args: &[String]) -> Result<i32> {
     match (
         args.get(2).map(String::as_str),
         args.get(3).map(String::as_str),
     ) {
         (Some("install"), Some(agent)) if AGENTS.contains(&agent) => {
+            // IR-6: surface the agent version, and refuse only if a *known*
+            // minimum is unmet. An unknown/unparseable version never blocks.
+            if let Some(spec) = version_spec(agent) {
+                match detect_agent_version(&spec) {
+                    Some(v) => {
+                        if let Some(min) = spec.min {
+                            if v < min {
+                                return Err(anyhow!(
+                                    "{agent} v{}.{}.{} is too old for native resume (need >= v{}.{}.{}); update {agent}, then re-run",
+                                    v.0, v.1, v.2, min.0, min.1, min.2
+                                ));
+                            }
+                        }
+                        println!("detected {agent} v{}.{}.{}", v.0, v.1, v.2);
+                    }
+                    None => println!("note: couldn't read `{agent} --version`; installing anyway"),
+                }
+            }
             install(agent)?;
             println!("installed bohay {agent} integration");
             Ok(0)
@@ -94,12 +179,38 @@ pub fn run(args: &[String]) -> Result<i32> {
             println!("removed bohay {agent} integration (the {agent} agent itself is untouched)");
             Ok(0)
         }
+        // IR-3: per-agent install + version visibility — "why isn't this working"
+        // becomes a command instead of guesswork.
+        (Some("status"), _) => {
+            for &agent in AGENTS {
+                let installed = is_installed(agent);
+                let ver = if installed {
+                    version_spec(agent).and_then(|s| detect_agent_version(&s))
+                } else {
+                    None
+                };
+                let vstr = ver
+                    .map(|v| format!("v{}.{}.{}", v.0, v.1, v.2))
+                    .unwrap_or_else(|| "-".into());
+                println!(
+                    "{:9} {:14} {}",
+                    agent,
+                    if installed {
+                        "installed"
+                    } else {
+                        "not installed"
+                    },
+                    vstr
+                );
+            }
+            Ok(0)
+        }
         (Some("install" | "uninstall"), Some(other)) => Err(anyhow!(
             "unsupported agent: {other} (supported: {})",
             AGENTS.join(", ")
         )),
         _ => Err(anyhow!(
-            "usage: bohay integration <install|uninstall> <{}>",
+            "usage: bohay integration <install|uninstall|status> [<{}>]",
             AGENTS.join("|")
         )),
     }
@@ -233,24 +344,37 @@ fn install_shell_hook(agent: &str) -> Result<PathBuf> {
     Ok(spec.dir)
 }
 
-pub fn install_claude() -> Result<PathBuf> {
-    let dir = install_shell_hook("claude")?;
-    // Also register the same (branching) script under lifecycle events so the
-    // notch companion gets precise permission/turn-end signals (docs/24 NOTCH-6).
+/// Register the shared branching script under lifecycle events (in the agent's
+/// `settings.json`), on top of its `SessionStart` registration. Two purposes:
+/// the notch companion gets precise permission/turn-end signals (docs/24
+/// NOTCH-6), and — since the script re-reports the session id (IR-2) and feeds
+/// the state hint (IR-1) on those events — the agent's session stays fresh and
+/// its blocked/idle state becomes hook-driven, not screen-guessed.
+fn register_lifecycle_events(dir: &Path, events: &[&str]) -> Result<()> {
     let cfg_path = dir.join("settings.json");
     let script = dir.join("bohay-agent-hook.sh");
     let mut cfg: Value = fs::read_to_string(&cfg_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!({}));
-    for evt in ["Notification", "Stop"] {
+    for evt in events {
         register_hook(&mut cfg, evt, None, &script.to_string_lossy());
     }
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
+    Ok(())
+}
+
+pub fn install_claude() -> Result<PathBuf> {
+    let dir = install_shell_hook("claude")?;
+    register_lifecycle_events(&dir, &["Notification", "Stop"])?;
     Ok(dir)
 }
 
 pub fn install_copilot() -> Result<PathBuf> {
+    // SessionStart only, by design (docs/48). Copilot does not reliably fire
+    // turn-end lifecycle hooks — the reference tool tried them and removed them —
+    // so we take just the session id for resume and let screen detection drive
+    // state. Registering Notification/Stop here would be a no-op at best.
     install_shell_hook("copilot")
 }
 
@@ -272,6 +396,10 @@ pub fn install_opencode() -> Result<PathBuf> {
 /// accepts only `event`/`matcher`/`command`/`timeout`, so we write nothing else.
 const KIMI_HOOK_EVENTS: &[(&str, Option<&str>)] = &[
     ("SessionStart", Some("startup|resume")),
+    // Kimi signals a waiting permission prompt via `PermissionRequest` (not
+    // `Notification`, docs/48), so that is the event that must drive Blocked.
+    // `Notification` is kept as a harmless belt-and-suspenders.
+    ("PermissionRequest", None),
     ("Notification", None),
     ("Stop", None),
 ];
@@ -551,6 +679,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ir6_parses_version_triples_from_free_text() {
+        assert_eq!(parse_version_triple("claude 1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_version_triple("v0.9.5 (build abc)"), Some((0, 9, 5)));
+        assert_eq!(parse_version_triple("copilot version 6.0"), Some((6, 0, 0)));
+        assert_eq!(parse_version_triple("1.88.0"), Some((1, 88, 0)));
+        // No usable triple.
+        assert_eq!(parse_version_triple("unknown"), None);
+        assert_eq!(parse_version_triple("v2"), None);
+    }
+
+    #[test]
+    fn ir1_ir2_hook_reports_session_freshness_and_blocked_state() {
+        let s = agent_hook_script("grok");
+        // IR-2: the session id is re-reported unconditionally, so it fires on
+        // every event (turn boundaries included), not just SessionStart.
+        assert!(s.contains("bohay pane report --agent grok --session"));
+        // IR-1: permission events map to an explicit Blocked state hint.
+        assert!(s.contains("PermissionRequest"));
+        assert!(s.contains("state=\"blocked\""));
+        assert!(s.contains("--state \"$state\""));
+        // Notch forwarding is still intact.
+        assert!(s.contains("bohay pane report-event --agent grok"));
+    }
+
+    #[test]
     fn install_writes_hook_and_settings() {
         let _env = crate::persist::TEST_ENV_LOCK
             .lock()
@@ -714,11 +867,14 @@ mod tests {
         assert!(after.contains("sk-secret-123"), "api key preserved");
         assert!(after.contains("# my kimi config"), "comment preserved");
         assert!(after.contains("echo mine"), "user's own hook kept");
-        // Our three events landed exactly once each despite installing twice.
+        // Our events land exactly once each despite installing twice.
         let doc: toml_edit::DocumentMut = after.parse().unwrap();
         let hooks = doc["hooks"].as_array_of_tables().unwrap();
         let bohay = hooks.iter().filter(|t| kimi_entry_is_bohay(t)).count();
-        assert_eq!(bohay, 3, "SessionStart + Notification + Stop, no dupes");
+        assert_eq!(
+            bohay, 4,
+            "SessionStart + PermissionRequest + Notification + Stop, no dupes"
+        );
         let sess = hooks
             .iter()
             .find(|t| t.get("event").and_then(|v| v.as_str()) == Some("SessionStart"))

@@ -3,6 +3,13 @@
 
 use super::*;
 
+/// IR-1 (docs/48): backstop expiry for a hook state hint. The hint is normally
+/// cleared the moment the agent resumes (a visible Working reading) or a `Stop`
+/// hook arrives; this TTL is only a safety net so a missed clear-event can never
+/// pin a pane as Blocked forever. Long, because a real permission prompt can sit
+/// unanswered while the user is away.
+const HINT_TTL: Duration = Duration::from_secs(6 * 3600);
+
 /// Debounce dwell for committing a newly-desired agent state (hysteresis).
 /// Active states publish instantly (responsive sidebar); the fall back to a
 /// quiet state waits `QUIET_DWELL` so streaming pauses don't flap the status.
@@ -173,11 +180,27 @@ impl App {
                     agent_appeared = true;
                 }
                 // The state the raw reading wants right now.
-                let desired = if s.done && det.state == State::Idle {
+                let mut desired = if s.done && det.state == State::Idle {
                     State::Done
                 } else {
                     det.state
                 };
+                // IR-1 (docs/48): arbitrate the hook state hint against the screen
+                // reading. Display-only — never touches the session (Law 1). The
+                // screen always vetoes (Law 2): a visible Working reading clears it
+                // (the agent resumed), a non-agent pane (the agent exited to a
+                // shell) clears it, and a backstop TTL clears it. Only then may a
+                // fresh Notification hint PROMOTE an otherwise non-Blocked reading
+                // to Blocked — the missed-prompt case this whole feature exists for.
+                if let Some((hint, when)) = s.hook_hint {
+                    let is_agent = self.manifests.is_agent(&s.agent) || s.agent_session.is_some();
+                    if !is_agent || desired == State::Working || now.duration_since(when) > HINT_TTL
+                    {
+                        s.hook_hint = None;
+                    } else if hint == State::Blocked && desired != State::Blocked {
+                        desired = State::Blocked;
+                    }
+                }
                 // Debounce with asymmetric hysteresis: a fresh `desired` only
                 // becomes the published `state` once it has held for its dwell.
                 // Active states (Working/Blocked) commit instantly so the sidebar
@@ -413,10 +436,32 @@ impl App {
                 let kind = p.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 let message = p.get("message").and_then(|v| v.as_str()).unwrap_or("");
                 let tool = p.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                let state = p.get("state").and_then(|v| v.as_str());
                 self.emit_event(
                     "agent.hook",
                     json!({ "pane": id.0.to_string(), "agent": agent, "kind": kind, "message": message, "tool": tool }),
                 );
+                // IR-1 (docs/48): drive a Blocked *hint* from lifecycle events —
+                // display-only, arbitrated by `detect_tick`, never touching the
+                // session. Prefer the hook's explicit `state` (schema-driven, from
+                // the verified per-agent event→state map); fall back to deriving it
+                // from the event kind so older installed hooks keep working. Only
+                // Blocked is hook-driven (the state the screen can miss); "idle"
+                // (turn ended) clears the hint and lets the screen decide;
+                // working/idle otherwise stay screen-led. A visible Working screen
+                // still vetoes a stale Blocked hint (see `detect_tick`).
+                let resolved = state.or(match kind {
+                    "Notification" | "PermissionRequest" => Some("blocked"),
+                    "Stop" | "Interrupt" => Some("idle"),
+                    _ => None,
+                });
+                if let Some(s) = self.status.get_mut(&id) {
+                    match resolved {
+                        Some("blocked") => s.hook_hint = Some((State::Blocked, Instant::now())),
+                        Some("idle") => s.hook_hint = None,
+                        _ => {}
+                    }
+                }
                 Ok(json!({"type":"ok"}))
             }
             // ── workspaces ── (`node.*` kept as a back-compat alias)
