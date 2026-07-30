@@ -5270,6 +5270,41 @@ mod tests {
     }
 
     #[test]
+    fn attach_open_does_not_steal_focus_from_the_active_workspace() {
+        // The automatic attach-open (`focus: false`) must add the launch folder if
+        // new, but never yank you off the workspace a restored session left you on.
+        // This is the "reopen snaps back to the first workspace" bug.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.ws().cwd.clone();
+        // A second workspace, now the active one (like being on a non-first node).
+        let other = std::env::temp_dir();
+        let open = |app: &mut App, path: &std::path::Path, focus: bool| {
+            let (reply, _r) = mpsc::channel();
+            app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: "workspace.open".into(),
+                params: json!({ "path": path.display().to_string(), "focus": focus }),
+                reply,
+            });
+        };
+        open(&mut app, &other, true);
+        let active = app.active_ws;
+        assert!(active > 0, "on a non-first workspace");
+
+        // Attach-open of the launch (first) folder must NOT switch away from it.
+        open(&mut app, &first, false);
+        assert_eq!(
+            app.active_ws, active,
+            "focus:false kept the active workspace on reopen"
+        );
+
+        // An explicit open (focus:true) still focuses the folder.
+        open(&mut app, &first, true);
+        assert_eq!(app.ws().cwd, first, "explicit open still focuses");
+    }
+
+    #[test]
     fn resume_session_opens_pane() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();

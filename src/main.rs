@@ -391,10 +391,13 @@ fn open_cwd_workspace() {
     let Ok(mut s) = ipc::transport::connect(&persist::socket_path()) else {
         return;
     };
+    // `focus: false` — add the launch folder if it isn't already a workspace, but
+    // don't switch to it if it is: a restored session should reopen on the
+    // workspace you were last using, not snap back to the launch directory.
     let req = serde_json::json!({
         "id": "1",
         "method": "workspace.open",
-        "params": { "path": cwd.display().to_string() },
+        "params": { "path": cwd.display().to_string(), "focus": false },
     });
     let _ = writeln!(s, "{req}");
     let mut line = String::new();

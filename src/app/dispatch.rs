@@ -440,13 +440,26 @@ impl App {
                 // Open `path` as a workspace, or focus it if it's already one. Used
                 // when `bohay` attaches to a running server from a new folder, so the
                 // launch directory shows up as a workspace.
+                //
+                // `focus` (default true) governs the *already-open* case. The
+                // automatic attach-open (`open_cwd_workspace`) passes `false`: it
+                // ensures the launch folder is a workspace but must NOT steal focus
+                // from the workspace a restored session left you on — otherwise
+                // reopening `bohay` always snaps back to the launch folder (usually
+                // the first workspace), never the one you were last using. An
+                // explicit `bohay workspace open <path>` omits it and still focuses.
                 let path = PathBuf::from(req_str(p, "path")?);
+                let focus = p.get("focus").and_then(|v| v.as_bool()).unwrap_or(true);
                 match self
                     .workspaces
                     .iter()
                     .position(|w| crate::platform::same_path(&w.cwd, &path))
                 {
-                    Some(i) => self.active_ws = i,
+                    Some(i) => {
+                        if focus {
+                            self.active_ws = i;
+                        }
+                    }
                     // Report a failed open instead of answering with the
                     // *previously* active node, which read as success and left
                     // the caller (and the user) looking at the wrong folder.
