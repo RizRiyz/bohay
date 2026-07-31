@@ -100,7 +100,7 @@
   /* Monospace throughout, like the landing page: this is a terminal program,
      and a single face across body, chrome and code is what makes the docs read
      as part of the same site rather than as a generic documentation theme. */
-  --sl-font: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+  --sl-font: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
   --sl-font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
   /* Display face — the wordmark, headings and labels. Tight tracking is what
      keeps a monospace heading from looking like plain terminal output. */
@@ -158,7 +158,7 @@
    landing page's rhythm: ~13.5px body on 1.75, headings that stop well short of
    Starlight's 42px h1. */
 :root:root {
-  --sl-text-base: 0.875rem;
+  --sl-text-base: 1rem;
   --sl-text-body: 0.875rem;
   --sl-text-body-sm: 0.8rem;
   --sl-text-code: 0.82rem;
@@ -180,7 +180,7 @@
   }
 }
 .sl-markdown-content {
-  font-size: 0.875rem;
+  font-size: 0.975rem;
 }
 .sl-markdown-content h1,
 .sl-markdown-content h2,
@@ -192,8 +192,9 @@ h1[id='_top'],
   letter-spacing: -0.03em;
   font-weight: 600;
 }
-/* Body text: mono, antialiased, on the page background — the landing page's
-   `body` rule, restated for the pieces Starlight renders outside the article. */
+/* Antialiasing, restated for the pieces Starlight renders outside the article.
+   Prose itself is proportional (see `--sl-font`); mono is reserved for code,
+   headings and chrome. */
 body {
   -webkit-font-smoothing: antialiased;
 }

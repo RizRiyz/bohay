@@ -33,8 +33,13 @@ export default defineConfig({
         { icon: 'github', label: 'GitHub', href: 'https://github.com/RizRiyz/bohay' },
       ],
       customCss: [
-        // Mono throughout, like the landing page: JetBrains Mono for body and
-        // code, IBM Plex Mono for the wordmark, headings and labels.
+        // Inter for running prose, JetBrains Mono for code, IBM Plex Mono for
+        // the wordmark, headings and labels. The landing page is mono
+        // throughout, but documentation is long-form reading: setting body text
+        // in a monospace face hurts legibility over paragraphs, so the docs keep
+        // a proportional face for prose and stay mono everywhere it signifies
+        // something (code, headings, chrome).
+        '@fontsource-variable/inter',
         '@fontsource-variable/jetbrains-mono',
         '@fontsource/ibm-plex-mono/500.css',
         '@fontsource/ibm-plex-mono/600.css',
