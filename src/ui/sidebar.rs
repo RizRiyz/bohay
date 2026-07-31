@@ -131,16 +131,19 @@ pub(super) fn draw_sidebar(
     f.render_widget(Block::new().style(Style::new().bg(t.base)), area);
     {
         // Edge separator (standard vertical rule): the left sidebar carries it on
-        // its right edge, the right sidebar on its left edge.
+        // its right edge, the right sidebar on its left edge. It doubles as the
+        // draggable resize seam (docs/29) and brightens while hovered or dragged.
         let sep_x = match side {
             Side::Left => area.right().saturating_sub(1),
             Side::Right => area.x,
         };
+        let seam_active = app.hover_sidebar == Some(side) || app.sidebar_resize == Some(side);
+        let sep_fg = if seam_active { t.overlay0 } else { t.surface0 };
         let buf = f.buffer_mut();
         for y in area.top()..area.bottom() {
             buf[(sep_x, y)]
                 .set_symbol("│")
-                .set_style(Style::new().fg(t.surface0).bg(t.base));
+                .set_style(Style::new().fg(sep_fg).bg(t.base));
         }
     }
 
@@ -389,18 +392,40 @@ fn draw_workspaces_dock(
         // A linked worktree is nested under its parent checkout with a connector.
         let indent: u16 = if is_member { 2 } else { 0 };
         // Row 1: state dot + workspace name + git branch (dot aligned with "WORKSPACES").
+        // On a narrow sidebar the name keeps priority: it is ellipsized only when
+        // it can't share the row, and the branch is fitted (then ellipsized, then
+        // dropped) into whatever space is left, so the row never hard-cuts.
+        let avail = (cw as usize).saturating_sub(indent as usize + 2);
+        let name_w = crate::ui::display_width(&ws.name);
+        let (name_disp, branch_disp) = match &ws.branch {
+            Some(b) => {
+                let branch_seg = 2 + crate::ui::display_width(b); // "  branch"
+                if name_w + branch_seg <= avail {
+                    (ws.name.clone(), Some(b.clone()))
+                } else if name_w + 4 <= avail {
+                    (
+                        ws.name.clone(),
+                        Some(crate::ui::truncate(b, avail - name_w - 2)),
+                    )
+                } else {
+                    (crate::ui::truncate(&ws.name, avail), None)
+                }
+            }
+            None => (crate::ui::truncate(&ws.name, avail), None),
+        };
         let mut line1: Vec<Span> = Vec::new();
         if is_member {
             line1.push(Span::styled("└ ", Style::new().fg(t.overlay0)));
         }
         line1.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
         line1.push(Span::raw(" "));
-        line1.push(Span::styled(ws.name.clone(), name_style));
-        if let Some(b) = &ws.branch {
-            // Record the branch text as a clickable rect (opens the git tab).
-            let name_w = ws.name.chars().count() as u16;
-            let bx = cx + 2 + indent + name_w;
-            let bw = 2 + b.chars().count() as u16;
+        let name_dw = crate::ui::display_width(&name_disp) as u16;
+        line1.push(Span::styled(name_disp, name_style));
+        if let Some(b) = &branch_disp {
+            // Record the branch text as a clickable rect (opens the git tab),
+            // positioned by the *displayed* name width so a click still lands.
+            let bx = cx + 2 + indent + name_dw;
+            let bw = 2 + crate::ui::display_width(b) as u16;
             if bx < area.right() {
                 let bw = bw.min(area.right().saturating_sub(bx));
                 app.workspace_branch_rects
@@ -567,12 +592,15 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 } else {
                     st.dot()
                 };
+                let label = format!(" {}  ", st.label());
+                let prefix_w = crate::ui::display_width(dot) + crate::ui::display_width(&label);
+                let agent = crate::ui::truncate(&agent, (cw as usize).saturating_sub(prefix_w));
                 line_at(
                     f,
                     y,
                     Line::from(vec![
                         Span::styled(dot, Style::new().fg(st.color(t))),
-                        Span::styled(format!(" {}  ", st.label()), Style::new().fg(st.color(t))),
+                        Span::styled(label, Style::new().fg(st.color(t))),
                         Span::styled(agent, name_style),
                     ]),
                 );
@@ -584,7 +612,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                     f,
                     y + 1,
                     Line::from(Span::styled(
-                        format!("  {wsname} · {tab_label}"),
+                        crate::ui::truncate(&format!("  {wsname} · {tab_label}"), cw as usize),
                         Style::new().fg(if focused { t.subtext0 } else { t.overlay0 }),
                     )),
                 );
@@ -607,20 +635,23 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                     .unwrap_or("project");
                 let row = Rect::new(area.x, y, area.width, 2);
                 session_rects.push((si, row));
+                let label = " resume  ";
+                let prefix_w = 1 + crate::ui::display_width(label);
+                let name = crate::ui::truncate(&s.agent, (cw as usize).saturating_sub(prefix_w));
                 line_at(
                     f,
                     y,
                     Line::from(vec![
                         Span::styled("○", Style::new().fg(t.overlay1)),
-                        Span::styled(" resume  ", Style::new().fg(t.overlay1)),
-                        Span::styled(s.agent.clone(), Style::new().fg(t.subtext0)),
+                        Span::styled(label, Style::new().fg(t.overlay1)),
+                        Span::styled(name, Style::new().fg(t.subtext0)),
                     ]),
                 );
                 line_at(
                     f,
                     y + 1,
                     Line::from(Span::styled(
-                        format!("  {proj}"),
+                        crate::ui::truncate(&format!("  {proj}"), cw as usize),
                         Style::new().fg(t.overlay0),
                     )),
                 );
@@ -663,12 +694,15 @@ fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t
     for (i, row) in rows.iter().take(cap).enumerate() {
         let y = list_top + i as u16;
         let mut spans: Vec<Span> = Vec::new();
+        let mut prefix_w = 0usize;
         if let Some(dot) = &row.dot {
             let st = state_from_name(dot);
             spans.push(Span::styled(st.dot(), Style::new().fg(st.color(t))));
             spans.push(Span::raw(" "));
+            prefix_w = 2;
         }
-        spans.push(Span::styled(row.text.clone(), Style::new().fg(t.subtext1)));
+        let text = crate::ui::truncate(&row.text, (cw as usize).saturating_sub(prefix_w));
+        spans.push(Span::styled(text, Style::new().fg(t.subtext1)));
         line_at(f, y, Line::from(spans));
         if row.action.is_some() {
             app.module_dock_rects
@@ -771,6 +805,31 @@ mod tests {
         assert!(
             !buffer_contains(&term, "· tab 1"),
             "and must not still show the old number"
+        );
+    }
+
+    // A node/branch name too long for the sidebar is ellipsized, never hard-cut
+    // mid-word (docs/29 — matters now that the sidebar can be dragged narrow).
+    #[test]
+    fn long_workspace_name_is_ellipsized_not_hard_cut() {
+        let _env = crate::persist::test_env("sidebar-truncate");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let long = "a-really-long-workspace-name-that-cannot-possibly-fit";
+        app.workspaces[0].name = long.into();
+        app.workspaces[0].branch = Some("feature/some-very-long-branch-name".into());
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        // Read just the sidebar columns (the default left sidebar is 26 wide); the
+        // full name can appear untruncated in the wider status/tab chrome.
+        let buf = term.backend().buffer();
+        let sidebar: String = (0..buf.area.height)
+            .flat_map(|r| (0..26).map(move |c| buf.cell((c, r)).map(|x| x.symbol()).unwrap_or(" ")))
+            .collect();
+        assert!(sidebar.contains('…'), "an over-long name shows an ellipsis");
+        assert!(
+            !sidebar.contains(long),
+            "the full over-long name is never rendered in the sidebar"
         );
     }
 

@@ -370,8 +370,9 @@ impl App {
             return;
         }
         // Track which divider (if any) the cursor is over, for the hover
-        // highlight (docs/27, RESIZE-4).
+        // highlight (docs/27, RESIZE-4), plus the sidebar edge seam (docs/29).
         self.update_hover_divider(m.column, m.row);
+        self.update_hover_sidebar(m.column, m.row);
         // Right-click a pane tab to rename it (docs/28), a WORKSPACES row for its
         // context menu (rename / worktree / close), or inside a pane for the pane
         // menu (split / close).
@@ -397,6 +398,13 @@ impl App {
         // ── pane text selection: drag to select, release auto-copies (OSC 52) ──
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // A sidebar-edge drag (docs/29) claims the press first: its seam is
+                // the sidebar's own `│` column (never a pane), and its neighbour is
+                // only grabbed when it isn't pane content, so this can't swallow a
+                // click meant for a pane or a mouse-tracking agent.
+                if self.begin_sidebar_resize(m.column, m.row) {
+                    return;
+                }
                 // Pane resize (docs/27) takes priority over selection: a divider
                 // sits on borders/gaps, outside any content rect, so grabbing one
                 // never conflicts. RESIZE-2 = drag the divider directly;
@@ -436,6 +444,10 @@ impl App {
                 return;
             }
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Middle) => {
+                if self.sidebar_resize.is_some() {
+                    self.update_sidebar_resize(m.column, m.row);
+                    return;
+                }
                 if self.resize_drag.is_some() {
                     self.update_resize(m.column, m.row);
                     return;
@@ -459,6 +471,10 @@ impl App {
                 return;
             }
             MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
+                if self.sidebar_resize.is_some() {
+                    self.end_sidebar_resize();
+                    return;
+                }
                 if self.resize_drag.is_some() {
                     self.end_resize();
                     return;

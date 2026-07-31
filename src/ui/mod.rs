@@ -137,6 +137,9 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     let status_h = if app.compact { 0 } else { 1 };
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(status_h)]).areas(area);
+    // Stored so an in-flight sidebar-edge drag can map a cursor column to a width
+    // off the correct edge (docs/29).
+    app.last_main_area = main;
 
     // Two sidebars flank the content (docs/29). Each is shown only if visible,
     // non-empty, and it (with the other) leaves the panes at least 24 columns —
@@ -169,6 +172,12 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     .areas(main);
     let sidebar_left = (lw > 0).then_some(left_area);
     let sidebar_right = (rw > 0).then_some(right_area);
+    // The draggable edge seam of each shown sidebar — the `│` column drawn by
+    // `draw_sidebar` (left sidebar's right edge, right sidebar's left edge).
+    // Recomputed every frame, so a hidden sidebar leaves `None` and its drag can
+    // never fire (docs/29).
+    app.left_seam = sidebar_left.map(|a| Rect::new(a.right().saturating_sub(1), a.y, 1, a.height));
+    app.right_seam = sidebar_right.map(|a| Rect::new(a.x, a.y, 1, a.height));
 
     let [tabbar, pane_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
@@ -555,6 +564,33 @@ pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
 pub(super) fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     s.width()
+}
+
+/// Truncate `s` to at most `max` display columns, ending in a `…` when it does not
+/// fit. Width-aware like `display_width` (a CJK glyph counts as two, and is never
+/// split), so a narrowed sidebar clips long node/agent/branch names gracefully
+/// instead of hard-cutting mid-glyph (docs/29).
+pub(super) fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    // Reserve one column for the ellipsis.
+    let budget = max - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let cw = display_width(&ch.to_string());
+        if used + cw > budget {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
 }
 
 /// A small centered toast box near the bottom (e.g. "✓ Copied"). Drawn last, so

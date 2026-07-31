@@ -677,6 +677,11 @@ pub struct ResizeDrag {
 /// makes the seam comfortably grabbable without stealing clicks from content.
 const RESIZE_GRAB_TOL: u16 = 2;
 
+/// How many columns onto the content side of a sidebar's edge still grab it for a
+/// resize (docs/29). Widens the 1-column seam into a comfortable target without
+/// reaching into the sidebar body (where dock rows own the width).
+const SIDEBAR_GRAB_TOL: u16 = 2;
+
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
     pub(crate) fn ordered(&self) -> ((u16, u16), (u16, u16)) {
@@ -953,6 +958,20 @@ pub struct App {
     pub resize_drag: Option<ResizeDrag>,
     /// Divider under the cursor, for the hover highlight (RESIZE-4).
     pub hover_divider: Option<crate::layout::Divider>,
+    /// Active sidebar-edge resize drag (docs/29) — which side is being dragged;
+    /// `None` when idle. Width updates live during the drag and is persisted once
+    /// on release, so no `config.json` write lands on the per-event path.
+    pub sidebar_resize: Option<Side>,
+    /// Sidebar whose edge seam is under the cursor, for the hover highlight.
+    pub hover_sidebar: Option<Side>,
+    /// The draggable edge seam (`│` column) of each shown sidebar, set every frame
+    /// in `render`; `None` when that sidebar is hidden. Hit-tested by
+    /// `sidebar_seam_at`.
+    pub left_seam: Option<Rect>,
+    pub right_seam: Option<Rect>,
+    /// The full content area (frame minus the status bar), stored so an in-flight
+    /// sidebar drag can turn a cursor column into a width off the correct edge.
+    pub last_main_area: Rect,
     pub tab_rects: Vec<(usize, Rect)>,
     pub tab_close_rects: Vec<(usize, Rect)>,
     pub ws_rects: Vec<(usize, Rect)>,
@@ -1172,6 +1191,11 @@ impl App {
             scroll_pane: None,
             resize_drag: None,
             hover_divider: None,
+            sidebar_resize: None,
+            hover_sidebar: None,
+            left_seam: None,
+            right_seam: None,
+            last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             workspace_branch_rects: Vec::new(),
@@ -1527,6 +1551,11 @@ impl App {
             scroll_pane: None,
             resize_drag: None,
             hover_divider: None,
+            sidebar_resize: None,
+            hover_sidebar: None,
+            left_seam: None,
+            right_seam: None,
+            last_main_area: Rect::ZERO,
             tab_rects: Vec::new(),
             ws_rects: Vec::new(),
             workspace_branch_rects: Vec::new(),
@@ -2956,6 +2985,99 @@ impl App {
             };
     }
 
+    /// The sidebar whose draggable edge seam is at `(c, r)`, if any (docs/29).
+    /// The seam `│` column always grabs; the grab band also reaches
+    /// `SIDEBAR_GRAB_TOL` columns onto the **content side** — but only over cells
+    /// that are *not* a mouse-tracking pane, so an agent's own edge clicks (Claude
+    /// Code expanding a tool result at its left edge) still forward, and a
+    /// split's border/gap stays grabbable. It never reaches into the sidebar body,
+    /// where dock rows own the width, so it can't steal a workspace/agent click.
+    fn sidebar_seam_at(&self, c: u16, r: u16) -> Option<Side> {
+        for (seam, side) in [(self.left_seam, Side::Left), (self.right_seam, Side::Right)] {
+            let Some(seam) = seam else { continue };
+            if r < seam.y || r >= seam.bottom() {
+                continue;
+            }
+            if c == seam.x {
+                return Some(side);
+            }
+            // Distance onto the content side (right of a left seam, left of a
+            // right seam); `None` when the cursor is on the sidebar side.
+            let dist = match side {
+                Side::Left => c.checked_sub(seam.x),
+                Side::Right => seam.x.checked_sub(c),
+            };
+            let Some(d) = dist else { continue };
+            let over_agent = self
+                .pane_content_at(c, r)
+                .and_then(|(id, _)| self.panes.get(&id))
+                .is_some_and(|p| p.mouse_mode().report);
+            if (1..=SIDEBAR_GRAB_TOL).contains(&d) && !over_agent {
+                return Some(side);
+            }
+        }
+        None
+    }
+
+    /// Start dragging a sidebar's edge to resize it (docs/29). Returns whether a
+    /// drag began, so the mouse handler can claim the press before selection.
+    pub fn begin_sidebar_resize(&mut self, c: u16, r: u16) -> bool {
+        match self.sidebar_seam_at(c, r) {
+            Some(side) => {
+                self.sidebar_resize = Some(side);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drive the active sidebar resize from the cursor column. Updates the width
+    /// live but does **not** persist: `save_sidebars` (a disk write) runs once on
+    /// release, keeping the drag off the config-write path (the perf memory).
+    pub fn update_sidebar_resize(&mut self, c: u16, _r: u16) {
+        let Some(side) = self.sidebar_resize else {
+            return;
+        };
+        let main = self.last_main_area;
+        // The other sidebar's current rendered width, derived from its seam, so
+        // the drag can never push the panes below the 24-column content floor.
+        let other = match side {
+            Side::Left => self
+                .right_seam
+                .map_or(0, |s| main.right().saturating_sub(s.x)),
+            Side::Right => self
+                .left_seam
+                .map_or(0, |s| s.x.saturating_sub(main.x).saturating_add(1)),
+        };
+        // The left seam sits on the sidebar's *last* column (width-1), so its width
+        // is the cursor column plus one; the right seam is the sidebar's *first*
+        // column, so its width counts back from the right edge.
+        let want = match side {
+            Side::Left => c.saturating_sub(main.x).saturating_add(1),
+            Side::Right => main.right().saturating_sub(c),
+        };
+        // Clamp to the supported range and to whatever still leaves 24 columns of
+        // content; `.max(MIN)` guarantees a valid clamp range on a tiny terminal.
+        let cap = main
+            .width
+            .saturating_sub(24 + other)
+            .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+        self.sidebars.get_mut(side).width = want.clamp(SIDEBAR_WIDTH_MIN, cap);
+    }
+
+    /// Finish a sidebar resize and persist the new width once (docs/29).
+    pub fn end_sidebar_resize(&mut self) {
+        if self.sidebar_resize.take().is_some() {
+            self.save_sidebars();
+        }
+    }
+
+    /// Recompute which sidebar edge (if any) the cursor is over, for the hover
+    /// highlight (mirrors `update_hover_divider`).
+    pub fn update_hover_sidebar(&mut self, c: u16, r: u16) {
+        self.hover_sidebar = self.sidebar_seam_at(c, r);
+    }
+
     /// Enter keyboard resize mode (RESIZE-3) — a no-op with nothing to resize.
     fn enter_resize_mode(&mut self) {
         if self.active_is_git() || self.active_is_orch() || self.layout().len() < 2 {
@@ -4376,6 +4498,143 @@ mod tests {
         )));
         assert!(app.resize_drag.is_none(), "content press is not a resize");
         assert!(app.selection.is_some(), "content press starts a selection");
+    }
+
+    #[test]
+    fn dragging_the_left_sidebar_edge_resizes_and_persists() {
+        let _env = crate::persist::test_env("sidebar-edge-drag");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let seam = app
+            .left_seam
+            .expect("left sidebar is shown, so it has a seam");
+        let before = app.sidebars.left.width;
+
+        let mouse = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Grab the seam and drag it 6 columns to the right (wider).
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            seam.x,
+            seam.y + 3,
+        )));
+        assert_eq!(
+            app.sidebar_resize,
+            Some(Side::Left),
+            "grabbed the left sidebar edge"
+        );
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            seam.x + 6,
+            seam.y + 3,
+        )));
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            seam.x + 6,
+            seam.y + 3,
+        )));
+        assert!(app.sidebar_resize.is_none(), "released the drag");
+        assert_eq!(
+            app.sidebars.left.width,
+            before + 6,
+            "the left sidebar widened by the drag distance"
+        );
+        // Released width is persisted for the next launch.
+        assert_eq!(
+            crate::config::load().sidebars.unwrap().left.width,
+            before + 6,
+            "the new width was written to config"
+        );
+    }
+
+    #[test]
+    fn sidebar_drag_clamps_and_never_crushes_the_content() {
+        let _env = crate::persist::test_env("sidebar-edge-clamp");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let seam = app.left_seam.unwrap();
+
+        let mouse = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            seam.x,
+            seam.y + 3,
+        )));
+        // Drag far past the right edge: width caps at MAX, never eats the content.
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            119,
+            seam.y + 3,
+        )));
+        assert!(
+            app.sidebars.left.width <= SIDEBAR_WIDTH_MAX,
+            "width never exceeds the max ({} > {SIDEBAR_WIDTH_MAX})",
+            app.sidebars.left.width
+        );
+        assert!(
+            120 - app.sidebars.left.width >= 24,
+            "the content keeps at least 24 columns"
+        );
+        // Drag hard left: width floors at MIN rather than collapsing to nothing.
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            0,
+            seam.y + 3,
+        )));
+        assert_eq!(
+            app.sidebars.left.width, SIDEBAR_WIDTH_MIN,
+            "a leftward drag floors at the minimum, not zero (closing is the chevron's job)"
+        );
+    }
+
+    #[test]
+    fn a_pane_click_does_not_start_a_sidebar_resize() {
+        let _env = crate::persist::test_env("sidebar-edge-nopane");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let pane = app.last_pane_area;
+
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.x + 5,
+            row: pane.y + 5,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(
+            app.sidebar_resize.is_none(),
+            "a click inside a pane never grabs the sidebar edge"
+        );
     }
 
     #[test]
