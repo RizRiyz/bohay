@@ -236,11 +236,11 @@ fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> Strin
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
         WsMenuItem::DeleteWorktree => cat.menu_delete_worktree.to_string(),
-        WsMenuItem::NewWorktree => cat.new_git_worktree.to_string(),
+        WsMenuItem::NewWorktree => cat.menu_new_worktree.to_string(),
         WsMenuItem::OpenWorktree => cat.menu_open_worktree.to_string(),
         WsMenuItem::Divider => String::new(),
-        WsMenuItem::OpenGit => cat.cmd_open_git.to_string(),
-        WsMenuItem::OpenOrch => cat.cmd_open_board.to_string(),
+        WsMenuItem::OpenGit => cat.menu_open_git.to_string(),
+        WsMenuItem::OpenOrch => cat.menu_open_board.to_string(),
         WsMenuItem::OpenMission => cat.mc_open.to_string(),
         WsMenuItem::Module(i) => module_label(extras, i),
     }
@@ -302,15 +302,15 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
 /// workspace/pane menus — and editor names are proper nouns anyway).
 fn file_label(it: FileMenuItem, editors: &[(String, String)]) -> String {
     match it {
-        FileMenuItem::OpenReadonly => "Open (read-only)".to_string(),
+        FileMenuItem::OpenReadonly => "Open (Read-Only)".to_string(),
         FileMenuItem::OpenWith(i) => editors
             .get(i)
             .map(|(_, label)| format!("Open in {label}"))
             .unwrap_or_default(),
-        FileMenuItem::NewFile => "New file".to_string(),
-        FileMenuItem::NewFolder => "New folder".to_string(),
+        FileMenuItem::NewFile => "New File".to_string(),
+        FileMenuItem::NewFolder => "New Folder".to_string(),
         FileMenuItem::Rename => "Rename".to_string(),
-        FileMenuItem::CopyPath => "Copy path".to_string(),
+        FileMenuItem::CopyPath => "Copy Path".to_string(),
         FileMenuItem::Divider => String::new(),
         FileMenuItem::Delete => "Delete".to_string(),
     }
@@ -337,5 +337,105 @@ pub(super) fn draw_dock_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
     let rects = render_popup(f, area, anchor, &rows, app.hover, t);
     if let Some(menu) = app.dock_menu.as_mut() {
         menu.rects = rects;
+    }
+}
+
+#[cfg(test)]
+mod label_case_tests {
+    use super::*;
+    use crate::app::{AgentMenuItem, FileMenuItem, PaneMenuItem, WsMenuItem};
+
+    /// Words that stay lower-case inside a title, unless they lead it.
+    const MINOR: [&str; 11] = [
+        "a", "an", "the", "to", "in", "on", "of", "for", "and", "or", "with",
+    ];
+
+    /// Every context-menu row reads as **Title Case**: each word capitalized bar
+    /// the short articles/prepositions, which never lead. Hyphenated parts count
+    /// as words of their own ("Read-Only"), and trailing marks like the submenu
+    /// `▸` are ignored.
+    fn offending_word(label: &str) -> Option<String> {
+        let mut lead = true;
+        for word in label.split_whitespace() {
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+            if word.is_empty() {
+                continue;
+            }
+            for part in word.split('-') {
+                let Some(first) = part.chars().find(|c| c.is_alphabetic()) else {
+                    continue;
+                };
+                let minor = MINOR.contains(&part.to_lowercase().as_str());
+                if !first.is_uppercase() && !(minor && !lead) {
+                    return Some(part.to_string());
+                }
+                lead = false;
+            }
+        }
+        None
+    }
+
+    /// The rule the check itself relies on — a guard against it silently passing
+    /// everything (it would, if `offending_word` stopped looking at words).
+    #[test]
+    fn the_title_case_check_rejects_sentence_case() {
+        assert_eq!(offending_word("Open Task Board"), None);
+        assert_eq!(offending_word("Fork to New Pane"), None);
+        assert_eq!(offending_word("Open (Read-Only)"), None);
+        assert_eq!(offending_word("Move to Tab ▸"), None);
+        assert_eq!(offending_word("Open task board").as_deref(), Some("task"));
+        assert_eq!(offending_word("Open (read-only)").as_deref(), Some("read"));
+        assert_eq!(offending_word("to Open").as_deref(), Some("to"));
+    }
+
+    /// One casing standard across every context menu, so the workspace menu can't
+    /// drift into "Open Mission Control" beside "Open task board" again.
+    #[test]
+    fn every_english_context_menu_row_is_title_case() {
+        let cat = &crate::i18n::EN;
+        let none: &[ModuleMenuAction] = &[];
+        let editors = [("nvim".to_string(), "Neovim".to_string())];
+
+        let mut rows: Vec<String> = Vec::new();
+        for it in [
+            WsMenuItem::Close,
+            WsMenuItem::Rename,
+            WsMenuItem::DeleteWorktree,
+            WsMenuItem::NewWorktree,
+            WsMenuItem::OpenWorktree,
+            WsMenuItem::OpenGit,
+            WsMenuItem::OpenOrch,
+            WsMenuItem::OpenMission,
+        ] {
+            rows.push(ws_label(it, cat, none));
+        }
+        for it in PaneMenuItem::ALL.iter().copied() {
+            rows.push(pane_label(it, cat, none));
+        }
+        // The "Move to Tab" submenu is part of the pane menu: its tab rows are
+        // user content, but the trailing "New Tab" is ours (`move_targets` in
+        // `app/mod.rs`).
+        rows.push(cat.menu_new_tab.to_string());
+        for it in [AgentMenuItem::Resume, AgentMenuItem::Close] {
+            rows.push(agent_label(it, cat, none));
+        }
+        for it in [
+            FileMenuItem::OpenReadonly,
+            FileMenuItem::OpenWith(0),
+            FileMenuItem::NewFile,
+            FileMenuItem::NewFolder,
+            FileMenuItem::Rename,
+            FileMenuItem::CopyPath,
+            FileMenuItem::Delete,
+        ] {
+            rows.push(file_label(it, &editors));
+        }
+
+        let bad: Vec<String> = rows
+            .iter()
+            .filter(|r| !r.is_empty())
+            .filter_map(|r| offending_word(r).map(|w| format!("{r:?} (word {w:?})")))
+            .collect();
+        assert!(bad.is_empty(), "menu rows are not Title Case: {bad:#?}");
     }
 }

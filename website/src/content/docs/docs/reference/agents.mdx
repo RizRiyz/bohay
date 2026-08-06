@@ -26,11 +26,11 @@ description: What bohay supports per agent, covering live status, session resume
 - **Session resume** discovers the agent's latest session from its own on-disk
   store, keyed by the pane's folder, and runs the agent's resume command on
   restore.
-- **Fork to new pane** branches the running session into a new pane beside it,
+- **Fork to New Pane** branches the running session into a new pane beside it,
   preserving the original's full context under a new session id while the
   original keeps running. It needs an agent with a native fork command, so today
   that is **Claude** (`claude --resume <id> --fork-session`) and **Pi**
-  (`pi --fork <id>`). Right-click the pane and choose **Fork to new pane**, or
+  (`pi --fork <id>`). Right-click the pane and choose **Fork to New Pane**, or
   press `Ctrl+Space f`. The action only appears for agents that can fork.
 - **Hook**, via `bohay integration install <agent>`, makes the agent report its
   exact session id and lifecycle events. Removal is surgical:

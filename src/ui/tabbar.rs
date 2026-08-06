@@ -101,29 +101,61 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     let mut prev_rect = None;
     let mut next_rect = None;
 
-    const CELL: u16 = 10; // wider, button-like tabs
+    // Tabs are *variable* width: each is as wide as its label needs, never
+    // narrower than `MIN` (the old fixed cell, so a bar of numbered tabs looks
+    // exactly as it always did) and never wider than `max_w`. Every tab reserves
+    // the same trailing `✕` columns whether or not it is active, so a label
+    // never shifts sideways when you focus its tab.
+    const MIN: u16 = 10; // the old fixed cell, now the floor
+    const MAX: u16 = 28; // ceiling, so one long name can't eat the whole bar
+    const PAD: u16 = 2; // one blank column each side of the label
+    const CLOSE: u16 = 2; // the `✕ ` slot, reserved on every tab
     const GAP: u16 = 1;
     const ARROW: u16 = 2;
     let plus_w: u16 = 3;
-    let unit = CELL + GAP;
     let left = area.x + 1 + tog_w;
     let right = area
         .right()
         .saturating_sub(right_tog_w + summary_w + if summary_w > 0 { 1 } else { 0 });
     let total = right.saturating_sub(left);
 
+    // No single tab takes more than a third of the strip, so a long name still
+    // leaves its neighbours legible on a narrow terminal.
+    let max_w = MAX.min((total / 3).max(MIN));
+    let labels: Vec<String> = (0..n).map(|i| tab_label(ws, app, i)).collect();
+    let widths: Vec<u16> = labels
+        .iter()
+        .map(|l| {
+            (display_width(l) as u16)
+                .saturating_add(PAD + CLOSE)
+                .clamp(MIN, max_w)
+        })
+        .collect();
+    let strip = |a: usize, b: usize| -> u16 {
+        widths[a..b].iter().sum::<u16>() + (b - a).saturating_sub(1) as u16 * GAP
+    };
+
     // Do all tabs fit without scroll arrows (leaving room for the "+")?
-    let fit_plain = ((total + GAP).saturating_sub(plus_w) / unit) as usize;
-    let need_scroll = n > fit_plain;
+    let need_scroll = strip(0, n) > total.saturating_sub(plus_w);
     let avail = if need_scroll {
         total.saturating_sub(plus_w + 2 * ARROW)
     } else {
         total.saturating_sub(plus_w)
     };
-    let max_vis = (((avail + GAP) / unit).max(1) as usize).min(n.max(1));
-    // Scroll the window so the active tab stays visible.
-    let mut scroll = (active + 1).saturating_sub(max_vis);
-    scroll = scroll.min(n.saturating_sub(max_vis));
+    // Scroll the window so the active tab stays visible: pack leftward from the
+    // active tab, then spend whatever room is left extending to the right. With
+    // uniform widths this lands on the same window the old fixed-cell math did.
+    let mut scroll = active.min(n.saturating_sub(1));
+    let mut end = (active + 1).min(n);
+    let mut used = widths.get(active).copied().unwrap_or(0);
+    while scroll > 0 && used + widths[scroll - 1] + GAP <= avail {
+        used += widths[scroll - 1] + GAP;
+        scroll -= 1;
+    }
+    while end < n && used + widths[end] + GAP <= avail {
+        used += widths[end] + GAP;
+        end += 1;
+    }
 
     let mut x = left;
     // Left scroll arrow.
@@ -139,75 +171,43 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         x += ARROW;
     }
 
-    let end = (scroll + max_vis).min(n);
     for i in scroll..end {
-        // A git tab is labeled `⎇ git`, the orchestration board `◇ orch`, Mission
-        // Control `⠶ ctrl` (a braille 2×2 "four squares"); pane tabs are numbered.
-        // The dashboard labels are short so they center with a space on each side
-        // (the icon never touches the tab edge) and still leave room for the `✕`.
-        let is_git = ws.tabs.get(i).is_some_and(|tb| tb.is_git());
-        let is_orch = ws.tabs.get(i).is_some_and(|tb| tb.is_orch());
-        let is_mission = ws.tabs.get(i).is_some_and(|tb| tb.is_mission());
-        // A user-named pane tab (docs/28) shows its name; a single file-view leaf
-        // (docs/38) shows `■ name`.
-        let name = ws.tabs.get(i).and_then(|tb| tb.name.as_deref());
-        let file_name = ws.tabs.get(i).and_then(|tb| file_tab_name(tb, app));
-        let title = |w: usize| {
-            let fit = |s: &str, w: usize| -> String {
-                if s.chars().count() > w {
-                    s.chars().take(w.saturating_sub(1)).chain(['…']).collect()
-                } else {
-                    s.to_string()
-                }
-            };
-            if let Some(nm) = name {
-                // Truncate with an ellipsis to fit the cell, then center it (like
-                // the number) so the name has even padding instead of hugging the
-                // left edge.
-                let label = fit(nm, w);
-                format!("{label:^w$}")
-            } else if let Some(fl) = &file_name {
-                // Cap to `w-2` so centering always leaves at least one space on
-                // each side — the `■` glyph never touches the tab's edge.
-                let label = fit(fl, w.saturating_sub(2));
-                format!("{label:^w$}")
-            } else if is_git {
-                format!("{:^w$}", "⎇ git", w = w)
-            } else if is_orch {
-                format!("{:^w$}", "◇ orch", w = w)
-            } else if is_mission {
-                format!("{:^w$}", "⠶ ctrl", w = w)
-            } else {
-                format!("{:^w$}", i + 1, w = w)
-            }
+        // Clamp to the room actually left, so a bar too narrow for even one tab
+        // clips instead of drawing over the arrows and the `+`.
+        let w = widths[i].min(right.saturating_sub(x));
+        if w <= CLOSE {
+            break;
+        }
+        // The label is centered over everything but the `✕` slot, which leaves a
+        // blank column on each side of the text at the tab's floor width and more
+        // as the name grows — the text never touches an edge, and never the `✕`.
+        let text_w = (w - CLOSE) as usize;
+        let label = center(&truncate(&labels[i], text_w.saturating_sub(2)), text_w);
+        let rect = Rect::new(x, area.y, w, 1);
+        let style = if i == active {
+            Style::new().fg(t.crust).bg(t.accent).bold()
+        } else {
+            // Inactive tab: same as the pane background.
+            Style::new().fg(t.subtext0).bg(t.mantle)
         };
+        // Paint the whole tab first: the label widget covers all but the reserved
+        // `✕` columns, which stay the tab's own colour on an inactive tab.
+        f.render_widget(Block::new().style(style), rect);
+        f.render_widget(
+            Paragraph::new(Span::styled(label, style)),
+            Rect::new(x, area.y, w - CLOSE, 1),
+        );
         if i == active {
-            // The active tab keeps its `✕` close button in the last two columns.
-            let label = title((CELL - 2) as usize);
-            let style = Style::new().fg(t.crust).bg(t.accent).bold();
-            f.render_widget(
-                Paragraph::new(Span::styled(label, style)),
-                Rect::new(x, area.y, CELL - 2, 1),
-            );
-            let close = Rect::new(x + CELL - 2, area.y, 2, 1);
+            // The active tab keeps its `✕` close button in the reserved columns.
+            let close = Rect::new(x + w - CLOSE, area.y, CLOSE, 1);
             f.render_widget(
                 Paragraph::new(Span::styled("✕ ", Style::new().fg(t.crust).bg(t.accent))),
                 close,
             );
             close_rects.push((i, close));
-        } else {
-            let label = title(CELL as usize);
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    label,
-                    // Inactive tab: same as the pane background.
-                    Style::new().fg(t.subtext0).bg(t.mantle),
-                )),
-                Rect::new(x, area.y, CELL, 1),
-            );
         }
-        tab_rects.push((i, Rect::new(x, area.y, CELL, 1)));
-        x += unit;
+        tab_rects.push((i, rect));
+        x += w + GAP;
     }
 
     // Right scroll arrow.
@@ -238,6 +238,42 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     (tab_rects, close_rects, prev_rect, next_rect)
 }
 
+/// The text a tab shows, before any padding — what its width is measured from.
+///
+/// A git tab is labeled `⎇ git`, the orchestration board `◇ orch`, Mission
+/// Control `⠶ ctrl` (a braille 2×2 "four squares"); a user-named pane tab
+/// (docs/28) shows its name, a single file-view leaf (docs/38) `■ name`, and
+/// everything else its number.
+fn tab_label(ws: &crate::app::Workspace, app: &App, i: usize) -> String {
+    let Some(tb) = ws.tabs.get(i) else {
+        return String::new();
+    };
+    if let Some(nm) = tb.name.as_deref() {
+        nm.to_string()
+    } else if let Some(fl) = file_tab_name(tb, app) {
+        fl
+    } else if tb.is_git() {
+        "⎇ git".to_string()
+    } else if tb.is_orch() {
+        "◇ orch".to_string()
+    } else if tb.is_mission() {
+        "⠶ ctrl".to_string()
+    } else {
+        (i + 1).to_string()
+    }
+}
+
+/// Center `s` in `w` columns, measured in display width so a CJK or emoji label
+/// sits square rather than drifting a cell per wide glyph (docs/21).
+fn center(s: &str, w: usize) -> String {
+    let sw = display_width(s);
+    if sw >= w {
+        return s.to_string();
+    }
+    let l = (w - sw) / 2;
+    format!("{}{}{}", " ".repeat(l), s, " ".repeat(w - sw - l))
+}
+
 /// If `tab` shows a single file (docs/38), its `■ name` label (a plain square
 /// glyph, no emoji).
 ///
@@ -256,6 +292,147 @@ fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
     };
     let name = path.file_name()?.to_string_lossy().into_owned();
     Some(format!("■ {name}"))
+}
+
+#[cfg(test)]
+mod width_tests {
+    use crate::app::App;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    /// The drawn text of a tab, taken straight out of the rendered buffer.
+    fn drawn(term: &Terminal<TestBackend>, r: Rect) -> String {
+        let buf = term.backend().buffer();
+        (r.x..r.right())
+            .map(|c| buf.cell((c, r.y)).map(|x| x.symbol()).unwrap_or(" "))
+            .collect()
+    }
+
+    fn rect_of(app: &App, i: usize) -> Rect {
+        app.tab_rects
+            .iter()
+            .find(|(n, _)| *n == i)
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("tab {i} was not drawn"))
+    }
+
+    /// The point of variable-width tabs: a long name is shown *whole* instead of
+    /// being cut to the fixed cell, and the tab grows to hold it. A short name
+    /// still gets the old fixed width, so an ordinary bar looks unchanged.
+    #[test]
+    fn a_long_name_widens_its_tab_and_shows_in_full() {
+        let _env = crate::persist::test_env("tab-wide");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        app.run_cmd(crate::app::Cmd::NewTab);
+        let long = "refactor-detect";
+        app.workspaces[0].tabs[1].name = Some(long.to_string());
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let short = rect_of(&app, 0);
+        let wide = rect_of(&app, 1);
+        assert_eq!(short.width, 10, "a numbered tab keeps the old fixed width");
+        assert!(
+            wide.width > short.width,
+            "the named tab grew: {} vs {}",
+            wide.width,
+            short.width
+        );
+        let text = drawn(&term, wide);
+        assert!(
+            text.contains(long),
+            "the whole name is drawn, not an ellipsis: {text:?}"
+        );
+        // Padding on both sides, and the `✕` still has its slot.
+        assert!(text.starts_with(' '), "space at the left edge: {text:?}");
+        assert!(text.ends_with("✕ "), "the close button is kept: {text:?}");
+        assert!(
+            text.trim_end_matches("✕ ").ends_with(' '),
+            "space between the name and the ✕: {text:?}"
+        );
+    }
+
+    /// A name past the cap has to be cut — but it is cut to leave the padding and
+    /// the `✕` intact, so text never runs into either edge.
+    #[test]
+    fn an_over_long_name_is_capped_but_keeps_its_padding_and_close_button() {
+        let _env = crate::persist::test_env("tab-cap");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        app.workspaces[0].tabs[0].name = Some("a-really-very-long-tab-name-that-runs-on".into());
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let r = rect_of(&app, 0);
+        assert!(r.width <= 28, "capped at the ceiling, got {}", r.width);
+        let text = drawn(&term, r);
+        assert!(text.contains('…'), "cut with an ellipsis: {text:?}");
+        assert!(text.starts_with(' '), "space at the left edge: {text:?}");
+        assert!(text.ends_with("✕ "), "the close button survives: {text:?}");
+        assert!(
+            text.trim_end_matches("✕ ").ends_with(' '),
+            "space before the ✕: {text:?}"
+        );
+    }
+
+    /// The `✕` columns are reserved on *every* tab, not just the focused one, so
+    /// focusing a tab can't resize it or shove its label sideways — the bar would
+    /// visibly reflow under the pointer otherwise.
+    #[test]
+    fn focusing_a_tab_does_not_move_or_resize_it() {
+        let _env = crate::persist::test_env("tab-stable");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        app.run_cmd(crate::app::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("build".into());
+        app.workspaces[0].active_tab = 0;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let (inactive_rect, inactive_text) = (rect_of(&app, 1), drawn(&term, rect_of(&app, 1)));
+
+        app.workspaces[0].active_tab = 1;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let active_rect = rect_of(&app, 1);
+
+        assert_eq!(inactive_rect, active_rect, "same rect either way");
+        let active_text = drawn(&term, active_rect);
+        assert_eq!(
+            inactive_text.trim_end(),
+            active_text.trim_end_matches("✕ ").trim_end(),
+            "the label sits in the same columns either way"
+        );
+    }
+
+    /// With every tab the same width this must pick the same window the old
+    /// fixed-cell arithmetic did: the active tab visible, packed from the left.
+    #[test]
+    fn many_tabs_still_scroll_to_keep_the_active_one_visible() {
+        let _env = crate::persist::test_env("tab-scroll");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+
+        for _ in 0..12 {
+            app.run_cmd(crate::app::Cmd::NewTab);
+        }
+        for active in [0usize, 6, 12] {
+            app.workspaces[0].active_tab = active;
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            assert!(
+                app.tab_rects.iter().any(|(i, _)| *i == active),
+                "tab {active} is on screen"
+            );
+            // Nothing spills past the bar.
+            for (_, r) in &app.tab_rects {
+                assert!(r.right() <= 100, "tab drawn inside the bar: {r:?}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
