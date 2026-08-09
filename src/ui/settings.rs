@@ -351,6 +351,18 @@ fn draw_content(
                             t,
                         ));
                     }
+                    LayoutRow::PaneTitlePath => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_pane_title_path,
+                            toggle(l.pane_title_path, t),
+                            t,
+                        ));
+                    }
                     LayoutRow::ResumeWs => {
                         ctls.push(ctl_row(
                             f,

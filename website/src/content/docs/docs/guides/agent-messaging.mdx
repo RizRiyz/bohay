@@ -1,0 +1,148 @@
+---
+title: Agents Talking to Agents
+description: One agent can hand a task to another agent in a different pane, wait for it, and read the result, all over the same local socket. Install the skill and it happens automatically.
+---
+
+bohay lets one agent give work to another. Because the server owns every pane's
+terminal, "send a prompt to another agent" means bohay pastes the text into that
+agent's input and submits it, then reports back its detected state. There is no
+separate message channel: the target agent's own input is the channel, and the
+host is the broker.
+
+Every pane already has `$BOHAY_PANE_ID` and `$BOHAY_SOCKET_PATH` injected, so an
+agent running inside a pane can drive its neighbors with the same `bohay`
+commands you would type yourself.
+
+## The commands
+
+```sh
+bohay agent list                       # every live agent: name, pane, kind, status, cwd
+bohay agent name reviewer              # alias the current agent (or --pane <id>)
+bohay agent send reviewer "Review the diff" --wait --until idle --timeout 600
+bohay agent read reviewer --lines 120  # read what it produced
+bohay agent keys reviewer enter        # answer a blocked approval (esc, ctrl+c, up, ...)
+```
+
+A `<target>` is one of three things:
+
+- a **live name** you set (grammar `[a-z][a-z0-9_-]{0,31}`), set with `agent name` or `pane name`,
+- a **pane id** (the `pane` field from `agent list`),
+- an **agent kind** (`claude`, `kimi`, `codex`, ...) when exactly one agent of that kind is running. Two of the same kind is ambiguous, and the error names the candidates so you pick a pane id or a name.
+
+`agent send` and `agent keys` only target a pane that is actually running an agent, so a plain shell is refused.
+
+### How to tell two of the same kind apart
+
+Run `bohay agent list` (each row has `pane`, `agent` kind, `name`, `cwd`, `workspace_name`). Two Claudes share the kind `claude` but differ by pane id and folder. Give each a name so you can mention it:
+
+```sh
+bohay agent name api --pane 1     # or run `bohay pane name api` inside that pane
+bohay agent name web --pane 4
+bohay agent send api "add the /health endpoint" --wait
+```
+
+The AGENTS sidebar also shows each agent's mention token on its second line: `@name` once you name it, otherwise `p<id>`.
+
+## A delegation, end to end
+
+Start an agent in a sibling pane, name it, hand it the task, and collect the
+result:
+
+```sh
+new=$(bohay pane split "$BOHAY_PANE_ID" | jq -r .result.pane)  # split beside you
+bohay pane focus "$BOHAY_PANE_ID"                              # keep your own focus
+bohay pane run "$new" codex                                    # launch the agent
+bohay wait agent-status "$new" --status idle --timeout 60      # wait until it is ready
+bohay agent name codex --pane "$new"                           # give it a name
+
+bohay agent send codex "Implement the CSV parser in src/parse.rs and add a test." \
+  --wait --until idle --timeout 600                            # send and wait
+bohay agent read codex --lines 120                             # read the result
+```
+
+`agent send --wait` blocks until the agent settles, using bohay's screen-based
+detection (`idle`, `working`, `blocked`, `done`). Treat those as strong hints,
+not a hard contract. If a send returns while the agent is `blocked`, inspect it
+with `agent read` and answer with `agent keys`.
+
+## Hand off (the default), or wait
+
+By default, delegation does **not** block the sender. `bohay agent send` without
+`--wait` returns the moment the prompt is queued, so the sender is free. The
+clean pattern is: name yourself, send without `--wait` with a report-back
+instruction, then end the turn.
+
+```sh
+bohay agent name lead        # a name the worker can reply to
+bohay agent send codex "Build the parser. When done, run: bohay agent send lead 'done: <summary>'"
+```
+
+The sender is not blocked; it picks the task back up only when the worker runs
+that `agent send lead …` and hands it back.
+
+**Wait only when you ask for it.** Add `--wait` when the very next step needs the
+result in the same reply:
+
+```sh
+bohay agent send codex "Build the CSV parser and add a test." --wait
+bohay agent read codex --lines 120
+```
+
+`--wait` **blocks** the sender until the worker settles, but it is safe: a
+**stall guard** returns *stalled* (exit 3) if there is no response within ~5s,
+and it is bounded by `--timeout` (default 300s, exit 2 on timeout; exit 0 on
+settle). So a broken worker never traps you — but since it blocks, reach for it
+only when you actually need to wait.
+
+## It is automatic with the skill
+
+The commands above are the plumbing. What lets a coding agent do this on its own
+is the **agent skill**, an instruction file the agent loads. bohay **installs it
+for you** on startup, for every supported agent that is set up, and keeps it
+current across bohay updates. You do not need to run anything:
+
+- **Claude Code** gets the full skill at `~/.claude/skills/bohay/SKILL.md`, loaded by relevance.
+- **Codex** and **opencode** read an always-on `AGENTS.md`, so they get a short managed pointer block added to their global `AGENTS.md` (`~/.codex/AGENTS.md`, `~/.config/opencode/AGENTS.md`). Your own content in those files is left untouched.
+
+The messaging **commands themselves work with every agent bohay detects**
+(claude, codex, gemini, opencode, kimi, grok, aider, and more), whether or not
+that agent has the skill installed. The skill just teaches an agent to reach for
+them on its own.
+
+To place it elsewhere, print or install it by hand:
+
+```sh
+bohay skill                          # print the skill
+bohay skill install --dir <path>     # write it to a specific dir
+```
+
+To turn the auto-install off, run `bohay skill off` (removes the managed blocks
+and stops reinstalling), or set `"install_agent_skill": false` in
+`~/.bohay/config.json`. `bohay skill on` re-enables it.
+
+Restart your coding agent so it loads the skill, open it in a bohay pane, and
+ask in plain language:
+
+> Have codex implement the parser in the other pane and tell me when it is done.
+
+The agent recognizes the request, runs the `agent send`/`wait`/`read` loop
+itself, and reports back. The skill only triggers when you ask to delegate or to
+control another pane, so it stays out of the way the rest of the time.
+
+## Naming renames the pane
+
+`bohay pane name <name>` (and its synonym `bohay agent name`) does two things: it
+sets a **live address** for the CLI and API, and it **renames the pane's title
+strip** to that name in place of its cwd path, so a named pane is easy to spot.
+It shows the same mention token in the AGENTS sidebar (`@name`).
+
+A name is keyed to the pane, so it survives the agent restarting inside it and is
+dropped only when the pane closes. It does not change the pane's **tab** label,
+which is still [`bohay tab rename`](/docs/reference/cli/). Clear a name with
+`bohay pane name --clear`.
+
+## See also
+
+- [Scripting bohay](/docs/guides/scripting/) for the wider CLI and the event stream.
+- [Multi-Agent Orchestration](/docs/guides/orchestration/) for the task board, path leases, and isolated worktree workers when you want a coordinated team rather than one-off handoffs.
+- [CLI Commands](/docs/reference/cli/) for the full `agent` command set.

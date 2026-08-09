@@ -22,6 +22,7 @@ mod module;
 mod orch;
 mod persist;
 mod platform;
+mod skill;
 mod terminal;
 mod ui;
 mod update;
@@ -648,6 +649,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
     ipc::api::start_server(sock, api_tx, app.events.clone());
     app.run_module_startup_hooks(); // docs/13 §3.7 — same point as the server role
+    if app.config.install_agent_skill {
+        let _ = skill::install_default(); // keep the agent skill installed (opt out via config)
+    }
 
     // Background "update available" check (off if the user disabled it).
     if app.config.check_updates {
@@ -951,6 +955,74 @@ mod tests {
         assert!(text.contains("AGENTS"), "agents header missing");
         assert!(text.contains("tab"), "tab status missing");
         assert!(text.contains("NORMAL"), "status mode missing");
+    }
+
+    /// Naming a pane (via `pane name` / `agent name`) shows the name on the pane's
+    /// title strip in place of its cwd path, so a named pane is visibly renamed.
+    #[test]
+    fn naming_a_pane_renames_its_title() {
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        thread::sleep(Duration::from_millis(120));
+        // Pane titles only render when a tab has more than one (bordered) pane.
+        app.dispatch("pane.split", &serde_json::Value::Object(Default::default()))
+            .unwrap();
+        let pane = app.layout().focus;
+        app.agent_names.insert("apisvc".into(), pane);
+
+        let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
+        terminal.draw(|f| ui::render(f, &mut app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("apisvc"),
+            "a named pane's title should show its name"
+        );
+    }
+
+    /// With the `pane_title_path` setting on, a named pane's title appends its cwd
+    /// path after the name; off (default) it shows just the name.
+    #[test]
+    fn pane_title_path_setting_appends_the_path() {
+        let (tx, _rx) = mpsc::channel::<AppEvent>();
+        let mut app = App::new(80, 24, tx).expect("spawn pane");
+        thread::sleep(Duration::from_millis(120));
+        app.dispatch("pane.split", &serde_json::Value::Object(Default::default()))
+            .unwrap();
+        let pane = app.layout().focus;
+        app.agent_names.insert("svcx".into(), pane);
+
+        let render = |app: &mut App| -> String {
+            let mut term = Terminal::new(TestBackend::new(110, 32)).unwrap();
+            term.draw(|f| ui::render(f, app)).unwrap();
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect()
+        };
+
+        // Default: name only, no double-space-then-path run.
+        let off = render(&mut app);
+        assert!(off.contains("svcx"), "named pane shows its name");
+        assert!(
+            !off.contains("svcx  "),
+            "default title is the name alone, without the path"
+        );
+
+        // Setting on: the path follows the name.
+        app.config.layout.pane_title_path = true;
+        let on = render(&mut app);
+        assert!(
+            on.contains("svcx  "),
+            "with pane_title_path on, the title appends the path after the name"
+        );
     }
 
     /// Clicking the sidebar version number opens the changelog modal, which shows

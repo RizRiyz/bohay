@@ -220,6 +220,12 @@ impl Pane {
         if let Some(sock) = crate::ipc::api::socket_path_env() {
             cmd.env("BOHAY_SOCKET_PATH", sock);
         }
+        // This session's exact binary, so an agent can use `$BOHAY_BIN_PATH`
+        // instead of a `bohay` on PATH that may be an older install with a
+        // different CLI (skill/binary skew). Matches the server it talks to.
+        if let Ok(exe) = std::env::current_exe() {
+            cmd.env("BOHAY_BIN_PATH", exe);
+        }
         let child = pair.slave.spawn_command(cmd)?;
         let child_pid = child.process_id();
         drop(pair.slave);
@@ -292,6 +298,19 @@ impl Pane {
 
     pub fn send(&self, bytes: &[u8]) {
         let _ = self.input_tx.send(bytes.to_vec());
+    }
+
+    /// Enqueue `bytes` after `delay`, off-thread. Used to follow a pasted prompt
+    /// with a submit key once the child has ingested the paste: an agent's input
+    /// widget needs the paste to land before the Enter, or the Enter is swallowed
+    /// into the paste. The cloned input channel keeps the writer alive for exactly
+    /// this one deferred send.
+    pub fn send_after(&self, bytes: Vec<u8>, delay: std::time::Duration) {
+        let tx = self.input_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let _ = tx.send(bytes);
+        });
     }
 
     /// Apply a new scrollback limit (Settings → Layout). Shrinks retained

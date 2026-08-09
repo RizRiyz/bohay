@@ -56,6 +56,10 @@ pub struct TabSnap {
 pub struct PaneSnap {
     pub cwd: PathBuf,
     pub command: String,
+    /// The pane's live name (`pane name` / `agent name`), so the alias and its
+    /// title survive a restart. Re-attached to the pane's new id on restore.
+    #[serde(default)]
+    pub name: Option<String>,
     /// (agent, session_id) for native resume, if reported.
     #[serde(default)]
     pub agent_session: Option<(String, String)>,
@@ -371,6 +375,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                             PaneSnap {
                                 cwd: PathBuf::new(),
                                 command: String::new(),
+                                name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session: None,
                                 screen: None,
                                 module: None,
@@ -398,6 +403,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                             PaneSnap {
                                 cwd: p.cwd.clone(),
                                 command: p.command.clone(),
+                                name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session,
                                 screen,
                                 module,

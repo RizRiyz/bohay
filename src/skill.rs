@@ -1,0 +1,253 @@
+//! The bundled **agent skill** (docs): instructions that teach a coding agent
+//! running inside a pane to delegate to other agents over the `bohay` CLI.
+//!
+//! Two delivery shapes, because agents differ:
+//! - **Claude Code** loads *skills* by relevance, so it gets the full
+//!   `SKILL.md` under `~/.claude/skills/bohay/` (auto-triggered, low cost).
+//! - **Codex** and **opencode** read an always-on `AGENTS.md`, so they get a
+//!   short, delimited pointer block instead of the whole skill (kept small
+//!   because it is always in context). The block never touches the user's own
+//!   content in that file.
+//!
+//! All of it is compiled in via `include_str!`, printed by `bohay skill`,
+//! installed by `bohay skill install`, and auto-installed on startup unless
+//! `config.install_agent_skill` is off. Each target installs only when that
+//! agent is actually set up on the machine.
+
+use std::path::{Path, PathBuf};
+
+/// The full skill text: the single source shared by `bohay skill`,
+/// `skill install`, and the Claude Code auto-install.
+pub const SKILL: &str = include_str!("../skills/bohay/SKILL.md");
+
+// ── full skill (Claude Code) ────────────────────────────────────────────────
+
+/// Write the skill to `<dir>/SKILL.md`, creating `dir`. Returns the file path.
+pub fn install_to(dir: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, SKILL)?;
+    Ok(path)
+}
+
+/// Remove `<dir>/SKILL.md`, and the dir if it becomes empty. Returns whether a
+/// file was actually removed.
+pub fn uninstall_from(dir: &Path) -> std::io::Result<bool> {
+    let path = dir.join("SKILL.md");
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path)?;
+    let _ = std::fs::remove_dir(dir); // best effort: drop the now-empty skill dir
+    Ok(true)
+}
+
+/// Claude Code's skills dir for bohay, only when Claude Code is set up
+/// (`~/.claude` exists), so bohay never creates that tree for a non-user.
+fn claude_skill_dir() -> Option<PathBuf> {
+    let claude = crate::platform::home_dir()?.join(".claude");
+    claude.is_dir().then(|| claude.join("skills").join("bohay"))
+}
+
+// ── short pointer (AGENTS.md agents: Codex, opencode) ───────────────────────
+
+const POINTER_BEGIN: &str = "<!-- BEGIN bohay (managed by bohay; do not edit inside) -->";
+const POINTER_END: &str = "<!-- END bohay -->";
+
+/// The always-on pointer body: a one-liner that points at the single source of
+/// truth (`bohay skill`), so nothing here can drift from `SKILL.md`. Kept tiny
+/// because an `AGENTS.md` is in the agent's context on every turn.
+const POINTER_BODY: &str = "\
+## bohay: delegating to other agents
+
+When `$BOHAY_ENV` is `1` you are running inside bohay, a terminal multiplexer, and can hand work to other coding agents in other panes. Run `bohay skill` to learn how. Only delegate when the user asks.";
+
+/// The full managed block as it appears in an `AGENTS.md`.
+fn pointer_block() -> String {
+    format!("{POINTER_BEGIN}\n{POINTER_BODY}\n{POINTER_END}\n")
+}
+
+/// `s` with any existing managed block removed (and the blank space it left).
+fn strip_block(s: &str) -> String {
+    let (Some(b), Some(e)) = (s.find(POINTER_BEGIN), s.find(POINTER_END)) else {
+        return s.to_string();
+    };
+    if e < b {
+        return s.to_string();
+    }
+    let end = e + POINTER_END.len();
+    let head = s[..b].trim_end_matches(['\n', ' ']);
+    let tail = s[end..].trim_start_matches('\n');
+    match (head.is_empty(), tail.is_empty()) {
+        (true, _) => tail.to_string(),
+        (false, true) => format!("{head}\n"),
+        (false, false) => format!("{head}\n\n{tail}"),
+    }
+}
+
+/// Upsert the managed block into `file` (an `AGENTS.md`), leaving the user's own
+/// content intact. Returns `true` if the file changed.
+fn upsert_pointer(file: &Path) -> std::io::Result<bool> {
+    let existing = std::fs::read_to_string(file).unwrap_or_default();
+    let base = strip_block(&existing);
+    let updated = if base.trim().is_empty() {
+        pointer_block()
+    } else {
+        format!("{}\n\n{}", base.trim_end(), pointer_block())
+    };
+    if updated == existing {
+        return Ok(false);
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, updated)?;
+    Ok(true)
+}
+
+/// Remove the managed block from `file`, keeping everything else. Returns `true`
+/// if the file changed.
+fn remove_pointer(file: &Path) -> std::io::Result<bool> {
+    let Ok(existing) = std::fs::read_to_string(file) else {
+        return Ok(false);
+    };
+    let updated = strip_block(&existing);
+    if updated == existing {
+        return Ok(false);
+    }
+    std::fs::write(file, updated)?;
+    Ok(true)
+}
+
+/// Codex's global `AGENTS.md`, when Codex is set up (`$CODEX_HOME` or `~/.codex`).
+fn codex_agents_file() -> Option<PathBuf> {
+    let dir = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            crate::platform::home_dir()
+                .unwrap_or_default()
+                .join(".codex")
+        });
+    dir.is_dir().then(|| dir.join("AGENTS.md"))
+}
+
+/// opencode's global `AGENTS.md`, when opencode is set up
+/// (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
+fn opencode_agents_file() -> Option<PathBuf> {
+    let cfg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            crate::platform::home_dir()
+                .unwrap_or_default()
+                .join(".config")
+        });
+    let dir = cfg.join("opencode");
+    dir.is_dir().then(|| dir.join("AGENTS.md"))
+}
+
+// ── aggregate install / uninstall (all set-up agents) ───────────────────────
+
+/// Install/refresh the skill for every supported agent that is set up on this
+/// machine: the full skill for Claude Code, a pointer block for Codex and
+/// opencode. Idempotent (a no-op where already current), so it is cheap to call
+/// on every startup. Returns the files it wrote.
+pub fn install_default() -> Vec<PathBuf> {
+    let mut done = Vec::new();
+    if let Some(dir) = claude_skill_dir() {
+        let path = dir.join("SKILL.md");
+        let current = std::fs::read_to_string(&path).ok().as_deref() == Some(SKILL);
+        if current {
+            done.push(path);
+        } else if let Ok(p) = install_to(&dir) {
+            done.push(p);
+        }
+    }
+    for file in [codex_agents_file(), opencode_agents_file()]
+        .into_iter()
+        .flatten()
+    {
+        if upsert_pointer(&file).is_ok() {
+            done.push(file);
+        }
+    }
+    done
+}
+
+/// Remove the skill/pointer from every supported agent's location. Returns the
+/// files it changed.
+pub fn uninstall_default() -> Vec<PathBuf> {
+    let mut done = Vec::new();
+    if let Some(dir) = claude_skill_dir() {
+        if uninstall_from(&dir).unwrap_or(false) {
+            done.push(dir.join("SKILL.md"));
+        }
+    }
+    for file in [codex_agents_file(), opencode_agents_file()]
+        .into_iter()
+        .flatten()
+    {
+        if remove_pointer(&file).unwrap_or(false) {
+            done.push(file);
+        }
+    }
+    done
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_to_writes_the_bundled_skill() {
+        let dir = std::env::temp_dir().join("bohay-skill-install-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = install_to(&dir).expect("install");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL);
+        // Sanity: it really is the delegation skill, not an empty file.
+        assert!(SKILL.contains("agent send") && SKILL.contains("name: bohay"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uninstall_removes_the_skill_and_is_a_noop_when_absent() {
+        let dir = std::env::temp_dir().join("bohay-skill-uninstall-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        install_to(&dir).unwrap();
+        assert!(uninstall_from(&dir).unwrap(), "removed an installed skill");
+        assert!(!dir.join("SKILL.md").exists());
+        assert!(
+            !uninstall_from(&dir).unwrap(),
+            "no-op when nothing is there to remove"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pointer_upsert_preserves_user_content_and_is_idempotent() {
+        let dir = std::env::temp_dir().join("bohay-pointer-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("AGENTS.md");
+        std::fs::write(&file, "# My rules\n\nBe concise.\n").unwrap();
+
+        assert!(upsert_pointer(&file).unwrap(), "first upsert writes");
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("# My rules"), "user content kept");
+        assert!(after.contains(POINTER_BEGIN), "managed block added");
+        assert!(
+            after.contains("bohay skill"),
+            "points at the source of truth"
+        );
+
+        // Running again changes nothing.
+        assert!(!upsert_pointer(&file).unwrap(), "second upsert is a no-op");
+
+        // Removing the block restores the user's content without the pointer.
+        assert!(remove_pointer(&file).unwrap(), "remove changes the file");
+        let cleaned = std::fs::read_to_string(&file).unwrap();
+        assert!(cleaned.contains("# My rules"));
+        assert!(!cleaned.contains(POINTER_BEGIN));
+        assert!(!remove_pointer(&file).unwrap(), "remove is a no-op after");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

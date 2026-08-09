@@ -44,6 +44,13 @@ pub struct Config {
     /// never self-updates (installed via cargo/brew/etc).
     #[serde(default = "yes")]
     pub check_updates: bool,
+    /// Auto-install the bundled agent skill on startup so agents can delegate to
+    /// each other out of the box (docs): the full skill for Claude Code, and a
+    /// short pointer in the global `AGENTS.md` for Codex and opencode. Each is
+    /// written only when that agent is set up, and only when missing or stale.
+    /// Set false to manage it yourself.
+    #[serde(default = "yes")]
+    pub install_agent_skill: bool,
     /// Custom keybindings: command id → key string (overrides the defaults).
     /// An empty value means the command is explicitly unbound.
     #[serde(default)]
@@ -75,6 +82,11 @@ pub struct LayoutConfig {
     pub row_gap: u16,
     #[serde(default = "yes")]
     pub show_titles: bool,
+    /// When a pane is named (`pane name` / `agent name`), also show its cwd path
+    /// after the name in the title strip. Off by default: a named pane shows just
+    /// its name, an unnamed pane its path (the original behavior).
+    #[serde(default)]
+    pub pane_title_path: bool,
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
@@ -241,6 +253,7 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
             check_updates: true,
+            install_agent_skill: true,
             keybindings: std::collections::HashMap::new(),
             mission_pricing: std::collections::HashMap::new(),
             mission_budget: None,
@@ -255,6 +268,7 @@ impl Default for LayoutConfig {
             col_gap: 1,
             row_gap: 0,
             show_titles: true,
+            pane_title_path: false,
             resume_in_new_workspace: true,
             file_open: default_file_open(),
             scrollback: default_scrollback(),

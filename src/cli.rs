@@ -30,6 +30,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "wait"
                 | "help"
                 | "doctor"
+                | "skill"
         )
     )
 }
@@ -60,16 +61,29 @@ tabs:
 
 panes / agents:
   pane list                  list panes in the current tab
-  pane split [<id>] [--down] split a pane (default: side by side)
+  pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane run [<id>] <cmd...>   run a command in a pane
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
   pane status [<id>]         print a pane's agent status (any workspace)
+  pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
+  agent start <name> --kind <k> [--pane <id>] [--down] [--timeout <s>] [-- <args>]
+                             spawn an agent in a sibling pane, wait until ready, name it
+  agent name <name>          alias the current agent, same as pane name (--clear to drop)
+  agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
+                             prompt an agent (target = a name, pane id, or kind)
+  agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
+  agent read <target> [--lines N] [--source visible|recent]   print an agent's output
+  agent get <target>         one agent's live info (pane, name, kind, status, cwd)
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
+  skill                      print the agent skill (teaches an agent to delegate)
+  skill install [--dir <p>]  install the skill where a coding agent auto-loads it
+  skill uninstall [--dir <p>]   remove the installed skill
+  skill on | off             enable / disable auto-install (installs / removes now)
   wait output <id> --match <text> [--timeout <s>]    block until output appears
   wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane
@@ -160,6 +174,9 @@ pub fn run(args: &[String]) -> Result<i32> {
         print!("{USAGE}");
         return Ok(0);
     }
+    if args.get(1).map(String::as_str) == Some("skill") {
+        return skill_cmd(&args[2.min(args.len())..]);
+    }
     // `doctor` is a local environment check — no server needed.
     if args.get(1).map(String::as_str) == Some("doctor") {
         return Ok(doctor());
@@ -181,6 +198,18 @@ pub fn run(args: &[String]) -> Result<i32> {
     // request — it exits 0 on the condition, 2 on timeout.
     if args.get(1).map(String::as_str) == Some("wait") {
         return wait_cmd(args);
+    }
+    // `agent send` is a submit-then-optionally-wait flow, not a one-shot request.
+    if args.get(1).map(String::as_str) == Some("agent")
+        && args.get(2).map(String::as_str) == Some("send")
+    {
+        return agent_send_cmd(args);
+    }
+    // `agent start` orchestrates split + run + wait-ready + name, not one request.
+    if args.get(1).map(String::as_str) == Some("agent")
+        && args.get(2).map(String::as_str) == Some("start")
+    {
+        return agent_start_cmd(args);
     }
     let (method, params) = parse(args)?;
     let path = crate::persist::cli_socket_path();
@@ -517,6 +546,235 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
     }
 }
 
+/// `bohay agent start <name> --kind <kind> [--pane <id>] [--down] [--timeout S] [-- <extra…>]` —
+/// spawn a coding agent in a sibling pane (or a given one), wait until detection
+/// recognizes it, and give it a name, all in one command. Exit 0 when it becomes
+/// ready, 2 if it did not within the timeout (the pane and name still exist).
+fn agent_start_cmd(args: &[String]) -> Result<i32> {
+    let name = args.get(3).cloned().ok_or_else(|| {
+        anyhow!("usage: bohay agent start <name> --kind <kind> [--pane <id>] [--down] [--timeout S] [-- <extra>]")
+    })?;
+    let kind = flag(args, "--kind").ok_or_else(|| anyhow!("agent start requires --kind <kind>"))?;
+    // Native agent args after `--` are appended to the launch command.
+    let extra = args
+        .iter()
+        .position(|a| a == "--")
+        .map(|i| args[i + 1..].join(" "))
+        .unwrap_or_default();
+    let cmd = if extra.is_empty() {
+        kind.clone()
+    } else {
+        format!("{kind} {extra}")
+    };
+
+    // Target pane: an explicit `--pane`, else a fresh background (no-focus) split
+    // beside the caller.
+    let pane = if let Some(p) = flag(args, "--pane") {
+        p
+    } else {
+        let mut split = serde_json::Map::new();
+        if let Ok(b) = std::env::var("BOHAY_PANE_ID") {
+            split.insert("pane".to_string(), json!(b));
+        }
+        if args.iter().any(|a| a == "--down") {
+            split.insert("direction".to_string(), json!("down"));
+        }
+        split.insert("focus".to_string(), json!(false));
+        let v = send_request("pane.split", Value::Object(split))?;
+        v.get("result")
+            .and_then(|r| r.get("pane"))
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| anyhow!("agent start: could not create a pane"))?
+            .to_string()
+    };
+
+    // Launch the agent in the pane.
+    send_request("pane.run", json!({ "pane": pane, "command": cmd }))?;
+
+    // Wait until detection recognizes the kind as the pane's foreground agent.
+    let secs = flag(args, "--timeout")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(30.0);
+    let deadline = Instant::now() + Duration::from_secs_f64(secs);
+    let mut ready = false;
+    loop {
+        let v = send_request("pane.status", json!({ "pane": pane }))?;
+        let agent = v
+            .get("result")
+            .and_then(|r| r.get("agent"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if agent.eq_ignore_ascii_case(&kind) {
+            ready = true;
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    // Name it either way, so it is addressable even if readiness was not confirmed.
+    send_request("agent.name", json!({ "pane": pane, "name": name }))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "result": {"name": name, "pane": pane, "kind": kind, "ready": ready}
+        }))
+        .unwrap_or_default()
+    );
+    Ok(if ready { 0 } else { 2 })
+}
+
+/// `bohay skill` prints the agent skill; `bohay skill install [--dir <path>]`
+/// writes it where a coding agent auto-loads it (default: Claude Code's
+/// `~/.claude/skills/bohay/SKILL.md`). No server needed either way.
+fn skill_cmd(rest: &[String]) -> Result<i32> {
+    // With `--dir`, act on that one path (the full Claude-style skill). Without
+    // it, act on every supported agent that is set up (Claude skill + Codex /
+    // opencode pointer).
+    let explicit_dir = flag(rest, "--dir").map(std::path::PathBuf::from);
+    match rest.first().map(String::as_str) {
+        Some("install") => {
+            match explicit_dir {
+                Some(dir) => println!("installed {}", crate::skill::install_to(&dir)?.display()),
+                None => print_touched("installed", crate::skill::install_default()),
+            }
+            Ok(0)
+        }
+        Some("uninstall") => {
+            match explicit_dir {
+                Some(dir) if crate::skill::uninstall_from(&dir)? => {
+                    println!("uninstalled {}", dir.join("SKILL.md").display())
+                }
+                Some(dir) => println!("not installed at {}", dir.join("SKILL.md").display()),
+                None => print_touched("removed", crate::skill::uninstall_default()),
+            }
+            Ok(0)
+        }
+        // Turn auto-install on/off (persisted), and install/remove now to match.
+        Some("on") => {
+            set_auto_install_skill(true);
+            print_touched(
+                "auto-install on; installed",
+                crate::skill::install_default(),
+            );
+            Ok(0)
+        }
+        Some("off") => {
+            set_auto_install_skill(false);
+            print_touched(
+                "auto-install off; removed",
+                crate::skill::uninstall_default(),
+            );
+            println!("(restart the server to stop reinstalling)");
+            Ok(0)
+        }
+        _ => {
+            print!("{}", crate::skill::SKILL);
+            Ok(0)
+        }
+    }
+}
+
+/// Print the files an install/uninstall touched, or a friendly no-op line.
+fn print_touched(verb: &str, files: Vec<std::path::PathBuf>) {
+    if files.is_empty() {
+        println!("{verb}: nothing (no supported agent set up, or already current)");
+    } else {
+        for f in files {
+            println!("{verb} {}", f.display());
+        }
+    }
+}
+
+/// Persist the `install_agent_skill` toggle so the change survives a restart.
+fn set_auto_install_skill(on: bool) {
+    let mut c = crate::config::load();
+    c.install_agent_skill = on;
+    crate::config::save(&c);
+}
+
+/// `bohay agent send <target> <text…> [--wait] [--until STATE] [--timeout S]` —
+/// submit a prompt to a target agent, then optionally block until it reaches a
+/// state (default `idle`). Exit 0 on the state, 2 on timeout, like `wait`.
+fn agent_send_cmd(args: &[String]) -> Result<i32> {
+    let target = args.get(3).cloned().ok_or_else(|| {
+        anyhow!("usage: bohay agent send <target> <text> [--wait] [--until STATE] [--timeout S]")
+    })?;
+    // Text is every positional before the first flag, so `--wait` and friends can
+    // follow an unquoted multi-word prompt.
+    let text = args[4.min(args.len())..]
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return Err(anyhow!("agent send requires text"));
+    }
+    let v = send_request("agent.send", json!({ "target": target, "text": text }))?;
+    if v.get("error").is_some() {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return Ok(1);
+    }
+    if !args.iter().any(|a| a == "--wait") {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return Ok(0);
+    }
+    let pane = v
+        .get("result")
+        .and_then(|r| r.get("pane"))
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow!("agent send: server did not return a pane"))?
+        .to_string();
+    // Default timeout 300s (bounded so a stuck worker never hangs forever).
+    let deadline = Instant::now()
+        + Duration::from_secs_f64(
+            flag(args, "--timeout")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(300.0),
+        );
+    // An explicit `--until STATE` waits for exactly that state. Otherwise wait for
+    // the agent to settle, with a stall guard so a prompt that lands on nothing
+    // (or a broken/idle worker) returns fast instead of blocking to the timeout.
+    match flag(args, "--until") {
+        Some(until) => wait_status_stream(&pane, &until, Some(deadline)),
+        None => agent_wait_settled(&pane, deadline),
+    }
+}
+
+/// Wait for a just-prompted agent to finish, the way `herdr agent prompt --wait`
+/// does: the prompt must produce a lifecycle change within a few seconds or we
+/// call it **stalled** (exit 3) rather than hang; then we wait until the agent
+/// settles at `idle`/`done`/`blocked` (exit 0), or the deadline passes (exit 2).
+fn agent_wait_settled(pane: &str, deadline: Instant) -> Result<i32> {
+    const STALL: Duration = Duration::from_secs(5);
+    let stall_by = Instant::now() + STALL;
+    let mut ever_worked = false;
+    loop {
+        match pane_status(pane)?.as_deref() {
+            Some("working") => ever_worked = true,
+            // Settled — but only count it once the prompt actually started work,
+            // so a target that was already idle when we sent isn't read as "done".
+            Some("idle") | Some("done") | Some("blocked") if ever_worked => return Ok(0),
+            _ => {}
+        }
+        let now = Instant::now();
+        if !ever_worked && now >= stall_by {
+            eprintln!(
+                "agent send: no response within 5s — the prompt may not have landed (stalled)"
+            );
+            return Ok(3);
+        }
+        if now >= deadline {
+            eprintln!("agent send: timed out waiting for the agent to settle");
+            return Ok(2);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
 /// Current agent status of `pane` (global lookup via `pane.status`).
 fn pane_status(pane: &str) -> Result<Option<String>> {
     let v = send_request("pane.status", json!({ "pane": pane }))?;
@@ -690,6 +948,49 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("events", _) => ("events.subscribe".into(), json!({})),
         ("agent", "sessions") => ("agent.sessions".into(), json!({})),
         ("agent", "resume") => ("agent.resume".into(), one("session_id", arg0())),
+        ("agent", "name") => {
+            // `agent name <name>` names the current pane; `--pane <id>` overrides;
+            // `--clear` drops the pane's alias. The name never doubles as a pane id.
+            let mut obj = serde_json::Map::new();
+            if let Some(pid) = flag(args, "--pane").or_else(|| std::env::var("BOHAY_PANE_ID").ok())
+            {
+                obj.insert("pane".to_string(), json!(pid));
+            }
+            if args.iter().any(|a| a == "--clear") {
+                obj.insert("clear".to_string(), json!(true));
+            } else if let Some(name) = rest.first() {
+                obj.insert("name".to_string(), json!(name));
+            }
+            ("agent.name".into(), Value::Object(obj))
+        }
+        ("agent", "keys") => {
+            // `agent keys <target> <key> [key ...]`
+            let mut obj = serde_json::Map::new();
+            if let Some(t) = rest.first() {
+                obj.insert("target".to_string(), json!(t));
+            }
+            let keys: Vec<String> = rest.iter().skip(1).cloned().collect();
+            obj.insert("keys".to_string(), json!(keys));
+            ("agent.keys".into(), Value::Object(obj))
+        }
+        ("agent", "get") => {
+            // `agent get <target>` — one agent's live info
+            ("agent.get".into(), one("target", rest.first().cloned()))
+        }
+        ("agent", "read") => {
+            // `agent read <target> [--lines N] [--source visible|recent]`
+            let mut obj = serde_json::Map::new();
+            if let Some(t) = rest.first() {
+                obj.insert("target".to_string(), json!(t));
+            }
+            if let Some(n) = flag(args, "--lines").and_then(|s| s.parse::<u64>().ok()) {
+                obj.insert("lines".to_string(), json!(n));
+            }
+            if let Some(s) = flag(args, "--source") {
+                obj.insert("source".to_string(), json!(s));
+            }
+            ("agent.read".into(), Value::Object(obj))
+        }
         ("agent", _) => ("agent.list".into(), json!({})),
 
         ("ui", "sidebar") => {
@@ -782,6 +1083,9 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if args.iter().any(|a| a == "--down" || a == "--stack") {
                 obj.insert("direction".to_string(), json!("down"));
             }
+            if args.iter().any(|a| a == "--no-focus") {
+                obj.insert("focus".to_string(), json!(false));
+            }
             ("pane.split".into(), with_pane(obj))
         }
         ("pane", "focus") => ("pane.focus".into(), with_pane(serde_json::Map::new())),
@@ -800,6 +1104,21 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("pane", "read") => ("pane.read".into(), with_pane(serde_json::Map::new())),
         ("pane", "status") => ("pane.status".into(), with_pane(serde_json::Map::new())),
         ("pane", "close") => ("pane.close".into(), with_pane(serde_json::Map::new())),
+        // `pane name <name>` is a synonym for `agent name`: it aliases the pane so
+        // you can mention it by name. The name never doubles as a pane id.
+        ("pane", "name") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(pid) = flag(args, "--pane").or_else(|| std::env::var("BOHAY_PANE_ID").ok())
+            {
+                obj.insert("pane".to_string(), json!(pid));
+            }
+            if args.iter().any(|a| a == "--clear") {
+                obj.insert("clear".to_string(), json!(true));
+            } else if let Some(name) = rest.first() {
+                obj.insert("name".to_string(), json!(name));
+            }
+            ("agent.name".into(), Value::Object(obj))
+        }
         ("pane", "report") => {
             let mut obj = serde_json::Map::new();
             obj.insert(

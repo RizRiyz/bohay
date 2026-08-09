@@ -525,20 +525,16 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     let focus = app.layout().focus;
     // Live agents across every workspace/tab (real agents or panes with a session).
     // `(pane, workspace name, tab label)`. The tab label follows the tab bar: a
-    // user-renamed tab (docs/28) shows its name, an unnamed one its number. It is
-    // resolved here rather than stored as an index, so renaming a tab updates the
-    // agent row too instead of leaving a stale `tab N`.
-    let mut live: Vec<(PaneId, String, String)> = Vec::new();
+    // The row's second line is `workspace · mention`, where the mention is how you
+    // address the pane (`@name` or `p<id>`). The tab is intentionally dropped here
+    // in favor of the pane token, which is what a script or delegation needs.
+    let mut live: Vec<(PaneId, String)> = Vec::new();
     for ws in app.workspaces.iter() {
-        for (ti, tab) in ws.tabs.iter().enumerate() {
-            let tab_label = tab
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("tab {}", ti + 1));
+        for tab in ws.tabs.iter() {
             for id in tab.layout.leaves() {
                 if let Some(s) = app.status.get(&id) {
                     if app.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
-                        live.push((id, ws.name.clone(), tab_label.clone()));
+                        live.push((id, ws.name.clone()));
                     }
                 }
             }
@@ -569,8 +565,8 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     } else {
         for (vi, k) in (ascroll..atotal).take(acap).enumerate() {
             let y = alist_top + vi as u16 * ROW_STRIDE;
-            if let Some((id, wsname, tab_label)) = live.get(k) {
-                // A live agent: runtime status + which workspace/tab it runs in.
+            if let Some((id, wsname)) = live.get(k) {
+                // A live agent: runtime status + which workspace it runs in.
                 let id = *id;
                 let focused = id == focus;
                 let st = pane_state(app, id);
@@ -604,15 +600,22 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                         Span::styled(agent, name_style),
                     ]),
                 );
-                // Row 2: project · tab, styled exactly like a workspace's path
-                // row. It was pinned to `overlay0`, which lands on `sel_bg` for
-                // the focused row and is then all but unreadable — the same
-                // reason the workspaces dock brightens its path when active.
+                // Row 2: project · tab · how to mention this pane, styled exactly
+                // like a workspace's path row. It was pinned to `overlay0`, which
+                // lands on `sel_bg` for the focused row and is then all but
+                // unreadable — the same reason the workspaces dock brightens its
+                // path when active. The trailing token is the pane's live alias
+                // (`@name`, set by `agent name`) or its pane id (`p3`), so the
+                // reader knows exactly what to pass to `agent send` / `agent read`.
+                let mention = app
+                    .agent_name_for(id)
+                    .map(|n| format!("@{n}"))
+                    .unwrap_or_else(|| format!("p{}", id.0));
                 line_at(
                     f,
                     y + 1,
                     Line::from(Span::styled(
-                        crate::ui::truncate(&format!("  {wsname} · {tab_label}"), cw as usize),
+                        crate::ui::truncate(&format!("  {wsname} · {mention}"), cw as usize),
                         Style::new().fg(if focused { t.subtext0 } else { t.overlay0 }),
                     )),
                 );
@@ -778,33 +781,28 @@ mod tests {
     // Regression: the agent row's second line showed a hardcoded `tab N` built
     // from the tab index, so renaming a tab (docs/28) left the sidebar stale.
     #[test]
-    fn agent_row_follows_a_renamed_tab() {
-        let _env = crate::persist::test_env("agent-tab-name");
+    fn agent_row_shows_the_pane_mention_token() {
+        let _env = crate::persist::test_env("agent-mention");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
 
-        // Unnamed tabs still fall back to their number.
+        // Unnamed: the row's second line shows the pane token (how you mention it),
+        // in place of the tab that used to sit here.
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
-            buffer_contains(&term, "· tab 1"),
-            "unnamed tab shows its number"
+            buffer_contains(&term, &format!("· p{}", id.0)),
+            "an unnamed agent row shows its pane id token"
         );
 
-        // Rename it the way the tab-rename modal does.
-        let ws = app.active_ws;
-        let ti = app.workspaces[ws].active_tab;
-        app.workspaces[ws].tabs[ti].name = Some("core".into());
+        // Naming the pane switches the token to `@name`.
+        app.agent_names.insert("worker".into(), id);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
-            buffer_contains(&term, "· core"),
-            "the agent row must show the renamed tab"
-        );
-        assert!(
-            !buffer_contains(&term, "· tab 1"),
-            "and must not still show the old number"
+            buffer_contains(&term, "· @worker"),
+            "a named agent row shows @name"
         );
     }
 
@@ -847,7 +845,7 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         let t = crate::ui::theme::by_name(&app.config.theme);
-        let meta = fg_of_row(&term, "· tab 1").expect("the agent meta row is drawn");
+        let meta = fg_of_row(&term, &format!("· p{}", id.0)).expect("the agent meta row is drawn");
         assert_eq!(
             meta, t.subtext0,
             "the focused agent's meta line must match the workspace path colour"

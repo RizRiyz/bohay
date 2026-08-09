@@ -75,6 +75,7 @@ export default defineConfig({
           items: [
             { label: 'Panes, Tabs & Workspaces', slug: 'docs/guides/layout' },
             { label: 'Working with Agents', slug: 'docs/guides/agents' },
+            { label: 'Agents Talking to Agents', slug: 'docs/guides/agent-messaging' },
             { label: 'Multi-Agent Orchestration', slug: 'docs/guides/orchestration' },
             { label: 'The Git Tab', slug: 'docs/guides/git' },
             { label: 'Browsing & Opening Files', slug: 'docs/guides/files' },

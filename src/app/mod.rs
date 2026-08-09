@@ -567,6 +567,8 @@ pub enum PaneMenuItem {
     RunningCmd,
     /// Parent row: hovering it opens a submenu of tabs to move this pane into.
     MoveToTab,
+    /// "Rename" this pane (sets its live name, shown on the title strip).
+    RenamePane,
     Divider,
     Close,
     /// The `i`-th module action declaring `contexts = ["pane"]` (docs/13 §3.8).
@@ -583,6 +585,7 @@ impl PaneMenuItem {
         PaneMenuItem::OpenLink,
         PaneMenuItem::OpenFile,
         PaneMenuItem::RunningCmd,
+        PaneMenuItem::RenamePane,
         PaneMenuItem::MoveToTab,
         PaneMenuItem::Divider,
         PaneMenuItem::Close,
@@ -611,6 +614,8 @@ pub struct AgentMenu {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentMenuItem {
     Resume,
+    /// "Rename" a live agent's pane (sets its live name). Live agents only.
+    RenamePane,
     Close,
     Divider,
     /// The `i`-th module action declaring `contexts = ["agent"]` (docs/13 §3.8).
@@ -622,7 +627,7 @@ impl AgentMenu {
     pub fn items_for(target: AgentTarget) -> Vec<AgentMenuItem> {
         match target {
             AgentTarget::Session(_) => vec![AgentMenuItem::Resume, AgentMenuItem::Close],
-            AgentTarget::Live(_) => vec![AgentMenuItem::Close],
+            AgentTarget::Live(_) => vec![AgentMenuItem::RenamePane, AgentMenuItem::Close],
         }
     }
 }
@@ -636,6 +641,17 @@ pub struct WsRename {
 
 /// Cap a custom workspace name (same reasoning as [`TAB_NAME_MAX`]).
 const WS_NAME_MAX: usize = 40;
+
+/// The pane-rename modal: sets a pane's live name (the same alias `pane name` /
+/// `agent name` set), which addresses the agent and shows on the pane's title.
+/// Pre-filled with the current name. The grammar is enforced as you type.
+pub struct PaneRename {
+    pub pane: PaneId,
+    pub buffer: String,
+}
+
+/// Cap a live pane name at the addressable-name length (`[a-z][a-z0-9_-]{0,31}`).
+const PANE_NAME_MAX: usize = 32;
 
 /// The in-TUI **new-task form** (ORCH-7): create an orchestration task without the
 /// CLI. Fields are plain text; `paths`/`deps` are whitespace-split on submit.
@@ -876,6 +892,11 @@ impl Selection {
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     pub status: HashMap<PaneId, PaneStatus>,
+    /// Live agent aliases: a human name → the pane whose agent it points at, set
+    /// via `agent.name` so `agent.send` / `agent.keys` / `agent.read` can address
+    /// an agent by name instead of a pane id. Ephemeral (pane ids are reallocated
+    /// each run), so it is never persisted and is pruned when a pane closes.
+    pub agent_names: HashMap<String, PaneId>,
     /// Agent-detection rule set: built-ins plus user `~/.bohay/manifests/*.toml`
     /// (docs/07). Loaded once at startup.
     pub manifests: crate::detect::Manifests,
@@ -931,6 +952,8 @@ pub struct App {
     /// Active AGENTS-list context menu (right-click a row); `None` when closed.
     pub agent_menu: Option<AgentMenu>,
     pub ws_rename: Option<WsRename>,
+    /// The pane-rename modal (`Some` ⇒ open, captures input).
+    pub pane_rename: Option<PaneRename>,
     /// Clickable ⏎-commit / esc-cancel footer buttons of whichever text-input
     /// modal is open (worktree prompt / tab rename / workspace rename), set each
     /// render so the mouse layer can hit-test them.
@@ -1294,6 +1317,7 @@ impl App {
             catalog,
             config,
             keymap,
+            agent_names: HashMap::new(),
             settings: None,
             picker: None,
             picker_rects: Vec::new(),
@@ -1310,6 +1334,7 @@ impl App {
             pane_menu: None,
             agent_menu: None,
             ws_rename: None,
+            pane_rename: None,
             modal_commit_rect: None,
             modal_cancel_rect: None,
             worktree_repo: None,
@@ -1483,6 +1508,7 @@ impl App {
         let mut status = HashMap::new();
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
         let mut views: HashMap<PaneId, ViewKind> = HashMap::new();
+        let mut restored_names: Vec<(String, PaneId)> = Vec::new();
         let mut workspaces = Vec::new();
         for ws in snap.workspaces {
             let mut tabs = Vec::new();
@@ -1533,6 +1559,11 @@ impl App {
                 let mut remap = HashMap::new();
                 for (raw, ps) in &tab.panes {
                     let id = PaneId::alloc();
+                    // Re-attach the pane's live name to its new id (docs: names are
+                    // pane-keyed and pane ids are reallocated each run).
+                    if let Some(nm) = &ps.name {
+                        restored_names.push((nm.clone(), id));
+                    }
                     // A file-view leaf (docs/38 FILE-3): rebuild the view and
                     // re-read the file off-loop; no PTY is spawned.
                     if let Some(path) = &ps.file {
@@ -1676,6 +1707,11 @@ impl App {
         let theme = crate::ui::theme::by_name(&config.theme);
         let catalog = crate::i18n::by_code(&config.language);
         let sidebars = Sidebars::from_config(&config.sidebars());
+        // Restore live pane names, minus any whose pane failed to come back.
+        let agent_names: HashMap<String, PaneId> = restored_names
+            .into_iter()
+            .filter(|(_, id)| panes.contains_key(id))
+            .collect();
 
         let mut app = App {
             panes,
@@ -1688,6 +1724,7 @@ impl App {
             catalog,
             config,
             keymap,
+            agent_names,
             settings: None,
             picker: None,
             picker_rects: Vec::new(),
@@ -1704,6 +1741,7 @@ impl App {
             pane_menu: None,
             agent_menu: None,
             ws_rename: None,
+            pane_rename: None,
             modal_commit_rect: None,
             modal_cancel_rect: None,
             worktree_repo: None,
@@ -2629,6 +2667,61 @@ impl App {
         }
     }
 
+    /// Set (`Some`) or clear (`None`) a pane's live name. One name per pane, one
+    /// pane per name. Shared by `agent.name`, `pane name`, and the rename modal.
+    pub fn set_agent_name(&mut self, pane: PaneId, name: Option<&str>) {
+        match name {
+            None => {
+                self.agent_names.retain(|_, x| *x != pane);
+            }
+            Some(n) => {
+                self.agent_names.retain(|k, x| k != n && *x != pane);
+                self.agent_names.insert(n.to_string(), pane);
+            }
+        }
+        // Persist the change so the name survives a restart (docs/06).
+        self.session_dirty = true;
+    }
+
+    /// Open the pane-rename modal for `pane`, pre-filled with its current name.
+    pub fn open_pane_rename(&mut self, pane: PaneId) {
+        let buffer = self.agent_name_for(pane).unwrap_or("").to_string();
+        self.pane_rename = Some(PaneRename { pane, buffer });
+    }
+
+    /// Key handling while the pane-rename modal is open. `Enter` applies the name
+    /// (empty clears it), `Esc` cancels. Typing is restricted to the addressable
+    /// grammar, so the buffer is always a valid name.
+    pub fn handle_pane_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.pane_rename = None,
+            KeyCode::Enter => {
+                if let Some(r) = self.pane_rename.take() {
+                    let name = r.buffer.trim();
+                    self.set_agent_name(r.pane, (!name.is_empty()).then_some(name));
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(r) = self.pane_rename.as_mut() {
+                    r.buffer.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(r) = self.pane_rename.as_mut() {
+                    let c = c.to_ascii_lowercase();
+                    let char_ok =
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+                    // A name must start with a letter.
+                    let first_ok = !r.buffer.is_empty() || c.is_ascii_lowercase();
+                    if char_ok && first_ok && r.buffer.chars().count() < PANE_NAME_MAX {
+                        r.buffer.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Key handling while the workspace-rename modal is open (mirrors tab rename).
     /// `Enter` commits a non-empty name (the on-disk folder is never renamed);
     /// `Esc` cancels.
@@ -2839,6 +2932,7 @@ impl App {
                 }
             }
             PaneMenuItem::RunningCmd => self.open_cmd_inspect(pane),
+            PaneMenuItem::RenamePane => self.open_pane_rename(pane),
             // Handled in `pane_menu_click` (opens a submenu, keeps the menu open);
             // reachable here only via a direct call — treat as a no-op.
             PaneMenuItem::MoveToTab => {}
@@ -2902,7 +2996,9 @@ impl App {
                 self.focus_pane_global(id); // switch to its tab so close targets it
                 self.close_pane(id);
             }
-            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
+            (AgentMenuItem::RenamePane, AgentTarget::Live(id)) => self.open_pane_rename(id),
+            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {}        // n/a for a live agent
             (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("agent", a, Target::pane(id));
@@ -3423,6 +3519,9 @@ impl App {
 
     fn close_pane(&mut self, id: PaneId) {
         self.drop_leaf_runtime(id);
+        // Drop any live alias for the dead pane so a name never resolves to a
+        // reallocated pane id (agent_names is ephemeral by design).
+        self.agent_names.retain(|_, p| *p != id);
         // Auto-release any orchestration leases the dead pane held (ORCH-2), so a
         // crashed/closed worker can't hold file paths forever.
         let released = self.orch.release_pane_leases(id.0);
@@ -4362,6 +4461,26 @@ mod tests {
             .unwrap();
         assert_eq!(sess.agent, "claude");
         assert_eq!(sess.session_id, "abc-123");
+    }
+
+    /// A pane's live name (`pane name`) survives a restart: it is re-attached to
+    /// the pane's freshly allocated id on restore, so the sidebar/title keep it.
+    #[test]
+    fn pane_name_survives_a_restart() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+        app.set_agent_name(focus, Some("backend"));
+        assert_eq!(app.agent_name_for(focus), Some("backend"));
+
+        let json = serde_json::to_string(&persist::snapshot(&app)).unwrap();
+        let snap: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snap, tx2).expect("restore");
+
+        // The pane came back under a new id, but its name followed it.
+        let rid = restored.layout().focus;
+        assert_eq!(restored.agent_name_for(rid), Some("backend"));
     }
 
     /// Two agent panes in one folder must not both restore the *same* session.

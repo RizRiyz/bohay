@@ -35,16 +35,29 @@ tabs:
 
 panes / agents:
   pane list                  list panes in the current tab
-  pane split [<id>] [--down] split a pane (default: side by side)
+  pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane run [<id>] <cmd...>   run a command in a pane
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
   pane status [<id>]         print a pane's agent status (any workspace)
+  pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
+  agent start <name> --kind <k> [--pane <id>] [--down] [--timeout <s>] [-- <args>]
+                             spawn an agent in a sibling pane, wait until ready, name it
+  agent name <name>          alias the current agent, same as pane name (--clear to drop)
+  agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
+                             prompt an agent (target = a name, pane id, or kind)
+  agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
+  agent read <target> [--lines N] [--source visible|recent]   print an agent's output
+  agent get <target>         one agent's live info (pane, name, kind, status, cwd)
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
+  skill                      print the agent skill (teaches an agent to delegate)
+  skill install [--dir <p>]  install the skill where a coding agent auto-loads it
+  skill uninstall [--dir <p>]   remove the installed skill
+  skill on | off             enable / disable auto-install (installs / removes now)
   wait output <id> --match <text> [--timeout <s>]    block until output appears
   wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane

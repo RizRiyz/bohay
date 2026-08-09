@@ -225,6 +225,7 @@ pub(super) fn draw_agent_menu(
 fn agent_label(it: AgentMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
     match it {
         AgentMenuItem::Resume => cat.menu_resume.to_string(),
+        AgentMenuItem::RenamePane => cat.menu_rename.to_string(),
         AgentMenuItem::Close => cap_first(cat.act_close),
         AgentMenuItem::Divider => String::new(),
         AgentMenuItem::Module(i) => module_label(extras, i),
@@ -254,6 +255,7 @@ fn pane_label(it: PaneMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> S
         PaneMenuItem::OpenLink => cat.menu_open_link.to_string(),
         PaneMenuItem::OpenFile => cat.menu_open_file.to_string(),
         PaneMenuItem::RunningCmd => cat.menu_running_cmd.to_string(),
+        PaneMenuItem::RenamePane => cat.menu_rename.to_string(),
         // A trailing ▸ marks the row that opens the tabs submenu.
         PaneMenuItem::MoveToTab => format!("{} ▸", cat.menu_move_to_tab),
         PaneMenuItem::Divider => String::new(),

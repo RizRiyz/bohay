@@ -426,6 +426,12 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
+    // The pane-rename modal (same look), from the pane / AGENTS right-click menu.
+    if let Some(buf) = app.pane_rename.as_ref().map(|r| r.buffer.clone()) {
+        let (c, x) = picker::draw_pane_rename(f, area, &buf, hover, cat, &t);
+        app.modal_commit_rect = c;
+        app.modal_cancel_rect = x;
+    }
     if app.pane_menu.is_some() {
         menu::draw_pane_menu(f, area, app, cat, &t);
     }
@@ -524,6 +530,7 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         || app.worktree_prompt.is_some()
         || app.tab_rename.is_some()
         || app.ws_rename.is_some()
+        || app.pane_rename.is_some()
         || app.ws_menu.is_some()
         || app.pane_menu.is_some()
         || app.agent_menu.is_some()

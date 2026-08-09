@@ -47,6 +47,12 @@ pub fn run() -> Result<()> {
     // repaints the docks it owns (docs/13 §3.7).
     app.run_module_startup_hooks();
 
+    // Keep the bundled agent skill installed for Claude Code (idempotent), so
+    // agent-to-agent messaging works out of the box. Opt out via config.
+    if app.config.install_agent_skill {
+        let _ = crate::skill::install_default();
+    }
+
     // Background "update available" check (off if the user disabled it).
     if app.config.check_updates {
         crate::update::spawn_check(tx.clone());

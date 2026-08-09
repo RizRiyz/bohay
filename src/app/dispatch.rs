@@ -425,9 +425,8 @@ impl App {
                 Ok(json!({"type":"pane_list","panes":panes}))
             }
             "pane.split" => {
-                if let Some(id) = self.resolve_pane(p) {
-                    self.layout_mut().focus = id;
-                }
+                let base = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                self.layout_mut().focus = base;
                 let dir = p
                     .get("direction")
                     .and_then(|v| v.as_str())
@@ -439,6 +438,11 @@ impl App {
                 };
                 self.split(axis);
                 let new = self.layout().focus;
+                // `focus: false` keeps the caller's focus where it was (background
+                // split), instead of moving it to the new pane.
+                if p.get("focus").and_then(|v| v.as_bool()) == Some(false) {
+                    self.layout_mut().focus = base;
+                }
                 Ok(json!({"type":"pane","pane": new.0.to_string()}))
             }
             "pane.run" => {
@@ -713,6 +717,7 @@ impl App {
                             let session = s.agent_session.as_ref().map(|a| a.session_id.clone());
                             arr.push(json!({
                                 "pane": id.0.to_string(), "agent": s.agent,
+                                "name": self.agent_name_for(id),
                                 "status": state_str(s.state),
                                 "session": session,
                                 "workspace": wi.to_string(), "workspace_name": ws.name,
@@ -724,6 +729,128 @@ impl App {
                     }
                 }
                 Ok(json!({"type":"agent_list","agents":arr}))
+            }
+            // Give a pane's agent a live alias (or clear it) so `agent.send` /
+            // `agent.keys` / `agent.read` can address it by name. Ephemeral.
+            "agent.name" => {
+                let pane = self.resolve_pane(p).ok_or_else(not_found)?;
+                if p.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    self.set_agent_name(pane, None);
+                    return Ok(
+                        json!({"type":"agent_name","pane": pane.0.to_string(), "name": Value::Null}),
+                    );
+                }
+                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if !valid_agent_name(name) {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "name must match [a-z][a-z0-9_-]{0,31}".to_string(),
+                    ));
+                }
+                self.set_agent_name(pane, Some(name));
+                Ok(json!({"type":"agent_name","pane": pane.0.to_string(), "name": name}))
+            }
+            // Submit a prompt to a target agent: paste the text (bracketed when the
+            // child asked for it), then send Enter once the paste has landed.
+            "agent.send" => {
+                let id = self.resolve_agent_target(p)?;
+                if !self.is_agent_pane(id) {
+                    return Err((
+                        "agent_not_ready".to_string(),
+                        "target pane is not a running agent".to_string(),
+                    ));
+                }
+                let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "agent send text must not be empty".to_string(),
+                    ));
+                }
+                if let Some(pane) = self.panes.get(&id) {
+                    pane.send_paste(text);
+                    pane.send_after(b"\r".to_vec(), std::time::Duration::from_millis(45));
+                }
+                let (agent, status) = self
+                    .status
+                    .get(&id)
+                    .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
+                    .unwrap_or_default();
+                Ok(json!({"type":"agent_send","pane": id.0.to_string(),
+                          "agent": agent, "status": status, "name": self.agent_name_for(id)}))
+            }
+            // Send named control keys (enter, esc, ctrl+c, up, …) to a target agent,
+            // e.g. to answer a blocked approval prompt. All keys validate first.
+            "agent.keys" => {
+                let id = self.resolve_agent_target(p)?;
+                let keys: Vec<String> = p
+                    .get("keys")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|k| k.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if keys.is_empty() {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "agent keys needs at least one key".to_string(),
+                    ));
+                }
+                let mut seqs = Vec::with_capacity(keys.len());
+                for k in &keys {
+                    seqs.push(key_to_bytes(k).ok_or_else(|| {
+                        ("invalid_request".to_string(), format!("unknown key: {k}"))
+                    })?);
+                }
+                if let Some(pane) = self.panes.get(&id) {
+                    for b in seqs {
+                        pane.send(&b);
+                    }
+                }
+                Ok(json!({"type":"ok","pane": id.0.to_string()}))
+            }
+            // Read a target agent's output, addressed by name or pane id.
+            "agent.read" => {
+                let id = self.resolve_agent_target(p)?;
+                let lines = p.get("lines").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
+                // `visible` = the current screen; anything else = recent output
+                // (soft wraps joined), the default and best for transcripts.
+                let source = p.get("source").and_then(|v| v.as_str()).unwrap_or("recent");
+                let text = self
+                    .panes
+                    .get(&id)
+                    .and_then(|pane| {
+                        pane.engine.lock().ok().map(|e| {
+                            if source == "visible" {
+                                e.visible_rows().join("\n")
+                            } else {
+                                e.detection_text(lines)
+                            }
+                        })
+                    })
+                    .unwrap_or_default();
+                Ok(json!({"type":"agent_read","pane": id.0.to_string(), "text": text}))
+            }
+            // One agent's live info, resolved by name / pane id / kind — what to
+            // check before deciding how to answer a blocked agent.
+            "agent.get" => {
+                let id = self.resolve_agent_target(p)?;
+                let s = self.status.get(&id);
+                let cwd = self
+                    .panes
+                    .get(&id)
+                    .map(|pn| pn.cwd.display().to_string())
+                    .unwrap_or_default();
+                let (agent, status) = s
+                    .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
+                    .unwrap_or_default();
+                let session =
+                    s.and_then(|s| s.agent_session.as_ref().map(|a| a.session_id.clone()));
+                Ok(json!({"type":"agent","pane": id.0.to_string(),
+                          "name": self.agent_name_for(id), "agent": agent,
+                          "status": status, "session": session, "cwd": cwd}))
             }
             // Resumable sessions discovered on disk (the AGENTS sidebar list).
             "agent.sessions" => {
@@ -1426,6 +1553,83 @@ impl App {
         }
     }
 
+    /// The live alias pointing at `pane`, if any (set by `agent.name`). Reverse of
+    /// the `agent_names` map; the map is small, so a linear scan is fine.
+    pub(crate) fn agent_name_for(&self, pane: PaneId) -> Option<&str> {
+        self.agent_names
+            .iter()
+            .find_map(|(name, p)| (*p == pane).then_some(name.as_str()))
+    }
+
+    /// Whether `pane` currently hosts a recognised agent (detection) or a bound
+    /// agent session — the same test `agent.list` uses to decide what is an agent.
+    fn is_agent_pane(&self, pane: PaneId) -> bool {
+        self.status
+            .get(&pane)
+            .is_some_and(|s| self.manifests.is_agent(&s.agent) || s.agent_session.is_some())
+    }
+
+    /// Resolve an `agent.*` `target` param (a live alias or a numeric pane id) to a
+    /// pane that still exists. Readiness (is it an agent?) is left to the caller so
+    /// each method can return its own precise error.
+    fn resolve_agent_pane(&self, p: &Value) -> Option<PaneId> {
+        let t = p.get("target").and_then(|v| v.as_str())?;
+        self.agent_names
+            .get(t)
+            .copied()
+            .or_else(|| t.parse::<u32>().ok().map(PaneId))
+            .filter(|id| self.panes.contains_key(id))
+    }
+
+    /// Resolve a target to a single pane: a live alias, a numeric pane id, or an
+    /// agent **kind** (`claude`, `kimi`, …) when exactly one live agent is that
+    /// kind. Two agents of the same kind are ambiguous, so the error names the
+    /// candidates and asks for a pane id or a name.
+    fn resolve_agent_target(&self, p: &Value) -> Result<PaneId, (String, String)> {
+        let t = p.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        if t.is_empty() {
+            return Err(agent_not_found());
+        }
+        // An alias or pane id wins outright.
+        if let Some(id) = self.resolve_agent_pane(p) {
+            return Ok(id);
+        }
+        // Otherwise treat the target as an agent kind and match live agents.
+        let mut hits: Vec<PaneId> = Vec::new();
+        for ws in self.workspaces.iter() {
+            for tab in ws.tabs.iter() {
+                for id in tab.layout.leaves() {
+                    if self.status.get(&id).is_some_and(|s| s.agent == t) && self.is_agent_pane(id)
+                    {
+                        hits.push(id);
+                    }
+                }
+            }
+        }
+        match hits.as_slice() {
+            [] => Err(agent_not_found()),
+            [one] => Ok(*one),
+            many => {
+                let list = many
+                    .iter()
+                    .map(|id| {
+                        let cwd = self
+                            .panes
+                            .get(id)
+                            .map(|pn| pn.cwd.display().to_string())
+                            .unwrap_or_default();
+                        format!("p{} ({cwd})", id.0)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err((
+                    "ambiguous_target".to_string(),
+                    format!("{t} matches several agents ({list}). Use a pane id or a name."),
+                ))
+            }
+        }
+    }
+
     /// The cwd of the `workspace` param (else the active workspace) for git.* methods.
     fn git_workspace_cwd(&self, p: &Value) -> PathBuf {
         let i = param_usize(p, "workspace")
@@ -1440,6 +1644,66 @@ impl App {
 
 fn not_found() -> (String, String) {
     ("not_found".to_string(), "pane not found".to_string())
+}
+
+fn agent_not_found() -> (String, String) {
+    (
+        "not_found".to_string(),
+        "agent target not found".to_string(),
+    )
+}
+
+/// Live-alias grammar for `agent.name`: a leading lowercase letter, then up to 31
+/// more of `[a-z0-9_-]`, so a name is always a safe, unambiguous CLI token.
+fn valid_agent_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Map a key name (as `agent.keys` sends) to the bytes a terminal app expects:
+/// submit/cancel, arrows, edit keys, and `ctrl+<letter>`. A single printable
+/// character passes through as itself. `None` for anything unrecognised.
+fn key_to_bytes(name: &str) -> Option<Vec<u8>> {
+    let lower = name.to_ascii_lowercase();
+    let simple: &[u8] = match lower.as_str() {
+        "enter" | "return" | "cr" => b"\r",
+        "esc" | "escape" => b"\x1b",
+        "tab" => b"\t",
+        "space" => b" ",
+        "backspace" | "bs" => b"\x7f",
+        "delete" | "del" => b"\x1b[3~",
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "right" => b"\x1b[C",
+        "left" => b"\x1b[D",
+        "home" => b"\x1b[H",
+        "end" => b"\x1b[F",
+        "pageup" | "pgup" => b"\x1b[5~",
+        "pagedown" | "pgdn" => b"\x1b[6~",
+        _ => {
+            if let Some(rest) = lower
+                .strip_prefix("ctrl+")
+                .or_else(|| lower.strip_prefix("c-"))
+            {
+                let mut cs = rest.chars();
+                return match (cs.next(), cs.next()) {
+                    (Some(c), None) if c.is_ascii_alphabetic() => {
+                        Some(vec![(c.to_ascii_uppercase() as u8) & 0x1f])
+                    }
+                    _ => None,
+                };
+            }
+            let mut cs = name.chars();
+            return match (cs.next(), cs.next()) {
+                (Some(c), None) => Some(c.to_string().into_bytes()),
+                _ => None,
+            };
+        }
+    };
+    Some(simple.to_vec())
 }
 
 fn git_err(e: String) -> (String, String) {
@@ -1655,5 +1919,253 @@ mod tests {
             .dispatch("agent.list", &json!({}))
             .expect("agent.list ok");
         assert_eq!(out["agents"][0]["session"], "sess-42");
+    }
+
+    /// A live alias set by `agent.name` shows up in `agent.list` and resolves an
+    /// `agent.*` target, and closing the pane prunes it.
+    #[test]
+    fn agent_name_aliases_a_pane_and_resolves_a_target() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+
+        // Name it, then it appears on the listing and resolves by name.
+        app.dispatch(
+            "agent.name",
+            &json!({"pane": pane.0.to_string(), "name": "reviewer"}),
+        )
+        .expect("agent.name ok");
+        let out = app.dispatch("agent.list", &json!({})).unwrap();
+        assert_eq!(out["agents"][0]["name"], "reviewer");
+        assert_eq!(
+            app.resolve_agent_pane(&json!({"target": "reviewer"})),
+            Some(pane)
+        );
+        // A numeric pane id resolves too.
+        assert_eq!(
+            app.resolve_agent_pane(&json!({"target": pane.0.to_string()})),
+            Some(pane)
+        );
+
+        // An invalid grammar is refused.
+        assert!(app
+            .dispatch(
+                "agent.name",
+                &json!({"pane": pane.0.to_string(), "name": "Bad Name"})
+            )
+            .is_err());
+
+        // Closing the pane drops the alias.
+        app.close_pane(pane);
+        assert!(app.agent_names.is_empty());
+    }
+
+    #[test]
+    fn agent_send_requires_a_live_agent() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+
+        // A plain shell is not an agent: send is refused as not-ready.
+        let err = app
+            .dispatch(
+                "agent.send",
+                &json!({"target": pane.0.to_string(), "text": "hi"}),
+            )
+            .expect_err("shell is not an agent");
+        assert_eq!(err.0, "agent_not_ready");
+
+        // Once detected as an agent, the send is accepted and echoes the pane.
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let out = app
+            .dispatch(
+                "agent.send",
+                &json!({"target": pane.0.to_string(), "text": "review"}),
+            )
+            .expect("agent.send ok");
+        assert_eq!(out["pane"], pane.0.to_string());
+        assert_eq!(out["agent"], "claude");
+
+        // Empty text is refused; an unknown target is not found.
+        assert!(app
+            .dispatch(
+                "agent.send",
+                &json!({"target": pane.0.to_string(), "text": ""})
+            )
+            .is_err());
+        assert_eq!(
+            app.dispatch("agent.send", &json!({"target": "99999", "text": "x"}))
+                .unwrap_err()
+                .0,
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn a_target_resolves_by_kind_when_unique_and_is_ambiguous_when_not() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let a = app.layout().focus;
+        app.status.get_mut(&a).unwrap().agent = "claude".into();
+
+        // One claude: the kind resolves it directly.
+        assert_eq!(
+            app.resolve_agent_target(&json!({"target": "claude"})),
+            Ok(a)
+        );
+
+        // A second claude in a new pane makes the kind ambiguous.
+        app.split(crate::layout::Axis::Col);
+        let b = app.layout().focus;
+        app.status.get_mut(&b).unwrap().agent = "claude".into();
+        let err = app
+            .resolve_agent_target(&json!({"target": "claude"}))
+            .expect_err("two claudes are ambiguous");
+        assert_eq!(err.0, "ambiguous_target");
+
+        // A name still disambiguates.
+        app.agent_names.insert("web".into(), b);
+        assert_eq!(app.resolve_agent_target(&json!({"target": "web"})), Ok(b));
+        // And a kind with no live agent is simply not found.
+        assert_eq!(
+            app.resolve_agent_target(&json!({"target": "codex"}))
+                .unwrap_err()
+                .0,
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn agent_keys_validates_before_sending() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let t = pane.0.to_string();
+
+        app.dispatch("agent.keys", &json!({"target": t, "keys": ["enter"]}))
+            .expect("known keys ok");
+        // A bad key in the batch fails the whole call.
+        assert!(app
+            .dispatch(
+                "agent.keys",
+                &json!({"target": t, "keys": ["enter", "nope"]})
+            )
+            .is_err());
+        // No keys is a bad request.
+        assert!(app
+            .dispatch("agent.keys", &json!({"target": t, "keys": []}))
+            .is_err());
+    }
+
+    #[test]
+    fn key_names_map_to_terminal_bytes() {
+        assert_eq!(key_to_bytes("enter").as_deref(), Some(&b"\r"[..]));
+        assert_eq!(key_to_bytes("esc").as_deref(), Some(&b"\x1b"[..]));
+        assert_eq!(key_to_bytes("up").as_deref(), Some(&b"\x1b[A"[..]));
+        assert_eq!(key_to_bytes("ctrl+c").as_deref(), Some(&[0x03u8][..]));
+        assert_eq!(key_to_bytes("C-d").as_deref(), Some(&[0x04u8][..]));
+        assert_eq!(key_to_bytes("a").as_deref(), Some(&b"a"[..]));
+        assert!(key_to_bytes("f13").is_none());
+        assert!(key_to_bytes("ctrl+1").is_none());
+    }
+
+    #[test]
+    fn pane_rename_modal_sets_and_clears_the_name() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+
+        app.open_pane_rename(pane);
+        for c in "worker".chars() {
+            app.handle_pane_rename_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_pane_rename_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.agent_name_for(pane), Some("worker"));
+        assert!(app.pane_rename.is_none());
+
+        // Reopen pre-filled, then clear by emptying and committing.
+        app.open_pane_rename(pane);
+        assert_eq!(app.pane_rename.as_ref().unwrap().buffer, "worker");
+        for _ in 0..6 {
+            app.handle_pane_rename_key(KeyEvent::from(KeyCode::Backspace));
+        }
+        app.handle_pane_rename_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.agent_name_for(pane), None);
+    }
+
+    #[test]
+    fn pane_split_no_focus_keeps_the_caller_focused() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let base = app.layout().focus;
+
+        // Background split: a new pane appears, but focus stays on the caller.
+        let out = app
+            .dispatch("pane.split", &json!({"focus": false}))
+            .unwrap();
+        assert_ne!(out["pane"], base.0.to_string());
+        assert_eq!(app.layout().focus, base);
+
+        // Default split still moves focus to the new pane.
+        let out2 = app.dispatch("pane.split", &json!({})).unwrap();
+        assert_eq!(app.layout().focus.0.to_string(), out2["pane"]);
+    }
+
+    #[test]
+    fn agent_get_returns_one_agents_info() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        app.set_agent_name(pane, Some("worker"));
+
+        let out = app
+            .dispatch("agent.get", &json!({"target": "worker"}))
+            .expect("agent.get ok");
+        assert_eq!(out["pane"], pane.0.to_string());
+        assert_eq!(out["name"], "worker");
+        assert_eq!(out["agent"], "claude");
+        // Resolves by kind too.
+        let by_kind = app
+            .dispatch("agent.get", &json!({"target": "claude"}))
+            .unwrap();
+        assert_eq!(by_kind["pane"], pane.0.to_string());
+    }
+
+    #[test]
+    fn agent_read_accepts_a_source() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus.0.to_string();
+        for src in ["visible", "recent"] {
+            let out = app
+                .dispatch("agent.read", &json!({"target": pane, "source": src}))
+                .expect("agent.read ok");
+            assert!(out["text"].is_string(), "{src} returns text");
+        }
+    }
+
+    #[test]
+    fn rename_pane_is_offered_in_both_menus() {
+        use crate::app::{AgentMenu, AgentMenuItem, AgentTarget, PaneMenuItem};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(80, 24, tx).unwrap();
+        assert!(app.pane_menu_items().contains(&PaneMenuItem::RenamePane));
+        let pane = app.layout().focus;
+        assert!(AgentMenu::items_for(AgentTarget::Live(pane)).contains(&AgentMenuItem::RenamePane));
+    }
+
+    #[test]
+    fn agent_name_grammar_is_cli_safe() {
+        assert!(valid_agent_name("reviewer"));
+        assert!(valid_agent_name("a1_x-y"));
+        assert!(!valid_agent_name("")); // empty
+        assert!(!valid_agent_name("1abc")); // must start with a letter
+        assert!(!valid_agent_name("Bad")); // uppercase
+        assert!(!valid_agent_name("has space"));
+        assert!(!valid_agent_name(&"x".repeat(33))); // too long
     }
 }

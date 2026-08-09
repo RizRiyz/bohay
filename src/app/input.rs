@@ -180,6 +180,8 @@ impl App {
             Self::file_prompt_key
         } else if self.ws_rename.is_some() {
             Self::handle_ws_rename_key
+        } else if self.pane_rename.is_some() {
+            Self::handle_pane_rename_key
         } else if self.orch_form.is_some() {
             Self::handle_orch_form_key
         } else {
@@ -406,6 +408,12 @@ impl App {
         if self.ws_rename.is_some() {
             if let Some(k) = self.modal_button_key(&m) {
                 self.handle_ws_rename_key(k);
+            }
+            return;
+        }
+        if self.pane_rename.is_some() {
+            if let Some(k) = self.modal_button_key(&m) {
+                self.handle_pane_rename_key(k);
             }
             return;
         }
@@ -1483,6 +1491,10 @@ impl App {
         // The touch switcher overlay (docs/18) owns input while open.
         if self.switcher {
             self.switcher_key(key);
+            return true;
+        }
+        if self.pane_rename.is_some() {
+            self.handle_pane_rename_key(key);
             return true;
         }
         if self.ws_rename.is_some() {

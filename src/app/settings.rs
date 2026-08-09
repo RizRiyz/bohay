@@ -80,6 +80,7 @@ pub enum LayoutRow {
     RowGap,
     Scrollback,
     PaneTitles,
+    PaneTitlePath,
     ResumeWs,
     #[cfg(windows)]
     Shell,
@@ -147,6 +148,7 @@ impl App {
             LayoutRow::RowGap,
             LayoutRow::Scrollback,
             LayoutRow::PaneTitles,
+            LayoutRow::PaneTitlePath,
             LayoutRow::ResumeWs,
         ];
         #[cfg(windows)]
@@ -608,6 +610,10 @@ impl App {
             }
             LayoutRow::PaneTitles => {
                 self.config.layout.show_titles = !self.config.layout.show_titles;
+                config::save(&self.config);
+            }
+            LayoutRow::PaneTitlePath => {
+                self.config.layout.pane_title_path = !self.config.layout.pane_title_path;
                 config::save(&self.config);
             }
             LayoutRow::ResumeWs => {

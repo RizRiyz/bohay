@@ -223,6 +223,18 @@ pub(super) fn draw_ws_rename(
     draw_rename(f, area, cat.menu_rename, buf, hover, cat, t)
 }
 
+/// The pane-rename modal (same look as the workspace/tab rename).
+pub(super) fn draw_pane_rename(
+    f: &mut RenderTarget,
+    area: Rect,
+    buf: &str,
+    hover: Option<(u16, u16)>,
+    cat: &Catalog,
+    t: &Theme,
+) -> (Option<Rect>, Option<Rect>) {
+    draw_rename(f, area, cat.menu_rename, buf, hover, cat, t)
+}
+
 /// Shared single-field rename modal (tab / workspace): a title, an editable
 /// buffer, and the clickable ⏎/esc footer hints. Returns each hint's rect.
 fn draw_rename(

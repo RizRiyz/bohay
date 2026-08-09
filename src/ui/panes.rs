@@ -62,14 +62,30 @@ pub(super) fn draw_pane_titles(
         let inner_w = rect.width - 2; // inside the two corner cells
         let btn_w = title_buttons_w(focused, rect.width);
         let title_w = inner_w.saturating_sub(btn_w);
-        let path = short_path(&pane.cwd, title_w.saturating_sub(4));
-        let text_w = (3 + path.chars().count() as u16).min(title_w);
+        // A named pane (via `pane name` / `agent name`) shows its name here; an
+        // unnamed pane shows its cwd path. So naming a pane visibly renames it.
+        // With `pane_title_path` on, a named pane shows `name  path` (both).
+        let label = match app.agent_name_for(*id) {
+            Some(name) if app.config.layout.pane_title_path => {
+                let path = short_path(&pane.cwd, title_w.saturating_sub(4 + name.len() as u16 + 2));
+                format!("{name}  {path}")
+                    .chars()
+                    .take(title_w.saturating_sub(4) as usize)
+                    .collect::<String>()
+            }
+            Some(name) => name
+                .chars()
+                .take(title_w.saturating_sub(4) as usize)
+                .collect::<String>(),
+            None => short_path(&pane.cwd, title_w.saturating_sub(4)),
+        };
+        let text_w = (3 + label.chars().count() as u16).min(title_w);
         let title = Line::from(vec![
             Span::styled(
                 format!(" {} ", st.dot()),
                 Style::new().fg(st.color(t)).bg(bg),
             ),
-            Span::styled(path, Style::new().fg(path_fg).bg(bg)),
+            Span::styled(label, Style::new().fg(path_fg).bg(bg)),
         ]);
         let title_rect = Rect::new(rect.x + 1, rect.y, text_w, 1);
         f.render_widget(Paragraph::new(title), title_rect);
