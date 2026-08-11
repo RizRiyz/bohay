@@ -1587,10 +1587,17 @@ impl App {
                     // the pane opens straight into the resuming agent (nothing
                     // visibly typed); an unrecognised shell family falls back
                     // to typing the command after spawn.
-                    let resume = ps
-                        .agent_session
-                        .as_ref()
-                        .and_then(|(agent, sid)| crate::agent::resume_command(agent, sid));
+                    let resume =
+                        ps.agent_session
+                            .as_ref()
+                            .and_then(|(agent, sid)| match &ps.agent_launch {
+                                // Re-apply the launch flags captured at save time
+                                // (docs/62); falls back to the plain resume command.
+                                Some(flags) => {
+                                    crate::agent::resume_command_with_flags(agent, sid, flags)
+                                }
+                                None => crate::agent::resume_command(agent, sid),
+                            });
                     let resume_argv = resume.as_deref().and_then(|r| {
                         crate::platform::shell_run_then_interactive(&shell, r.trim())
                     });
@@ -4481,6 +4488,54 @@ mod tests {
         // The pane came back under a new id, but its name followed it.
         let rid = restored.layout().focus;
         assert_eq!(restored.agent_name_for(rid), Some("backend"));
+    }
+
+    /// The flags an agent pane was launched with (docs/62) are pulled from the
+    /// captured process argv into the snapshot, and survive a JSON round-trip. An
+    /// older snapshot with no such field loads as `None` (serde default), so the
+    /// change is backward compatible.
+    #[test]
+    fn agent_launch_flags_are_captured_in_the_snapshot() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+        // Stand in for the detection scan: a claude pane started with flags.
+        app.status.get_mut(&focus).unwrap().agent = "claude".into();
+        app.proc_commands.insert(
+            focus,
+            vec!["claude --model opus --permission-mode bypassPermissions".into()],
+        );
+
+        let launch_of = |snap: &SessionSnapshot| -> Option<Vec<String>> {
+            snap.workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .find(|(id, _)| *id == focus.0)
+                .and_then(|(_, ps)| ps.agent_launch.clone())
+        };
+
+        let snap = persist::snapshot(&app);
+        assert_eq!(
+            launch_of(&snap),
+            Some(vec![
+                "--model".into(),
+                "opus".into(),
+                "--permission-mode".into(),
+                "bypassPermissions".into(),
+            ])
+        );
+
+        // Survives serialization.
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(launch_of(&back).unwrap().len(), 4);
+
+        // A PaneSnap written before this field existed still loads (serde default
+        // -> None), so old sessions are unaffected.
+        let old: persist::PaneSnap =
+            serde_json::from_str(r#"{"cwd":"/tmp/x","command":"sh"}"#).unwrap();
+        assert_eq!(old.agent_launch, None);
     }
 
     /// Two agent panes in one folder must not both restore the *same* session.

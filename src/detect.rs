@@ -763,6 +763,41 @@ impl Manifests {
         None
     }
 
+    /// The launch flags an agent pane was started with: the argv tokens **after**
+    /// the agent's own token in its command line, in original case (docs/62).
+    /// Mirrors `agent_in_processes` -- the same per-token binary match and the
+    /// same interpreter unwrap (`node .../cli.js --flag`) -- but returns the tail
+    /// for the requested agent instead of a name. `None` when no running command
+    /// line belongs to that agent, so a pane bohay cannot pin to it captures
+    /// nothing rather than guessing.
+    pub fn launch_args_for(&self, running: &[String], agent: &str) -> Option<Vec<String>> {
+        for cmd in running {
+            let tokens: Vec<&str> = cmd.split_whitespace().collect();
+            let Some((first, rest)) = tokens.split_first() else {
+                continue;
+            };
+            let first_low = first.to_lowercase();
+            if self.match_binary(binary_name(&first_low)).as_deref() == Some(agent) {
+                return Some(rest.iter().map(|s| s.to_string()).collect());
+            }
+            // Interpreter form: the agent token is the first non-flag argument,
+            // and nothing before it is a launch flag.
+            if is_interpreter(binary_name(&first_low)) {
+                for (i, t) in rest.iter().enumerate() {
+                    if t.starts_with('-') {
+                        continue;
+                    }
+                    let t_low = t.to_lowercase();
+                    if self.match_binary(binary_name(&t_low)).as_deref() == Some(agent) {
+                        return Some(rest[(i + 1)..].iter().map(|s| s.to_string()).collect());
+                    }
+                    break; // the first non-flag arg is the script slot; nothing later counts
+                }
+            }
+        }
+        None
+    }
+
     /// The agent whose patterns name exactly this binary.
     fn match_binary(&self, base: &str) -> Option<String> {
         self.agents
@@ -879,6 +914,46 @@ mod tests {
             &Manifests::builtin(),
         )
         .state
+    }
+
+    #[test]
+    fn launch_args_extracted_after_the_agent_token() {
+        let m = Manifests::builtin();
+        // Direct binary at an absolute path; original case is preserved.
+        assert_eq!(
+            m.launch_args_for(
+                &[
+                    "/opt/homebrew/bin/claude --model Opus --permission-mode bypassPermissions"
+                        .into()
+                ],
+                "claude",
+            ),
+            Some(vec![
+                "--model".into(),
+                "Opus".into(),
+                "--permission-mode".into(),
+                "bypassPermissions".into(),
+            ])
+        );
+        // Interpreter form: the tail starts after the script slot that names the
+        // agent, and the interpreter's own args before it are ignored.
+        assert_eq!(
+            m.launch_args_for(
+                &["python /usr/local/bin/aider --model gpt-4o --yes".into()],
+                "aider"
+            ),
+            Some(vec!["--model".into(), "gpt-4o".into(), "--yes".into()])
+        );
+        // A plain shell, and a different agent, both yield nothing for claude.
+        assert!(m.launch_args_for(&["zsh -l".into()], "claude").is_none());
+        assert!(m
+            .launch_args_for(&["codex --model o".into()], "claude")
+            .is_none());
+        // An agent launched with no flags yields an empty tail (Some, not None).
+        assert_eq!(
+            m.launch_args_for(&["claude".into()], "claude"),
+            Some(vec![])
+        );
     }
 
     #[test]

@@ -279,6 +279,72 @@ pub fn resume_command(agent: &str, session_id: &str) -> Option<String> {
     Some((src.resume)(&q))
 }
 
+/// Strip the session-selection flags from a captured launch argv (docs/62) so
+/// replaying it cannot fight the fresh `--resume <id>` bohay injects or re-fork
+/// the pane. Every other flag is kept verbatim, so unknown future flags survive
+/// untouched. Value-taking selectors also swallow the following bareword value.
+fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
+    const TAKES_VALUE: &[&str] = &["--resume", "-r", "--session", "--session-id", "--fork"];
+    const STANDALONE: &[&str] = &["--continue", "--fork-session", "--print", "-p"];
+
+    let mut i = 0;
+    // Codex selects a session with a positional `resume <id>` subcommand rather
+    // than a flag, so drop it when it leads the captured argv.
+    if agent == "codex" && launch.first().map(String::as_str) == Some("resume") {
+        i = 1;
+        if launch.get(1).is_some_and(|v| !v.starts_with('-')) {
+            i = 2;
+        }
+    }
+    let mut out = Vec::new();
+    while i < launch.len() {
+        let t = launch[i].as_str();
+        let head = t.split('=').next().unwrap_or(t);
+        if t.contains('=') && TAKES_VALUE.contains(&head) {
+            i += 1; // glued form, e.g. --resume=<id>
+            continue;
+        }
+        if TAKES_VALUE.contains(&t) {
+            i += 1;
+            if launch.get(i).is_some_and(|v| !v.starts_with('-')) {
+                i += 1; // swallow the value
+            }
+            continue;
+        }
+        if STANDALONE.contains(&t) {
+            i += 1;
+            continue;
+        }
+        out.push(launch[i].clone());
+        i += 1;
+    }
+    out
+}
+
+/// Like [`resume_command`], but re-applies the flags the pane was launched with
+/// (docs/62). Session-selection flags are filtered first so they cannot conflict
+/// with the fresh session id, then each kept flag is shell-quoted and appended
+/// after the resume reference, where every supported agent accepts trailing
+/// flags. Falls back to the plain resume command when nothing survives the filter.
+pub fn resume_command_with_flags(
+    agent: &str,
+    session_id: &str,
+    launch: &[String],
+) -> Option<String> {
+    let base = resume_command(agent, session_id)?;
+    let extra = filter_launch_flags(agent, launch);
+    if extra.is_empty() {
+        return Some(base);
+    }
+    let quoted = extra
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = base.trim_end_matches(['\r', '\n']);
+    Some(format!("{body} {quoted}\r"))
+}
+
 /// The command that **forks** an agent's session: continue from the original's
 /// full context in a new, diverging session (the original is left untouched).
 /// `None` for agents without a native fork, unknown agents, or unsafe ids.
@@ -1322,6 +1388,78 @@ mod tests {
         assert!(recent
             .iter()
             .any(|s| s.cwd == Path::new("/very/long/path/to/api")));
+    }
+
+    #[test]
+    fn launch_flag_filter_drops_session_selection() {
+        let f = |a: &str, v: &[&str]| {
+            filter_launch_flags(a, &v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        // A stale `--resume <id>` (captured from a pane bohay itself resumed) is
+        // dropped with its value; the real flags survive.
+        assert_eq!(
+            f("claude", &["--resume", "old-id", "--model", "opus"]),
+            vec!["--model", "opus"]
+        );
+        // Glued form.
+        assert_eq!(
+            f("copilot", &["--resume=old", "--banner"]),
+            vec!["--banner"]
+        );
+        // Standalone selectors, a fork flag, and one-shot print mode all go.
+        assert_eq!(
+            f(
+                "claude",
+                &["--continue", "--fork-session", "-p", "--verbose"]
+            ),
+            vec!["--verbose"]
+        );
+        // Codex selects a session with a positional `resume <id>` subcommand.
+        assert_eq!(
+            f("codex", &["resume", "sess_9", "--model", "o3"]),
+            vec!["--model", "o3"]
+        );
+        // A kept flag keeps its value.
+        assert_eq!(
+            f("claude", &["--permission-mode", "bypassPermissions"]),
+            vec!["--permission-mode", "bypassPermissions"]
+        );
+        // Nothing worth keeping.
+        assert!(f("claude", &["--resume", "id"]).is_empty());
+        assert!(f("claude", &[]).is_empty());
+    }
+
+    #[test]
+    fn resume_command_with_flags_appends_kept_flags() {
+        let launch = ["--resume", "abc", "--model", "opus"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let cmd = resume_command_with_flags("claude", "abc", &launch).unwrap();
+        // The id still comes from resume_command; kept flags follow, \r preserved.
+        assert!(cmd.starts_with("claude --resume 'abc'"));
+        assert!(cmd.contains("'--model' 'opus'"));
+        assert!(cmd.ends_with('\r'));
+        // The stale captured --resume was filtered: exactly one resume id remains.
+        assert_eq!(cmd.matches("--resume").count(), 1);
+
+        // All-filtered input and empty input both fall back to the plain command.
+        let base = resume_command("claude", "abc").unwrap();
+        let only_sel = ["--resume", "abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resume_command_with_flags("claude", "abc", &only_sel).unwrap(),
+            base
+        );
+        assert_eq!(
+            resume_command_with_flags("claude", "abc", &[]).unwrap(),
+            base
+        );
+
+        // Unknown agent is None, exactly like resume_command.
+        assert!(resume_command_with_flags("nope", "x", &["--model".into()]).is_none());
     }
 
     #[test]

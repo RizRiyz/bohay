@@ -70,7 +70,7 @@ impl Theme {
             overlay1: rgb(0x80, 0x87, 0xa2),
             subtext0: rgb(0xa5, 0xad, 0xcb),
             subtext1: rgb(0xb8, 0xc0, 0xe0),
-            text: rgb(0xca, 0xd3, 0xf5),   // white (Catppuccin Macchiato text)
+            text: rgb(0xca, 0xd3, 0xf5), // white (Catppuccin Macchiato text)
             accent: rgb(0xdb, 0xc6, 0x6f), // rally gold — brand, focus, selected
             sel_bg: rgb(0x3a, 0x34, 0x16), // dark gold selection
             border: rgb(0x49, 0x4d, 0x64),

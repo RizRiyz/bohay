@@ -63,6 +63,11 @@ pub struct PaneSnap {
     /// (agent, session_id) for native resume, if reported.
     #[serde(default)]
     pub agent_session: Option<(String, String)>,
+    /// The launch flags the agent pane was started with (argv after the agent
+    /// token, docs/62), replayed after the resume reference on restore. Session
+    /// selection flags are filtered at replay, so the stored list stays faithful.
+    #[serde(default)]
+    pub agent_launch: Option<Vec<String>>,
     /// The visible screen as ANSI, replayed on restore.
     #[serde(default)]
     pub screen: Option<String>,
@@ -377,6 +382,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                 command: String::new(),
                                 name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session: None,
+                                agent_launch: None,
                                 screen: None,
                                 module: None,
                                 file: Some(v.path.clone()),
@@ -387,6 +393,21 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                         // Resolved once for the whole snapshot so no two panes
                         // can claim the same session (see `resolve_pane_sessions`).
                         let agent_session = sessions.get(&id).cloned().flatten();
+                        // The flags the agent was launched with, pulled from the
+                        // live process argv the detection scan already captured
+                        // (docs/62). Only for a recognized agent; a plain shell's
+                        // argv never matches, so it stays None.
+                        let agent_launch = app
+                            .status
+                            .get(&id)
+                            .map(|s| s.agent.as_str())
+                            .filter(|k| app.manifests.is_agent(k))
+                            .and_then(|k| {
+                                app.proc_commands
+                                    .get(&id)
+                                    .and_then(|cmds| app.manifests.launch_args_for(cmds, k))
+                            })
+                            .filter(|v| !v.is_empty());
                         // Capture the visible screen (cap size to keep saves light).
                         let screen = p
                             .engine
@@ -405,6 +426,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                                 command: p.command.clone(),
                                 name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session,
+                                agent_launch,
                                 screen,
                                 module,
                                 file: None,
