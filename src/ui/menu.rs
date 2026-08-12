@@ -226,6 +226,8 @@ fn agent_label(it: AgentMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) ->
     match it {
         AgentMenuItem::Resume => cat.menu_resume.to_string(),
         AgentMenuItem::RenamePane => cat.menu_rename.to_string(),
+        AgentMenuItem::Pin => cat.menu_pin.to_string(),
+        AgentMenuItem::Unpin => cat.menu_unpin.to_string(),
         AgentMenuItem::Close => cap_first(cat.act_close),
         AgentMenuItem::Divider => String::new(),
         AgentMenuItem::Module(i) => module_label(extras, i),
@@ -234,6 +236,8 @@ fn agent_label(it: AgentMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) ->
 
 fn ws_label(it: WsMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> String {
     match it {
+        WsMenuItem::Pin => cat.menu_pin.to_string(),
+        WsMenuItem::Unpin => cat.menu_unpin.to_string(),
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
         WsMenuItem::DeleteWorktree => cat.menu_delete_worktree.to_string(),

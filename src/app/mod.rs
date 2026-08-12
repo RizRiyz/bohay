@@ -390,6 +390,8 @@ pub struct WsMenu {
 /// (docs/13 §3.8), resolved against the live registry when clicked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WsMenuItem {
+    Pin,
+    Unpin,
     Close,
     Rename,
     /// Delete a **linked worktree** and its files (git worktree remove + folder).
@@ -620,6 +622,9 @@ pub enum AgentMenuItem {
     /// "Rename" a live agent's pane (sets its live name). Live agents only.
     RenamePane,
     Close,
+    /// Pin a live agent to the top of the AGENTS list (per-session).
+    Pin,
+    Unpin,
     Divider,
     /// The `i`-th module action declaring `contexts = ["agent"]` (docs/13 §3.8).
     Module(usize),
@@ -720,6 +725,8 @@ pub struct Workspace {
     pub worktree: Option<crate::git::WorktreeMembership>,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// Pinned to the top of the WORKSPACES list (right-click → Pin). Persisted.
+    pub pinned: bool,
 }
 
 /// A native agent session reported by an integration hook (M6), used to resume
@@ -954,6 +961,10 @@ pub struct App {
     pub pane_menu: Option<PaneMenu>,
     /// Active AGENTS-list context menu (right-click a row); `None` when closed.
     pub agent_menu: Option<AgentMenu>,
+    /// Live agents pinned to the top of the AGENTS list (right-click → Pin).
+    /// Per-session: pane ids are reallocated each run, so this is not persisted;
+    /// pruned when a pane closes.
+    pub pinned_agents: std::collections::HashSet<PaneId>,
     pub ws_rename: Option<WsRename>,
     /// The pane-rename modal (`Some` ⇒ open, captures input).
     pub pane_rename: Option<PaneRename>,
@@ -1316,6 +1327,7 @@ impl App {
                 cwd,
                 branch: None,
                 git_ahead_behind: None,
+                pinned: false,
                 tabs: vec![Tab::panes(TileLayout::new(id))],
                 active_tab: 0,
             }],
@@ -1340,6 +1352,7 @@ impl App {
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
             modal_commit_rect: None,
@@ -1709,6 +1722,7 @@ impl App {
                 cwd: ws.cwd,
                 branch: None,
                 git_ahead_behind: None,
+                pinned: ws.pinned,
                 tabs,
                 active_tab,
             });
@@ -1755,6 +1769,7 @@ impl App {
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
             modal_commit_rect: None,
@@ -2344,6 +2359,7 @@ impl App {
             cwd,
             branch,
             git_ahead_behind: None,
+            pinned: false,
             tabs: vec![Tab::panes(TileLayout::new(id))],
             active_tab: 0,
         });
@@ -2363,17 +2379,39 @@ impl App {
     /// is_member)` where `index` is the position in `self.workspaces` (kept for
     /// hit-testing) and `is_member` marks a nested worktree row.
     pub fn workspace_display_order(&self) -> Vec<(usize, bool)> {
-        let nodes: Vec<(Option<&std::path::Path>, bool)> = self
-            .workspaces
-            .iter()
-            .map(|w| {
-                (
-                    w.worktree.as_ref().map(|m| m.common_dir.as_path()),
-                    w.worktree.as_ref().is_some_and(|m| m.linked),
-                )
+        let order = {
+            let nodes: Vec<(Option<&std::path::Path>, bool)> = self
+                .workspaces
+                .iter()
+                .map(|w| {
+                    (
+                        w.worktree.as_ref().map(|m| m.common_dir.as_path()),
+                        w.worktree.as_ref().is_some_and(|m| m.linked),
+                    )
+                })
+                .collect();
+            group_worktrees(&nodes)
+        };
+        // Pinned nodes (with their worktree group) float to the top. Keyed by the
+        // group *leader* (the parent node, since children follow it in `order`),
+        // and stably sorted so each group's internal order and the unpinned order
+        // are preserved.
+        let mut leader = 0usize;
+        let mut keyed: Vec<(bool, usize, bool)> = order
+            .into_iter()
+            .map(|(idx, is_child)| {
+                if !is_child {
+                    leader = idx;
+                }
+                let pinned = self.workspaces.get(leader).is_some_and(|w| w.pinned);
+                (!pinned, idx, is_child) // !pinned => pinned groups sort first
             })
             .collect();
-        group_worktrees(&nodes)
+        keyed.sort_by_key(|&(k, _, _)| k);
+        keyed
+            .into_iter()
+            .map(|(_, idx, is_child)| (idx, is_child))
+            .collect()
     }
 
     /// Create a git worktree for `branch` off `repo` and open it as a workspace
@@ -2490,7 +2528,12 @@ impl App {
         let is_worktree = ws
             .and_then(|w| w.worktree.as_ref())
             .is_some_and(|m| m.linked);
-        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename];
+        let pin = if ws.is_some_and(|w| w.pinned) {
+            WsMenuItem::Unpin
+        } else {
+            WsMenuItem::Pin
+        };
+        let mut items = vec![WsMenuItem::Close, WsMenuItem::Rename, pin];
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -2550,6 +2593,15 @@ impl App {
     /// declaring `contexts = ["agent"]`.
     pub fn agent_menu_items(&self, target: AgentTarget) -> Vec<AgentMenuItem> {
         let mut items = AgentMenu::items_for(target);
+        // A live agent can be pinned to the top of the AGENTS list, below its
+        // Rename/Close actions (per-session, since pane ids are reallocated).
+        if let AgentTarget::Live(id) = target {
+            items.push(if self.pinned_agents.contains(&id) {
+                AgentMenuItem::Unpin
+            } else {
+                AgentMenuItem::Pin
+            });
+        }
         let extras = self
             .agent_menu
             .as_ref()
@@ -2589,6 +2641,14 @@ impl App {
         let cwd = self.workspaces.get(index).map(|w| w.cwd.clone());
         match item {
             WsMenuItem::Divider => {}
+            // Pin/Unpin the right-clicked node: float it to the top of the list
+            // (docs), persisted across restarts.
+            WsMenuItem::Pin | WsMenuItem::Unpin => {
+                if let Some(w) = self.workspaces.get_mut(index) {
+                    w.pinned = item == WsMenuItem::Pin;
+                    self.session_dirty = true;
+                }
+            }
             // The right-clicked node, which needn't be the focused one.
             WsMenuItem::Module(i) => {
                 if let Some(a) = actions.get(i).cloned() {
@@ -3015,7 +3075,14 @@ impl App {
             }
             (AgentMenuItem::RenamePane, AgentTarget::Live(id)) => self.open_pane_rename(id),
             (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {} // no live pane
-            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {}        // n/a for a live agent
+            (AgentMenuItem::Pin, AgentTarget::Live(id)) => {
+                self.pinned_agents.insert(id);
+            }
+            (AgentMenuItem::Unpin, AgentTarget::Live(id)) => {
+                self.pinned_agents.remove(&id);
+            }
+            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {} // no pane
+            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
             (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("agent", a, Target::pane(id));
@@ -3230,6 +3297,7 @@ impl App {
                 cwd: s.cwd.clone(),
                 branch,
                 git_ahead_behind: None,
+                pinned: false,
                 worktree: worktree_membership(&s.cwd),
                 tabs: vec![tab],
                 active_tab: 0,
@@ -3539,6 +3607,8 @@ impl App {
         // Drop any live alias for the dead pane so a name never resolves to a
         // reallocated pane id (agent_names is ephemeral by design).
         self.agent_names.retain(|_, p| *p != id);
+        // Drop an agent pin for the dead pane (per-session, id-keyed).
+        self.pinned_agents.remove(&id);
         // Auto-release any orchestration leases the dead pane held (ORCH-2), so a
         // crashed/closed worker can't hold file paths forever.
         let released = self.orch.release_pane_leases(id.0);
@@ -4498,6 +4568,58 @@ mod tests {
         // The pane came back under a new id, but its name followed it.
         let rid = restored.layout().focus;
         assert_eq!(restored.agent_name_for(rid), Some("backend"));
+    }
+
+    #[test]
+    fn ws_menu_pins_and_unpins_and_floats_to_top() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // A fresh node is unpinned, so the menu offers "Pin".
+        assert!(app.ws_menu_items(0).contains(&WsMenuItem::Pin));
+        assert!(!app.ws_menu_items(0).contains(&WsMenuItem::Unpin));
+
+        // Pin it via the right-click action.
+        app.open_ws_menu(0, 0, 0);
+        app.ws_menu_action(WsMenuItem::Pin);
+        assert!(app.workspaces[0].pinned, "pinned after Pin");
+        // Now the menu offers "Unpin" instead.
+        assert!(app.ws_menu_items(0).contains(&WsMenuItem::Unpin));
+        // A pinned node sorts to the front of the display order.
+        assert_eq!(
+            app.workspace_display_order().first().map(|&(i, _)| i),
+            Some(0)
+        );
+
+        // Unpin restores it.
+        app.open_ws_menu(0, 0, 0);
+        app.ws_menu_action(WsMenuItem::Unpin);
+        assert!(!app.workspaces[0].pinned, "unpinned after Unpin");
+    }
+
+    #[test]
+    fn agent_menu_pins_and_unpins_a_live_agent() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        // A live agent's menu offers Pin (below Rename/Close); a session cannot pin.
+        assert!(app
+            .agent_menu_items(AgentTarget::Live(id))
+            .contains(&AgentMenuItem::Pin));
+        assert!(!app
+            .agent_menu_items(AgentTarget::Session(0))
+            .contains(&AgentMenuItem::Pin));
+
+        app.open_agent_menu(AgentTarget::Live(id), 0, 0);
+        app.agent_menu_action(AgentMenuItem::Pin);
+        assert!(app.pinned_agents.contains(&id), "pinned");
+        // Now the menu offers Unpin.
+        assert!(app
+            .agent_menu_items(AgentTarget::Live(id))
+            .contains(&AgentMenuItem::Unpin));
+
+        app.open_agent_menu(AgentTarget::Live(id), 0, 0);
+        app.agent_menu_action(AgentMenuItem::Unpin);
+        assert!(!app.pinned_agents.contains(&id), "unpinned");
     }
 
     /// The flags an agent pane was launched with (docs/62) are pulled from the

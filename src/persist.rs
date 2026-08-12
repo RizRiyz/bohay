@@ -28,6 +28,9 @@ pub struct WsSnap {
     pub cwd: PathBuf,
     pub active_tab: usize,
     pub tabs: Vec<TabSnap>,
+    /// Pinned to the top of the WORKSPACES list (right-click → Pin).
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -458,6 +461,7 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
             cwd: ws.cwd.clone(),
             active_tab: ws.active_tab,
             tabs,
+            pinned: ws.pinned,
         });
     }
     SessionSnapshot {

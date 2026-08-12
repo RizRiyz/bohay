@@ -552,6 +552,9 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             }
         }
     }
+    // Pinned agents (right-click → Pin) float to the top; a stable sort keeps the
+    // rest in workspace/tab order.
+    live.sort_by_key(|(id, _)| !app.pinned_agents.contains(id));
     // In "Active" mode, hide the on-disk resumable session history.
     let atotal = if active_only {
         live.len()
@@ -623,11 +626,22 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                     .agent_name_for(id)
                     .map(|n| format!("@{n}"))
                     .unwrap_or_else(|| format!("p{}", id.0));
+                // When enabled, show the agent's live session title (its OSC
+                // title, e.g. "Ship the desktop release…") in place of the meta
+                // line; fall back to it when the agent set no useful title.
+                let meta = app
+                    .config
+                    .layout
+                    .agent_title
+                    .then(|| app.pane_title(id))
+                    .flatten()
+                    .map(|ttl| format!("  {ttl}"))
+                    .unwrap_or_else(|| format!("  {wsname} · {mention}"));
                 line_at(
                     f,
                     y + 1,
                     Line::from(Span::styled(
-                        crate::ui::truncate(&format!("  {wsname} · {mention}"), cw as usize),
+                        crate::ui::truncate(&meta, cw as usize),
                         Style::new().fg(if focused { t.subtext0 } else { t.overlay0 }),
                     )),
                 );

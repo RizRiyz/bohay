@@ -102,6 +102,8 @@ pub enum GeneralRow {
     CheckUpdates,
     /// Replay each agent's own CLI options on resume (docs/62).
     ResumeFlags,
+    /// Show each agent's live session title in the AGENTS sidebar.
+    AgentTitle,
     SoundDone,
     SoundBlocked,
     TestSound,
@@ -128,6 +130,7 @@ impl App {
             GeneralRow::ShiftEnter,
             GeneralRow::CheckUpdates,
             GeneralRow::ResumeFlags,
+            GeneralRow::AgentTitle,
             GeneralRow::SoundDone,
             GeneralRow::SoundBlocked,
             GeneralRow::TestSound,
@@ -199,6 +202,12 @@ impl App {
         self.changelog_open = true;
         self.changelog_scroll = 0;
         self.changelog_rows = None; // rebuilt on the next draw
+                                    // Ask again while the window is open. Opening the changelog *is* the
+                                    // question "am I current?", and the periodic check may not have come
+                                    // round since the release landed.
+        if self.config.check_updates {
+            crate::update::check_now(self.app_tx.clone());
+        }
     }
 
     /// Number of selectable control rows in `tab` (for cursor clamping + render).
@@ -776,6 +785,10 @@ impl App {
                 self.config.resume_launch_flags = !self.config.resume_launch_flags;
                 config::save(&self.config);
             }
+            Some(GeneralRow::AgentTitle) => {
+                self.config.layout.agent_title = !self.config.layout.agent_title;
+                config::save(&self.config);
+            }
             Some(GeneralRow::SoundDone) => {
                 self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done;
                 config::save(&self.config);
@@ -881,7 +894,7 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 8);
+        assert_eq!(app.settings_rows(SettingsTab::General), 9);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
 

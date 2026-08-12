@@ -28,26 +28,48 @@ fn manifest_url() -> String {
     std::env::var("BOHAY_UPDATE_MANIFEST").unwrap_or_else(|_| MANIFEST_URL.to_string())
 }
 
-/// Spawn the background checker: one check shortly after startup, then once a day
-/// for a long-lived session. Sends [`AppEvent::UpdateAvailable`] only when the
-/// manifest names a strictly newer release than this build.
+/// How often the background checker re-runs.
+///
+/// Deliberately not a day. The bohay **server outlives its windows** and can run
+/// for weeks, so the check has to assume the release it is looking for will be
+/// published *while the process is already running*, not before it started. At a
+/// 24-hour interval a release cut twenty minutes after a server start stayed
+/// invisible until the following day.
+const CHECK_EVERY: Duration = Duration::from_secs(3 * 60 * 60);
+
+/// Spawn the background checker: one check shortly after startup, then every
+/// [`CHECK_EVERY`]. Sends [`AppEvent::UpdateAvailable`] only when the manifest
+/// names a strictly newer release than this build.
 pub fn spawn_check(tx: Sender<AppEvent>) {
     thread::spawn(move || {
         // A short initial delay so a launch is never slowed by a network call.
         thread::sleep(Duration::from_secs(5));
         loop {
-            if let Some(latest) = fetch_latest() {
-                if is_newer(&latest, CURRENT) {
-                    let _ = tx.send(AppEvent::UpdateAvailable(latest));
-                }
-            }
-            thread::sleep(Duration::from_secs(24 * 60 * 60));
+            check_once(&tx, &manifest_url());
+            thread::sleep(CHECK_EVERY);
         }
     });
 }
 
-fn fetch_latest() -> Option<String> {
-    parse_version(&http_get(&manifest_url())?)
+/// Check once, now, off the caller's thread.
+///
+/// The periodic check cannot help someone who has *just* upgraded elsewhere and
+/// wants to know: waiting up to [`CHECK_EVERY`] to find out is the whole
+/// complaint. Opening the changelog is exactly the moment the question is being
+/// asked, so that asks again.
+pub fn check_now(tx: Sender<AppEvent>) {
+    thread::spawn(move || check_once(&tx, &manifest_url()));
+}
+
+/// One fetch-compare-report. Takes the URL so tests can point it at a file
+/// without mutating process-wide environment.
+fn check_once(tx: &Sender<AppEvent>, url: &str) {
+    let Some(latest) = http_get(url).as_deref().and_then(parse_version) else {
+        return;
+    };
+    if is_newer(&latest, CURRENT) {
+        let _ = tx.send(AppEvent::UpdateAvailable(latest));
+    }
 }
 
 /// Pull the `"version"` string out of the manifest JSON (leading `v` trimmed).
@@ -117,6 +139,48 @@ mod tests {
         assert!(!is_newer("0.9.1", "0.9.2"), "older is not newer");
         // A pre-release suffix on a component doesn't break the compare.
         assert!(is_newer("0.9.3-rc1", "0.9.2"));
+    }
+
+    /// The whole chain, off the network: fetch, parse, compare, report. A file
+    /// URL rather than the env override, so this cannot race another test.
+    #[test]
+    fn check_once_reports_only_a_newer_release() {
+        use std::sync::mpsc::channel;
+        let dir = std::env::temp_dir().join(format!("bohay-upd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("latest.json");
+        let url = format!("file://{}", path.display());
+
+        // Newer: reported.
+        std::fs::write(&path, r#"{"version":"99.0.0"}"#).unwrap();
+        let (tx, rx) = channel();
+        super::check_once(&tx, &url);
+        match rx.try_recv() {
+            Ok(crate::event::AppEvent::UpdateAvailable(v)) => assert_eq!(v, "99.0.0"),
+            _ => panic!("a newer release should have been reported"),
+        }
+
+        // Same version, and an older one: silence.
+        for v in [super::CURRENT, "0.0.1"] {
+            std::fs::write(&path, format!(r#"{{"version":"{v}"}}"#)).unwrap();
+            let (tx, rx) = channel();
+            super::check_once(&tx, &url);
+            assert!(rx.try_recv().is_err(), "{v} must not be reported");
+        }
+
+        // Unreachable manifest, and junk: no panic, no event.
+        for bad in [
+            format!("file://{}", dir.join("nope.json").display()),
+            url.clone(),
+        ] {
+            if bad == url {
+                std::fs::write(&path, "not json").unwrap();
+            }
+            let (tx, rx) = channel();
+            super::check_once(&tx, &bad);
+            assert!(rx.try_recv().is_err());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

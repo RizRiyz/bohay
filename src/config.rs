@@ -101,6 +101,12 @@ pub struct LayoutConfig {
     /// its name, an unnamed pane its path (the original behavior).
     #[serde(default)]
     pub pane_title_path: bool,
+    /// In the AGENTS sidebar, show each agent's live session title (the OSC title
+    /// it sets, e.g. "Ship the desktop release…") in place of the `wsname · p<id>`
+    /// meta line. Off by default; falls back to the meta line when an agent set no
+    /// useful title.
+    #[serde(default)]
+    pub agent_title: bool,
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
@@ -284,6 +290,7 @@ impl Default for LayoutConfig {
             row_gap: 0,
             show_titles: true,
             pane_title_path: false,
+            agent_title: false,
             resume_in_new_workspace: true,
             file_open: default_file_open(),
             scrollback: default_scrollback(),

@@ -512,6 +512,16 @@ fn draw_content(
                         toggle(app.config.resume_launch_flags, t),
                         t,
                     )),
+                    GeneralRow::AgentTitle => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_agent_title,
+                        toggle(app.config.layout.agent_title, t),
+                        t,
+                    )),
                     GeneralRow::SoundDone => ctls.push(ctl_row(
                         f,
                         area,

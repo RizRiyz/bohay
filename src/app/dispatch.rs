@@ -1600,6 +1600,17 @@ impl App {
             .find_map(|(name, p)| (*p == pane).then_some(name.as_str()))
     }
 
+    /// The pane's live session title (the OSC title the agent set), trimmed, if
+    /// non-empty. The AGENTS sidebar shows it in place of the meta line when the
+    /// "show agent session title" setting is on (`config.layout.agent_title`).
+    pub(crate) fn pane_title(&self, pane: PaneId) -> Option<String> {
+        self.panes
+            .get(&pane)
+            .and_then(|p| p.engine.lock().ok().and_then(|e| e.title()))
+            .map(|s| strip_title_icon(&s))
+            .filter(|s| !s.is_empty())
+    }
+
     /// Whether `pane` currently hosts a recognised agent (detection) or a bound
     /// agent session — the same test `agent.list` uses to decide what is an agent.
     fn is_agent_pane(&self, pane: PaneId) -> bool {
@@ -1683,6 +1694,17 @@ impl App {
 
 fn not_found() -> (String, String) {
     ("not_found".to_string(), "pane not found".to_string())
+}
+
+/// Strip a leading decorative icon/glyph that some agents prepend to their OSC
+/// title (a spinner or status emoji), plus the surrounding whitespace, so the
+/// sidebar shows just the text. A non-ASCII symbol/emoji leads is dropped;
+/// letters (including CJK), digits, and ASCII punctuation are kept, and trailing
+/// text is untouched.
+pub(crate) fn strip_title_icon(s: &str) -> String {
+    s.trim_start_matches(|c: char| c.is_whitespace() || (!c.is_alphanumeric() && !c.is_ascii()))
+        .trim()
+        .to_string()
 }
 
 fn agent_not_found() -> (String, String) {
@@ -1834,6 +1856,23 @@ fn state_str(s: State) -> &'static str {
 mod tests {
     use super::*;
     use crate::app::App;
+
+    #[test]
+    fn strip_title_icon_drops_a_leading_glyph_only() {
+        // A leading spinner/status glyph and its space are removed.
+        assert_eq!(
+            strip_title_icon("✳ Ship the desktop release"),
+            "Ship the desktop release"
+        );
+        assert_eq!(strip_title_icon("◐ Cogitating…"), "Cogitating…");
+        assert_eq!(strip_title_icon("🤖  Opus 5"), "Opus 5");
+        // No icon: unchanged apart from trimming.
+        assert_eq!(strip_title_icon("  Ship it  "), "Ship it");
+        assert_eq!(strip_title_icon("Ship it"), "Ship it");
+        // ASCII punctuation and CJK letters are kept, not mistaken for an icon.
+        assert_eq!(strip_title_icon("[WIP] fix bug"), "[WIP] fix bug");
+        assert_eq!(strip_title_icon("実装 タスク"), "実装 タスク");
+    }
 
     /// `ui.dock.push` carries a row's right-click menu (docs/52) through to the
     /// stored `DockRow`, and a row that omits `menu` keeps the pre-existing
