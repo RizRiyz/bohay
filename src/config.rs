@@ -44,6 +44,20 @@ pub struct Config {
     /// never self-updates (installed via cargo/brew/etc).
     #[serde(default = "yes")]
     pub check_updates: bool,
+    /// Replay the CLI options an agent pane was launched with when resuming it
+    /// after a restart (docs/62): a pane started as
+    /// `claude --permission-mode … --model …` comes back with those options
+    /// instead of a bare `claude --resume <id>`.
+    ///
+    /// One switch for the feature. The *options* are already per agent — each
+    /// pane replays only what its own agent was launched with — so this is just
+    /// whether that happens at all.
+    ///
+    /// **Off by default**: a remembered option outlives the session it was set
+    /// for, and some of them widen what the agent may do without asking
+    /// (`--permission-mode bypassPermissions`), so switching it on is deliberate.
+    #[serde(default)]
+    pub resume_launch_flags: bool,
     /// Auto-install the bundled agent skill on startup so agents can delegate to
     /// each other out of the box (docs): the full skill for Claude Code, and a
     /// short pointer in the global `AGENTS.md` for Codex and opencode. Each is
@@ -253,6 +267,7 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
             check_updates: true,
+            resume_launch_flags: false,
             install_agent_skill: true,
             keybindings: std::collections::HashMap::new(),
             mission_pricing: std::collections::HashMap::new(),

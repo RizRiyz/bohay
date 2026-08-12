@@ -345,6 +345,25 @@ pub fn resume_command_with_flags(
     Some(format!("{body} {quoted}\r"))
 }
 
+/// The resume command for a pane being restored (docs/62): with the launch flags
+/// it was captured with, or the plain command.
+///
+/// The choice has two inputs, so it lives here with a name rather than inline at
+/// the call site: `keep_flags` is the user's Settings → General preference, and
+/// `launch` is `None` for a snapshot written before the field existed. Either one
+/// falls back to [`resume_command`], which is exactly the pre-docs/62 behaviour.
+pub fn resume_for(
+    agent: &str,
+    session_id: &str,
+    launch: Option<&[String]>,
+    keep_flags: bool,
+) -> Option<String> {
+    match launch.filter(|_| keep_flags) {
+        Some(flags) => resume_command_with_flags(agent, session_id, flags),
+        None => resume_command(agent, session_id),
+    }
+}
+
 /// The command that **forks** an agent's session: continue from the original's
 /// full context in a new, diverging session (the original is left untouched).
 /// `None` for agents without a native fork, unknown agents, or unsafe ids.
@@ -1460,6 +1479,32 @@ mod tests {
 
         // Unknown agent is None, exactly like resume_command.
         assert!(resume_command_with_flags("nope", "x", &["--model".into()]).is_none());
+    }
+
+    /// All four combinations of "the snapshot has flags" x "the user wants them"
+    /// (docs/62). Only one of them replays anything.
+    #[test]
+    fn resume_for_honours_the_setting_and_missing_flags() {
+        let flags: Vec<String> = ["--model", "opus"].iter().map(|s| s.to_string()).collect();
+        let plain = resume_command("claude", "abc").unwrap();
+
+        // Flags present and wanted: replayed.
+        let with = resume_for("claude", "abc", Some(&flags), true).unwrap();
+        assert!(with.contains("'--model' 'opus'"), "{with}");
+
+        // Flags present but turned off in Settings: the plain command, exactly as
+        // before the feature existed.
+        assert_eq!(
+            resume_for("claude", "abc", Some(&flags), false).unwrap(),
+            plain
+        );
+
+        // An older snapshot has no flags at all, either way.
+        assert_eq!(resume_for("claude", "abc", None, true).unwrap(), plain);
+        assert_eq!(resume_for("claude", "abc", None, false).unwrap(), plain);
+
+        // Unknown agent stays None however it is called.
+        assert!(resume_for("nope", "abc", Some(&flags), true).is_none());
     }
 
     #[test]

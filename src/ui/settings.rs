@@ -502,6 +502,16 @@ fn draw_content(
                         toggle(app.config.check_updates, t),
                         t,
                     )),
+                    GeneralRow::ResumeFlags => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_resume_flags,
+                        toggle(app.config.resume_launch_flags, t),
+                        t,
+                    )),
                     GeneralRow::SoundDone => ctls.push(ctl_row(
                         f,
                         area,

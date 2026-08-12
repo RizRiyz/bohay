@@ -100,6 +100,8 @@ pub enum GeneralRow {
     FilesShowHidden,
     ShiftEnter,
     CheckUpdates,
+    /// Replay each agent's own CLI options on resume (docs/62).
+    ResumeFlags,
     SoundDone,
     SoundBlocked,
     TestSound,
@@ -125,18 +127,18 @@ impl App {
             GeneralRow::FilesShowHidden,
             GeneralRow::ShiftEnter,
             GeneralRow::CheckUpdates,
+            GeneralRow::ResumeFlags,
             GeneralRow::SoundDone,
             GeneralRow::SoundBlocked,
             GeneralRow::TestSound,
         ]
     }
 
-    /// Index of the first notification row (where the `── Notifications ──`
-    /// divider goes), mirroring `dock_section_start` in the Layout tab. The four
-    /// general settings (file-open, show-hidden, Shift+Enter, check-updates) sit
-    /// above it.
+    /// Index of the first notification row (where the `── Notify ──` divider
+    /// goes), mirroring `dock_section_start` in the Layout tab. The five general
+    /// settings sit above it.
     pub fn general_section_start(&self) -> usize {
-        4
+        5
     }
 
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
@@ -770,6 +772,10 @@ impl App {
                 self.config.check_updates = !self.config.check_updates;
                 config::save(&self.config);
             }
+            Some(GeneralRow::ResumeFlags) => {
+                self.config.resume_launch_flags = !self.config.resume_launch_flags;
+                config::save(&self.config);
+            }
             Some(GeneralRow::SoundDone) => {
                 self.config.notifications.sound_on_done = !self.config.notifications.sound_on_done;
                 config::save(&self.config);
@@ -823,6 +829,46 @@ fn lang_cursor(code: &str) -> usize {
 mod tests {
     use super::*;
 
+    /// The docs/62 switch: whether resume replays each agent's own CLI options,
+    /// or falls back to the plain resume command bohay used before the feature.
+    ///
+    /// **Off by default** — a remembered option outlives the session it was set
+    /// for, and some of them widen what the agent may do, so it is opt-in.
+    #[test]
+    fn resume_flags_toggle_persists() {
+        let _env = crate::persist::test_env("resume-flags");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        assert!(!app.config.resume_launch_flags, "off by default: opt-in");
+
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+        }
+        let row = app
+            .general_rows()
+            .iter()
+            .position(|r| *r == GeneralRow::ResumeFlags)
+            .expect("the row is on the General tab");
+        // It sits with the general options, above the Notify divider.
+        assert!(row < app.general_section_start());
+
+        app.adjust_general(row, 1);
+        assert!(app.config.resume_launch_flags, "the toggle flipped");
+        assert!(
+            crate::config::load().resume_launch_flags,
+            "and it was saved"
+        );
+
+        app.adjust_general(row, 1);
+        assert!(!app.config.resume_launch_flags, "toggles back");
+
+        // A config written before this field existed loads as off: an existing
+        // user is never opted in behind their back.
+        let old: crate::config::Config = serde_json::from_str("{}").unwrap();
+        assert!(!old.resume_launch_flags);
+    }
+
     // The General tab is the file-open chooser plus the Notifications section:
     // the two sound toggles (persisted) and a Test row that rings the chime
     // immediately, regardless of the toggles.
@@ -835,7 +881,7 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 7);
+        assert_eq!(app.settings_rows(SettingsTab::General), 8);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
 
@@ -889,25 +935,30 @@ mod tests {
             })
             .collect();
         let all = text.join("\n");
-        if std::env::var("SHOW_UI").is_ok() {
-            println!("{all}");
-        }
         assert!(all.contains("General"), "the General tab is in the strip");
         assert!(all.contains("Open files with"), "file-open row drawn");
         assert!(all.contains("read-only"), "its current value drawn");
+        assert!(
+            all.contains("Remember CLI option"),
+            "the resume switch drawn"
+        );
         assert!(all.contains("Notify"), "the notifications section divider");
 
-        // Order: file-open row, then the divider, then the sound rows.
+        // Order: file-open row, the resume switch, then the divider and sounds.
         let row_of = |needle: &str| text.iter().position(|l| l.contains(needle));
-        let (fo, div, snd) = (
+        let (fo, res, div, snd) = (
             row_of("Open files with"),
+            row_of("Remember CLI option"),
             row_of("Notify"),
             row_of("Test sound"),
         );
-        assert!(fo < div && div < snd, "file-open → divider → sounds");
-        // A blank line separates the chooser from the section header.
-        let (fo, div) = (fo.unwrap(), div.unwrap());
-        assert!(div >= fo + 2, "a blank gap sits above the section divider");
+        assert!(
+            fo < res && res < div && div < snd,
+            "file-open → resume switch → divider → sounds"
+        );
+        // A blank line separates the options from the section header.
+        let (res, div) = (res.unwrap(), div.unwrap());
+        assert!(div >= res + 2, "a blank gap sits above the section divider");
     }
 
     /// Notifications is no longer its own tab: General leads the tab strip and

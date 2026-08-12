@@ -397,10 +397,18 @@ pub fn snapshot(app: &App) -> SessionSnapshot {
                         // live process argv the detection scan already captured
                         // (docs/62). Only for a recognized agent; a plain shell's
                         // argv never matches, so it stays None.
-                        let agent_launch = app
-                            .status
-                            .get(&id)
-                            .map(|s| s.agent.as_str())
+                        // Keyed off the agent in `agent_session` -- the one that
+                        // will actually be resumed -- not the one detection
+                        // currently sees. The two can disagree (a hook reports the
+                        // session precisely, while detection reads the screen), and
+                        // taking the detected name would hand one agent's options
+                        // to another agent's resume command. `launch_args_for` then
+                        // returns None when that agent has no command line in the
+                        // pane, so a mismatch yields *no* options rather than the
+                        // wrong ones.
+                        let agent_launch = agent_session
+                            .as_ref()
+                            .map(|(k, _)| k.as_str())
                             .filter(|k| app.manifests.is_agent(k))
                             .and_then(|k| {
                                 app.proc_commands
