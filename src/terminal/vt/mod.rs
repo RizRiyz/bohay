@@ -75,6 +75,17 @@ pub trait VtEngine: Send {
     /// Lets scroll mode jump to a proportional position (the `1`–`9` keys).
     fn history_len(&self) -> usize;
 
+    /// Every retained row as plain text, **oldest first**: the scrollback history
+    /// followed by the live screen, trailing blanks trimmed. Used by global
+    /// search (docs/63) to scan a pane's whole output. The alternate screen has
+    /// no scrollback, so this returns just the visible screen there. Read-only.
+    fn rows_text(&self) -> Vec<String>;
+
+    /// Jump the viewport so the row `offset` lines above the live bottom sits at
+    /// the top (clamped to `history_len()`); `0` is live. Lands on a search match
+    /// (docs/63). No-op on the alternate screen, like `scroll`.
+    fn scroll_to(&mut self, offset: usize);
+
     /// Whether the child is on the **alternate screen** (a full-screen app like
     /// vim/less/a TUI agent). The alt screen has no scrollback, so callers
     /// forward wheel input to the app instead of scrolling a history buffer.

@@ -218,6 +218,10 @@ pub fn run() -> Result<()> {
         if app.tick_toast(Instant::now()) {
             activity = true;
         }
+        // Likewise for an expired search-jump flash (docs/63).
+        if app.tick_search_flash(Instant::now()) {
+            activity = true;
+        }
         // Animate the sidebar spinner while any agent is working: advance the
         // frame and mark dirty so the diff sends only the changed dot cell.
         if last_spin.elapsed() >= SPIN_INTERVAL && app.any_working() {

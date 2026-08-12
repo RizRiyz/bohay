@@ -716,6 +716,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             emit_clipboard(&text);
         }
         app.tick_toast(Instant::now());
+        app.tick_search_flash(Instant::now());
         // A forced redraw (resize / regained focus) wipes the terminal so the next
         // draw repaints every cell, healing damage ratatui's own diff can't see.
         if std::mem::take(&mut app.force_redraw) {

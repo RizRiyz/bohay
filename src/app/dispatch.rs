@@ -472,6 +472,37 @@ impl App {
                     .unwrap_or_default();
                 Ok(json!({"type":"pane_read","text":text}))
             }
+            // Global scrollback search (docs/63): scan every pane's retained
+            // output. Returns matches with the scroll offset that lands on each,
+            // plus the total found (which may exceed the returned, capped, list).
+            "search" => {
+                let query = p.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let case_sensitive = p
+                    .get("case_sensitive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let (hits, total) = self.search_all(query, case_sensitive);
+                let matches: Vec<Value> = hits
+                    .iter()
+                    .map(|h| {
+                        json!({
+                            "pane": h.pane.0.to_string(),
+                            "workspace": h.ws,
+                            "workspace_name": h.ws_name,
+                            "line_offset": h.offset,
+                            "text": h.line,
+                            "col": h.col,
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "type": "search",
+                    "query": query,
+                    "total": total,
+                    "shown": matches.len(),
+                    "matches": matches,
+                }))
+            }
             "pane.close" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
                 self.close_pane(id);

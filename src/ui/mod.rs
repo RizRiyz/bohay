@@ -63,6 +63,7 @@ mod menu;
 mod mission;
 mod panes;
 mod picker;
+mod search;
 mod settings;
 mod sidebar;
 mod status;
@@ -518,6 +519,10 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         switcher::draw_switcher(f, area, app, &t);
     } else {
         app.switcher_rects.clear();
+    }
+    // The global scrollback-search overlay (docs/63), above the chrome.
+    if app.search.is_some() {
+        search::draw_search(f, area, app, &t);
     }
     // A transient toast (e.g. "Copied") flashes on top of everything.
     if let Some((text, _)) = &app.toast {

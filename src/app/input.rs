@@ -292,6 +292,18 @@ impl App {
             }
             return;
         }
+        // The global-search overlay (docs/63) owns the mouse while open: a click
+        // on a result jumps to it, a click outside dismisses, the wheel moves the
+        // result cursor.
+        if self.search.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => self.search_click(m.column, m.row),
+                MouseEventKind::ScrollUp => self.search_move(-1),
+                MouseEventKind::ScrollDown => self.search_move(1),
+                _ => {}
+            }
+            return;
+        }
         // The folder picker likewise owns the mouse while open.
         if self.picker.is_some() {
             match m.kind {
@@ -973,6 +985,7 @@ impl App {
     /// Scroll the focused pane's scrollback for a fixed prefix key (PageUp/Down
     /// a page at a time, Home/End to the top / live bottom).
     fn scroll_focused_pane(&mut self, code: KeyCode) {
+        self.search_flash = None; // scrolling dismisses the search-jump marker
         let focus = self.layout().focus;
         // A "page" is the visible content height minus one row of overlap.
         let page = self
@@ -1355,10 +1368,24 @@ impl App {
         }
     }
 
+    /// Clear an expired search-jump flash (docs/63); returns true when it changed
+    /// so the loop repaints once to remove the highlight.
+    pub fn tick_search_flash(&mut self, now: Instant) -> bool {
+        if self.search_flash.as_ref().is_some_and(|f| now >= f.until) {
+            self.search_flash = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Record that the user just typed into the focused pane, so detection can
     /// tell typing (whose echo is PTY output) apart from the agent generating
     /// (docs/07). Only the focused pane receives typed input.
     fn mark_user_input(&mut self) {
+        // Typing into the pane dismisses the search-jump marker (docs/63): you
+        // have moved on, so the highlight should not linger.
+        self.search_flash = None;
         let id = self.layout().focus;
         self.mark_input_for(id);
     }
@@ -1431,6 +1458,11 @@ impl App {
         // The Settings modal captures all input while open.
         if self.settings.is_some() {
             self.handle_settings_key(key);
+            return true;
+        }
+        // The global-search overlay (docs/63) captures all input while open.
+        if self.search.is_some() {
+            self.search_key(key);
             return true;
         }
         // The folder picker captures all input while open.

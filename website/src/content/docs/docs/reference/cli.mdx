@@ -62,6 +62,10 @@ panes / agents:
   wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane
 
+search:
+  search <text...> [--case]  find text across every pane's scrollback (docs/63);
+                             --case is case-sensitive; returns matches as JSON
+
 appearance:
   ui sidebar [--side left|right] --width <n>     set a sidebar's width (columns)
   ui sidebar [--side left|right] --hide|--show   toggle a sidebar

@@ -239,6 +239,14 @@ fn draw_one_pane(
         .as_ref()
         .filter(|h| h.pane == id)
         .map(|h| &h.link);
+    // The line a search jump landed on (docs/63): (content row, scroll offset it
+    // was jumped to). Banded only while the view is unchanged, so any scroll or
+    // new output hides it.
+    let flash = app
+        .search_flash
+        .as_ref()
+        .filter(|fl| fl.pane == id)
+        .map(|fl| (fl.row, fl.scroll));
     let mut scrolled = 0usize;
     let cursor_pos = match pane.engine.lock() {
         Ok(engine) => {
@@ -320,6 +328,22 @@ fn draw_one_pane(
         }
         Err(_) => None,
     };
+
+    // The search-jump flash band (docs/63): recolor the landed row's background
+    // full width, keeping the text, so it reads as a highlighted line. Only while
+    // the pane is still at the offset we jumped to, so a scroll or new output
+    // (which changes `scrolled`) hides it instead of banding the wrong line.
+    if let Some((fr, fscroll)) = flash {
+        if fr < content.height && scrolled == fscroll {
+            let y = content.y + fr;
+            let buf = f.buffer_mut();
+            for x in content.x..content.right() {
+                if let Some(c) = buf.cell_mut((x, y)) {
+                    c.set_bg(t.sel_bg);
+                }
+            }
+        }
+    }
 
     // Scrollback indicator: when the viewport is above the live bottom, show how
     // far up (in lines) at the content's top-right so the state is never a

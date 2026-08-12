@@ -28,6 +28,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "task"
                 | "lease"
                 | "wait"
+                | "search"
                 | "help"
                 | "doctor"
                 | "skill"
@@ -87,6 +88,10 @@ panes / agents:
   wait output <id> --match <text> [--timeout <s>]    block until output appears
   wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
   attach <id>                open the TUI into a single fullscreen pane
+
+search:
+  search <text...> [--case]  find text across every pane's scrollback (docs/63);
+                             --case is case-sensitive; returns matches as JSON
 
 appearance:
   ui sidebar [--side left|right] --width <n>     set a sidebar's width (columns)
@@ -946,6 +951,22 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     Ok(match (noun, verb) {
         ("ping", _) => ("ping".into(), json!({})),
         ("events", _) => ("events.subscribe".into(), json!({})),
+        // `bohay search <text...> [--case]` — scan every pane's scrollback
+        // (docs/63). Everything after `search`, minus flags, is the query.
+        ("search", _) => {
+            let case = args
+                .iter()
+                .any(|a| a == "--case" || a == "--case-sensitive");
+            let query: Vec<&str> = args[2.min(args.len())..]
+                .iter()
+                .filter(|a| !a.starts_with("--"))
+                .map(String::as_str)
+                .collect();
+            (
+                "search".into(),
+                json!({ "query": query.join(" "), "case_sensitive": case }),
+            )
+        }
         ("agent", "sessions") => ("agent.sessions".into(), json!({})),
         ("agent", "resume") => ("agent.resume".into(), one("session_id", arg0())),
         ("agent", "name") => {

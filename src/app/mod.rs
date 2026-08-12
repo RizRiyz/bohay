@@ -32,8 +32,11 @@ mod keys;
 mod mission;
 mod modules;
 mod picker;
+mod search;
 mod settings;
 mod switcher;
+
+pub use search::{GlobalSearch, SearchFlash, SearchHit};
 
 pub use keys::{key_reference_rows, Cmd, KEY_REFERENCE};
 pub use modules::ModuleMenuAction;
@@ -1145,6 +1148,10 @@ pub struct App {
     pub switcher_rects: Vec<(SwitcherTarget, Rect)>,
     /// The `≡` switcher button's rect (compact mode), for tap hit-testing.
     pub switcher_button_rect: Option<Rect>,
+    /// The global scrollback-search overlay (docs/63). `Some` => it owns input.
+    pub search: Option<GlobalSearch>,
+    /// A brief highlight of the line a search jump landed on (docs/63).
+    pub search_flash: Option<SearchFlash>,
     /// Native **view panes** (docs/38 FILE-3): a leaf id maps to a non-PTY
     /// renderer here instead of a `Pane` in `panes`. Invariant: a leaf is in
     /// `panes` **xor** `views`.
@@ -1430,6 +1437,8 @@ impl App {
             file_delete: None,
             compact: false,
             switcher: false,
+            search: None,
+            search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
             switcher_rects: Vec::new(),
@@ -1587,17 +1596,16 @@ impl App {
                     // the pane opens straight into the resuming agent (nothing
                     // visibly typed); an unrecognised shell family falls back
                     // to typing the command after spawn.
-                    let resume =
-                        ps.agent_session
-                            .as_ref()
-                            .and_then(|(agent, sid)| match &ps.agent_launch {
-                                // Re-apply the launch flags captured at save time
-                                // (docs/62); falls back to the plain resume command.
-                                Some(flags) => {
-                                    crate::agent::resume_command_with_flags(agent, sid, flags)
-                                }
-                                None => crate::agent::resume_command(agent, sid),
-                            });
+                    // Re-apply the launch flags captured at save time (docs/62),
+                    // unless Settings → General turns that off.
+                    let resume = ps.agent_session.as_ref().and_then(|(agent, sid)| {
+                        crate::agent::resume_for(
+                            agent,
+                            sid,
+                            ps.agent_launch.as_deref(),
+                            config.resume_launch_flags,
+                        )
+                    });
                     let resume_argv = resume.as_deref().and_then(|r| {
                         crate::platform::shell_run_then_interactive(&shell, r.trim())
                     });
@@ -1844,6 +1852,8 @@ impl App {
             file_delete: None,
             compact: false,
             switcher: false,
+            search: None,
+            search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
             switcher_rects: Vec::new(),
@@ -4536,6 +4546,132 @@ mod tests {
         let old: persist::PaneSnap =
             serde_json::from_str(r#"{"cwd":"/tmp/x","command":"sh"}"#).unwrap();
         assert_eq!(old.agent_launch, None);
+    }
+
+    /// The captured CLI options are **per pane**, not one global set (docs/62).
+    ///
+    /// `proc_commands` is keyed by `PaneId` and filled from each pane's own
+    /// `child_pid`, so two agents launched differently must each get their own
+    /// options back. A regression here would replay one pane's `--sandbox
+    /// danger-full-access` into a neighbour that never asked for it.
+    #[test]
+    fn launch_options_are_captured_per_pane_not_shared() {
+        let _env = crate::persist::test_env("per-pane-flags");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let a = app.layout().focus;
+        app.split(Axis::Col);
+        let b = app.layout().focus;
+        assert_ne!(a, b, "two distinct panes");
+
+        // Each pane runs its own agent, with its own hook-reported session, so the
+        // options are stored against the agent that will actually be resumed.
+        let st = app.status.get_mut(&a).unwrap();
+        st.agent = "claude".into();
+        st.agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "s-a".into(),
+        });
+        app.proc_commands
+            .insert(a, vec!["claude --model opus".into()]);
+        let st = app.status.get_mut(&b).unwrap();
+        st.agent = "codex".into();
+        st.agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "s-b".into(),
+        });
+        app.proc_commands
+            .insert(b, vec!["codex --sandbox danger-full-access".into()]);
+
+        let snap = persist::snapshot(&app);
+        let launch = |id: PaneId| -> Option<Vec<String>> {
+            snap.workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .find(|(pid, _)| *pid == id.0)
+                .and_then(|(_, ps)| ps.agent_launch.clone())
+        };
+        assert_eq!(launch(a), Some(vec!["--model".into(), "opus".into()]));
+        assert_eq!(
+            launch(b),
+            Some(vec!["--sandbox".into(), "danger-full-access".into()])
+        );
+
+        // With the feature switched **on**, each pane's resume command carries
+        // only its own agent's options. The switch turns the feature on; it never
+        // pools options across agents, so codex can never be handed claude's
+        // `--model opus`.
+        let cmd = |id: PaneId| -> String {
+            let ps = snap
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .find(|(pid, _)| *pid == id.0)
+                .map(|(_, ps)| ps)
+                .unwrap();
+            let (agent, sid) = ps.agent_session.clone().unwrap();
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), true).unwrap()
+        };
+        let (ca, cb) = (cmd(a), cmd(b));
+        assert!(ca.contains("'--model' 'opus'"), "{ca}");
+        assert!(!ca.contains("sandbox"), "claude has none of codex's: {ca}");
+        assert!(cb.contains("'--sandbox' 'danger-full-access'"), "{cb}");
+        assert!(
+            !cb.contains("model") && !cb.contains("opus"),
+            "codex must never run claude's model: {cb}"
+        );
+    }
+
+    /// The captured options must belong to the agent being **resumed**, not to
+    /// whatever detection currently sees in the pane (docs/62).
+    ///
+    /// The two can disagree: a hook reports a session precisely, while detection
+    /// reads the screen. Keying the options off the detected name handed one
+    /// agent's CLI options to another agent's resume command, e.g.
+    /// `codex resume <id> --model opus` from a neighbouring claude.
+    #[test]
+    fn launch_options_never_cross_between_agents() {
+        let _env = crate::persist::test_env("no-bleed");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        // Detection says claude; the hook reported a *codex* session.
+        let st = app.status.get_mut(&id).unwrap();
+        st.agent = "claude".into();
+        st.agent_session = Some(AgentSession {
+            agent: "codex".into(),
+            session_id: "sess-1".into(),
+        });
+        app.proc_commands
+            .insert(id, vec!["claude --model opus".into()]);
+
+        let snap = persist::snapshot(&app);
+        let ps = snap
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .flat_map(|t| &t.panes)
+            .find(|(p, _)| *p == id.0)
+            .map(|(_, ps)| ps)
+            .expect("the pane is in the snapshot");
+
+        assert_eq!(
+            ps.agent_session,
+            Some(("codex".into(), "sess-1".into())),
+            "codex is what gets resumed"
+        );
+        assert_eq!(
+            ps.agent_launch, None,
+            "claude's options must not ride along with codex's resume"
+        );
+
+        // And the command that would actually run carries no stray options.
+        let (a, sid) = ps.agent_session.clone().unwrap();
+        let cmd = crate::agent::resume_for(&a, &sid, ps.agent_launch.as_deref(), true).unwrap();
+        assert!(!cmd.contains("opus"), "{cmd}");
+        assert_eq!(cmd, crate::agent::resume_command(&a, &sid).unwrap());
     }
 
     /// Two agent panes in one folder must not both restore the *same* session.

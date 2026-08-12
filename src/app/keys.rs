@@ -39,6 +39,7 @@ pub enum Cmd {
     ToggleAgents,
     ToggleFiles,
     Switcher,
+    GlobalSearch,
     Detach,
 }
 
@@ -72,6 +73,7 @@ impl Cmd {
         Cmd::ToggleAgents,
         Cmd::ToggleFiles,
         Cmd::Switcher,
+        Cmd::GlobalSearch,
         Cmd::Detach,
     ];
 
@@ -105,6 +107,7 @@ impl Cmd {
             Cmd::ToggleAgents => "toggle_agents",
             Cmd::ToggleFiles => "toggle_files",
             Cmd::Switcher => "switcher",
+            Cmd::GlobalSearch => "search",
             Cmd::Detach => "detach",
         }
     }
@@ -141,6 +144,7 @@ impl Cmd {
             Cmd::ToggleAgents => cat.cmd_toggle_agents,
             Cmd::ToggleFiles => cat.cmd_toggle_files,
             Cmd::Switcher => cat.cmd_switcher,
+            Cmd::GlobalSearch => cat.cmd_search,
             Cmd::Detach => cat.cmd_detach,
         }
     }
@@ -174,7 +178,8 @@ impl Cmd {
             | Cmd::ToggleSidebar
             | Cmd::ToggleRightSidebar
             | Cmd::ToggleAgents
-            | Cmd::ToggleFiles => "Views & panels",
+            | Cmd::ToggleFiles
+            | Cmd::GlobalSearch => "Views & panels",
             Cmd::Switcher | Cmd::Detach => "Session",
         }
     }
@@ -209,6 +214,7 @@ impl Cmd {
             Cmd::ToggleAgents => "a",
             Cmd::ToggleFiles => "e",
             Cmd::Switcher => "m",
+            Cmd::GlobalSearch => "/",
             Cmd::Detach => "d",
         }
     }
@@ -448,6 +454,7 @@ impl App {
             Cmd::ToggleAgents => self.agents_active_only = !self.agents_active_only,
             Cmd::ToggleFiles => self.toggle_files_dock(),
             Cmd::Switcher => self.toggle_switcher(),
+            Cmd::GlobalSearch => self.toggle_search(),
             Cmd::Detach => self.detach_requested = true,
         }
     }

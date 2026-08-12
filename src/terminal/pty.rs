@@ -343,6 +343,24 @@ impl Pane {
         }
     }
 
+    /// Every retained row as plain text (oldest first) plus the current history
+    /// length, for global search (docs/63). The history length lets a caller map
+    /// a matched row index to a scroll offset. Empty + 0 if the lock is poisoned.
+    pub fn rows_text(&self) -> (Vec<String>, usize) {
+        match self.engine.lock() {
+            Ok(e) => (e.rows_text(), e.history_len()),
+            Err(_) => (Vec::new(), 0),
+        }
+    }
+
+    /// Jump the scrollback viewport so the row `offset` lines above the live
+    /// bottom is at the top, to land on a search match (docs/63).
+    pub fn scroll_to(&self, offset: usize) {
+        if let Ok(mut e) = self.engine.lock() {
+            e.scroll_to(offset);
+        }
+    }
+
     /// `(offset, history_len)` — the current scroll position and the total
     /// scrollback, read together under one lock (for scroll mode's `1`–`9` jump).
     pub fn scroll_state(&self) -> (usize, usize) {

@@ -268,6 +268,42 @@ impl VtEngine for AlacrittyEngine {
         self.term.grid().history_size()
     }
 
+    fn rows_text(&self) -> Vec<String> {
+        // Index the grid by absolute `Line` (like `detection_text`), from the
+        // topmost retained history line up to the live bottom, so this is the
+        // whole buffer independent of the user's scroll position. On the alt
+        // screen `history_size` is 0, so this collapses to the visible screen.
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let top = grid.topmost_line().0; // negative for history, else 0
+        let bottom = grid.bottommost_line().0; // screen_lines - 1
+        let mut out = Vec::with_capacity((bottom - top + 1).max(0) as usize);
+        for l in top..=bottom {
+            let row = &grid[Line(l)];
+            let mut line = String::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                line.push(if cell.c == '\0' { ' ' } else { cell.c });
+            }
+            out.push(line.trim_end().to_string());
+        }
+        out
+    }
+
+    fn scroll_to(&mut self, offset: usize) {
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let max = self.term.grid().history_size();
+        let target = offset.min(max) as i32;
+        let current = self.term.grid().display_offset() as i32;
+        // `Scroll::Delta` is positive-scrolls-up (into history), matching `scroll`.
+        self.term.scroll_display(Scroll::Delta(target - current));
+    }
+
     fn alt_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
@@ -502,6 +538,39 @@ mod tests {
             visible.contains("OLDEST"),
             "history text is selectable/copyable: {visible:?}"
         );
+    }
+
+    #[test]
+    fn rows_text_dumps_full_history_oldest_first() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 6, tx, 2000);
+        feed_lines(&mut e, 40); // line0..line39; only ~6 fit the live screen
+        let rows = e.rows_text();
+        let i0 = rows
+            .iter()
+            .position(|r| r.contains("line0"))
+            .expect("oldest history line present");
+        let i39 = rows
+            .iter()
+            .position(|r| r.contains("line39"))
+            .expect("newest live line present");
+        assert!(i0 < i39, "oldest first: {i0} < {i39}");
+        assert_eq!(e.scroll_offset(), 0, "reading rows_text is read-only");
+    }
+
+    #[test]
+    fn scroll_to_lands_and_clamps() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 6, tx, 2000);
+        feed_lines(&mut e, 40);
+        let hist = e.history_len();
+        assert!(hist > 0, "there is history to land in");
+        e.scroll_to(hist);
+        assert_eq!(e.scroll_offset(), hist, "landed at the requested offset");
+        e.scroll_to(hist + 100);
+        assert_eq!(e.scroll_offset(), hist, "clamped to the history length");
+        e.scroll_to(0);
+        assert_eq!(e.scroll_offset(), 0, "offset 0 returns to the live bottom");
     }
 
     #[test]
