@@ -462,6 +462,33 @@ const ogImage = 'https://bohay.dev/og.png';
         </article>
 
         <article class="frow">
+          <span class="fr-k">Talk</span>
+          <div class="fr-text">
+            <h3>Agents that hand work to each other</h3>
+            <p>Type <code>$</code> and a pane name to delegate the rest of the line. <code>$codex add tests to src/parse.rs</code> sends that instruction to the pane named codex. An agent name or a pane number works just as well. The sender does not wait: it carries on working and picks up the reply when it arrives.</p>
+            <a class="fc-go" href="/docs/guides/agent-messaging/">Agent messaging →</a>
+          </div>
+          <div class="fm bare talk" aria-hidden="true">
+            <div class="fm-panes">
+              <div class="fm-pane">
+                <div class="fm-pt"><span class="d run"></span>claude</div>
+                <div class="fm-ln" style="--i:0"><i>❯</i> <u>$codex</u> add tests to <b>src/parse.rs</b></div>
+                <div class="fm-ln sent" style="--i:1">→ sent · not waiting</div>
+                <div class="fm-ln dim" style="--i:4">⏺ meanwhile: profiling…</div>
+                <div class="fm-ln back" style="--i:7">← codex: 12 cases, 155 passed</div>
+              </div>
+              <div class="fm-pane">
+                <div class="fm-pt"><span class="d done"></span>codex</div>
+                <div class="fm-ln got" style="--i:2">⇄ from claude: add tests</div>
+                <div class="fm-ln dim" style="--i:3">⏺ reading src/parse.rs…</div>
+                <div class="fm-ln ok" style="--i:5">✓ added 12 cases</div>
+                <div class="fm-ln ok" style="--i:6">✓ cargo test: 155 passed</div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="frow">
           <span class="fr-k">Ship</span>
           <div class="fr-text">
             <h3>Git without leaving</h3>
@@ -593,6 +620,37 @@ const ogImage = 'https://bohay.dev/og.png';
         <a href="/docs/guides/layout/">movable panels and themes</a>
       </p>
     </section>
+
+    <!-- The TALK mock types itself, but only while it is on screen: it sits far
+         down the page, and a timer ticking behind the viewport is work nobody
+         sees. The observer starts it, and stops it again on the way out so it is
+         fresh next time rather than mid-sentence. -->
+    <script>
+      (() => {
+        const mock = document.querySelector('.fm.bare.talk');
+        if (!mock) return;
+        const CYCLE = 8200; // the last line lands at ~4.1s; the rest is a beat to read it
+        let timer = 0;
+        const play = () => {
+          mock.classList.remove('on');
+          void mock.offsetWidth; // reflow, so re-adding the class restarts the animations
+          mock.classList.add('on');
+        };
+        const io = new IntersectionObserver(
+          ([e]) => {
+            clearInterval(timer);
+            if (e.isIntersecting) {
+              play();
+              timer = window.setInterval(play, CYCLE);
+            } else {
+              mock.classList.remove('on');
+            }
+          },
+          { threshold: 0.35 },
+        );
+        io.observe(mock);
+      })();
+    </script>
 
     <section class="orch">
       <div class="orch-text">
@@ -1983,6 +2041,68 @@ const ogImage = 'https://bohay.dev/og.png';
       .fm-row i { font-style: normal; }
       .fm-row i.ok { color: var(--accent); }
       .fm-row i.hot { color: var(--coral); }
+      /* Two panes side by side, framed like the real thing: every pane carries an
+         edge, and the divider between them is the seam bohay draws. */
+      .fm-panes { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.35rem; }
+      .fm-pane { border: 1px solid var(--line); padding: 0.4rem 0.5rem; min-width: 0; }
+      .fm-pt {
+        display: flex; align-items: center; gap: 0.35rem; color: var(--sub);
+        font-size: 0.66rem; letter-spacing: 0.04em; text-transform: uppercase;
+        padding-bottom: 0.3rem; margin-bottom: 0.3rem; border-bottom: 1px solid var(--line);
+      }
+      .fm-ln {
+        font-size: 0.68rem; line-height: 1.65; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis; color: var(--sub);
+      }
+      .fm-ln i { font-style: normal; color: var(--overlay1); }
+      .fm-ln b { color: var(--text); font-weight: 500; }
+      .fm-ln.dim { color: var(--overlay1); }
+      .fm-ln.ok, .fm-ln.sent, .fm-ln.back { color: var(--mint); }
+      .fm-ln.got { color: var(--accent); }
+      /* The `$name` token: the one thing on the mock that should catch the eye. */
+      .fm-ln u {
+        text-decoration: none; color: var(--accent); font-weight: 600;
+        background: rgb(from var(--accent) r g b / 0.14); padding: 0 0.2rem;
+      }
+      /* No outer card on this one: the two panes *are* the mock. A frame around
+         framed panes is a box inside a box, and it costs the room the panes want.
+         So drop the chrome and let them run to the column's full width. */
+      .fm.bare {
+        background: none; border: 0; padding: 0;
+      }
+      .fm.bare .fm-panes { margin-top: 0; gap: 0.6rem; }
+      .fm.bare .fm-pane { padding: 0.7rem 0.85rem; }
+      .fm.bare .fm-pt { font-size: 0.72rem; padding-bottom: 0.45rem; margin-bottom: 0.45rem; }
+      .fm.bare .fm-ln { font-size: 0.78rem; line-height: 1.85; }
+      /* Typed on, in the order the exchange actually happens: `--i` on each line
+         is its place in the conversation across *both* panes, so the two sides
+         interleave instead of each pane filling itself top to bottom.
+
+         `clip-path` rather than `width`, so revealing a line composites instead
+         of relaying out the column on every frame. `steps()` gives the characters
+         their tick; the caret rides the clip edge. */
+      .fm.bare .fm-ln { position: relative; clip-path: inset(0 100% 0 0); }
+      .fm.bare.on .fm-ln {
+        animation: fm-type 0.62s steps(26, end) forwards;
+        animation-delay: calc(var(--i, 0) * 0.5s);
+      }
+      .fm.bare.on .fm-ln::after {
+        content: ''; position: absolute; top: 0.15em; right: -0.1ch;
+        width: 0.55ch; height: 1.05em; background: var(--accent);
+        opacity: 0; animation: fm-caret 0.62s steps(1) calc(var(--i, 0) * 0.5s);
+      }
+      @keyframes fm-type { to { clip-path: inset(0 0 0 0); } }
+      @keyframes fm-caret { 0%, 99% { opacity: 0.9; } 100% { opacity: 0; } }
+      /* Nothing types: every line is simply there. */
+      @media (prefers-reduced-motion: reduce) {
+        .fm.bare .fm-ln { clip-path: none; }
+        .fm.bare.on .fm-ln, .fm.bare.on .fm-ln::after { animation: none; }
+        .fm.bare.on .fm-ln::after { display: none; }
+      }
+      /* Two panes need the width, so they stack rather than shrink. */
+      @media (max-width: 900px) {
+        .fm-panes { grid-template-columns: 1fr; }
+      }
       .fm-row i.hd { color: var(--overlay1); font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.06em; }
       /* The Mission Control table needs real columns, not a flex run. */
       .fm-row.cols {

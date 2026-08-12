@@ -522,12 +522,93 @@ fn server_cmd(args: &[String]) -> Result<()> {
         Some("stop") => server_stop(),
         Some("restart") => server_restart(),
         Some("status") => server_status(),
+        Some("update-manifest") => update_manifest(),
         Some(other) => {
             eprintln!("unknown server command: {other}");
-            eprintln!("usage: bohay server <start|stop|restart|status>");
+            eprintln!("usage: bohay server <start|stop|restart|status|update-manifest>");
             std::process::exit(2);
         }
     }
+}
+
+/// The published agent-detection manifest index (`bohay.dev/manifests/index.json`).
+#[derive(serde::Deserialize)]
+struct ManifestIndex {
+    files: Vec<String>,
+}
+
+/// `bohay server update-manifest` — fetch the latest agent-detection manifests
+/// and merge them in, so detection keeps up with agent-CLI UI changes without a
+/// binary release. Files land in the **managed** manifest dir (never touching a
+/// user's own manifests) and apply live if a server is running, else on next
+/// start. The source is `https://bohay.dev/manifests` (override with
+/// `$BOHAY_MANIFEST_URL`, e.g. a `file://` dir for testing).
+fn update_manifest() -> Result<()> {
+    let base = std::env::var("BOHAY_MANIFEST_URL")
+        .unwrap_or_else(|_| "https://bohay.dev/manifests".to_string());
+    let index_url = format!("{base}/index.json");
+    let index_body = crate::module::discovery::http_get(&index_url)
+        .map_err(|e| anyhow!("could not fetch the manifest index ({index_url}): {e}"))?;
+    let index: ManifestIndex = serde_json::from_str(&index_body)
+        .map_err(|e| anyhow!("bad manifest index at {index_url}: {e}"))?;
+
+    let managed = persist::manifests_dir().join("managed");
+    std::fs::create_dir_all(&managed)
+        .map_err(|e| anyhow!("cannot create {}: {e}", managed.display()))?;
+
+    let (mut written, mut skipped) = (0usize, 0usize);
+    for name in &index.files {
+        // Only plain `<agent>.toml` names — never a path that could escape the dir.
+        let bad = !name.ends_with(".toml")
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains("..");
+        if bad {
+            eprintln!("skipping suspicious manifest name: {name}");
+            skipped += 1;
+            continue;
+        }
+        let body = match crate::module::discovery::http_get(&format!("{base}/{name}")) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping {name}: {e}");
+                skipped += 1;
+                continue;
+            }
+        };
+        // Reject a garbled download before it can land in the managed dir.
+        if !crate::detect::manifest_parses(&body) {
+            eprintln!("skipping {name}: not a valid detection manifest");
+            skipped += 1;
+            continue;
+        }
+        std::fs::write(managed.join(name), body.as_bytes())
+            .map_err(|e| anyhow!("cannot write {name}: {e}"))?;
+        written += 1;
+    }
+    println!(
+        "updated {written} detection manifest(s){} -> {}",
+        if skipped > 0 {
+            format!(", {skipped} skipped")
+        } else {
+            String::new()
+        },
+        managed.display()
+    );
+
+    // Apply live if a server is up; otherwise the new rules load on next start.
+    match crate::cli::send_request("manifest.reload", serde_json::json!({})) {
+        Ok(v) => {
+            let n = v
+                .get("result")
+                .and_then(|r| r.get("rules"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            println!("reloaded into the running server ({n} rules active) - no restart needed");
+        }
+        Err(_) => println!("no server running - the update loads on next start"),
+    }
+    Ok(())
 }
 
 /// Spawn the detached server if one isn't already up.

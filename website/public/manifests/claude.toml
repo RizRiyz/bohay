@@ -1,0 +1,18 @@
+# Official bohay agent-detection manifest for Claude Code.
+# Served at https://bohay.dev/manifests/claude.toml and fetched by
+# `bohay server update-manifest`, so detection keeps up with Claude Code UI
+# changes without waiting for a bohay binary release. Merged on top of bohay's
+# built-in rules; a user's own ~/.bohay/manifests/*.toml still wins.
+agent = "claude"
+
+# Working. Newer Claude Code shows a line like:
+#   ✢ Inferring… (12s · ↓ 3.2k tokens)
+# It dropped the "esc to interrupt" hint and animates a non-braille spinner, so
+# match the streaming token counter. Require BOTH "↓ " and "tokens)" so a custom
+# statusline containing only one of them (e.g. "↓3" git state) can't false-trigger
+# working. The done line ("✻ Cogitated for 18s") has neither, so it stays idle.
+[[rule]]
+state = "working"
+priority = 200
+region = "screen"
+all = ["↓ ", "tokens)"]

@@ -73,7 +73,7 @@ fn parse_results(body: &str) -> Result<Vec<RepoHit>> {
 }
 
 /// Fetch a URL with `curl`, then `wget` — whichever is installed.
-fn http_get(url: &str) -> Result<String> {
+pub(crate) fn http_get(url: &str) -> Result<String> {
     let curl = [
         "-sSL",
         "--max-time",

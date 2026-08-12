@@ -250,17 +250,22 @@ impl Cond {
     }
 }
 
-/// A spinner glyph: a *non-blank* braille cell (the common animated spinner) or a
-/// moon phase (Kimi animates 🌑..🌘 for background agents).
+/// A spinner glyph: a *non-blank* braille cell (the common animated spinner), a
+/// moon phase (Kimi animates 🌑..🌘 for background agents), or a half-circle
+/// (◐◑◒◓) — the busy spinner newer Claude Code builds animate instead of braille.
 ///
-/// The range deliberately starts at `U+2801`, **excluding `U+2800`** (Braille
-/// Pattern Blank). That codepoint is an invisible cell many TUIs use for
+/// The braille range deliberately starts at `U+2801`, **excluding `U+2800`**
+/// (Braille Pattern Blank). That codepoint is an invisible cell many TUIs use for
 /// padding/indentation, and it is *not* Unicode whitespace, so `trim_start`
 /// leaves it at the start of a line — which used to make an idle agent whose UI
 /// pads a line with it read as a running spinner (stuck "working"). A real
-/// animated spinner only ever shows non-blank frames, so this loses nothing.
+/// animated spinner only ever shows non-blank frames, so this loses nothing. The
+/// half-circle range is safe here because Claude's *done* line begins with a
+/// different glyph (a star ✻), not a half-circle.
 fn is_spinner_glyph(c: char) -> bool {
-    ('\u{2801}'..='\u{28FF}').contains(&c) || ('\u{1F311}'..='\u{1F318}').contains(&c)
+    ('\u{2801}'..='\u{28FF}').contains(&c)
+        || ('\u{1F311}'..='\u{1F318}').contains(&c)
+        || ('\u{25D0}'..='\u{25D3}').contains(&c)
 }
 
 /// A detection rule: `state` is chosen when every `cond` holds in `region`.
@@ -296,11 +301,22 @@ impl Manifests {
     pub fn load(dir: &Path) -> Manifests {
         let mut rules = builtin_rules();
         let mut agents = builtin_agents();
-        for mf in load_dir(dir) {
+        // Official OTA manifests (`bohay server update-manifest`) live in a
+        // `managed/` subdir, kept apart from the user's own `*.toml` so an update
+        // never clobbers a hand-written rule. Load managed first, then the user's,
+        // so equal-priority user rules can still override.
+        let managed = load_dir(&dir.join("managed"));
+        for mf in managed.into_iter().chain(load_dir(dir)) {
             mf.apply_identity(&mut agents);
             rules.extend(mf.into_rules());
         }
         Manifests { rules, agents }
+    }
+
+    /// Total detection rules in effect (built-in + managed + user), for the
+    /// `manifest.reload` reply so a caller can confirm an update took.
+    pub fn rule_count(&self) -> usize {
+        self.rules.len()
     }
 
     /// True if `name` is a recognised agent (not a plain shell). Drives whether
@@ -411,6 +427,23 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![any(&["ctrl+c to stop"])],
         ),
+        // Newer Claude Code dropped the "esc to interrupt" hint and animates a
+        // non-braille spinner (✢/✻/✳), so the generic working rules miss it and
+        // the pane read as idle while generating. Its live line is
+        // "✢ Inferring… (12s · ↓ 3.2k tokens)", the streaming token counter of
+        // its **built-in** spinner (not the user-customizable statusLine). Match
+        // `↓ ` AND `tokens)` together, so a custom statusLine that happens to
+        // contain one of them (e.g. `↓3` git state) can't false-trigger working.
+        // The done line ("✻ Cogitated for 18s") has neither, so it stays idle,
+        // and the glyph is deliberately *not* added to `is_spinner_glyph`: the
+        // same ✻ appears in the done state and would misread it as working.
+        per(
+            "claude",
+            State::Working,
+            115,
+            Region::Screen,
+            vec![all(&["↓ ", "tokens)"])],
+        ),
         // Kimi's approval panel (permission prompt) shows the footer
         // "↑/↓ select · N choose · ↵ confirm" while it waits — a very specific
         // three-word combination, so it can't be mistaken for the spinner that
@@ -513,6 +546,12 @@ fn default_generic() -> String {
 }
 fn default_screen() -> String {
     "screen".to_string()
+}
+
+/// Whether `s` parses as a detection manifest, so `server update-manifest` can
+/// reject a garbled download before writing it into the managed dir.
+pub(crate) fn manifest_parses(s: &str) -> bool {
+    toml::from_str::<ManifestFile>(s).is_ok()
 }
 
 fn load_dir(dir: &Path) -> Vec<ManifestFile> {
@@ -954,6 +993,76 @@ mod tests {
             m.launch_args_for(&["claude".into()], "claude"),
             Some(vec![])
         );
+    }
+
+    #[test]
+    fn newer_claude_token_counter_reads_working() {
+        // Recent Claude Code shows "✢ Inferring… (12s · ↓ 3.2k tokens)" with no
+        // "esc to interrupt" and a non-braille spinner, so only the streaming
+        // token counter proves it is working.
+        assert_eq!(
+            state("✢ Inferring… (12s · ↓ 3.2k tokens)", false, false),
+            State::Working
+        );
+        // The done line is past-tense with no counter and must stay idle, even
+        // though it starts with the same ✻ glyph.
+        assert_eq!(state("✻ Cogitated for 18s", false, false), State::Idle);
+        assert_eq!(state("✻ Worked for 47s", false, false), State::Idle);
+    }
+
+    #[test]
+    fn half_circle_busy_spinner_reads_working() {
+        // Some Claude Code builds animate a half-circle busy spinner (◐◑◒◓)
+        // instead of braille; a line beginning with one means work.
+        assert_eq!(state("◐ Thinking…", false, false), State::Working);
+        assert_eq!(state("◓ Doing the thing", false, false), State::Working);
+        // A star-led done line is still idle — stars are not spinner glyphs here.
+        assert_eq!(state("✻ Cogitated for 18s", false, false), State::Idle);
+    }
+
+    #[test]
+    fn managed_ota_manifests_load_from_the_managed_subdir() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("bohay-managed-mf-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let managed = dir.join("managed");
+        fs::create_dir_all(&managed).unwrap();
+        // An OTA-style manifest that teaches claude a custom working marker.
+        fs::write(
+            managed.join("claude.toml"),
+            "agent = \"claude\"\n\
+             [[rule]]\n\
+             state = \"working\"\n\
+             priority = 250\n\
+             region = \"screen\"\n\
+             all = [\"zzz-marker\"]\n",
+        )
+        .unwrap();
+        let m = Manifests::load(&dir);
+        let d = classify(
+            Some("claude"),
+            "zzz-marker showing",
+            false,
+            false,
+            "claude",
+            "claude",
+            &[],
+            &m,
+        );
+        assert_eq!(
+            d.state,
+            State::Working,
+            "a managed/ manifest rule took effect"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_parses_accepts_valid_and_rejects_garbage() {
+        assert!(manifest_parses(
+            "agent = \"claude\"\n[[rule]]\nstate = \"working\"\nregion = \"screen\"\nall = [\"x\"]\n"
+        ));
+        assert!(!manifest_parses("this is not toml ["));
     }
 
     #[test]

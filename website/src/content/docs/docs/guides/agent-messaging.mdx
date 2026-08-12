@@ -94,6 +94,26 @@ and it is bounded by `--timeout` (default 300s, exit 2 on timeout; exit 0 on
 settle). So a broken worker never traps you — but since it blocks, reach for it
 only when you actually need to wait.
 
+## The `$` shorthand
+
+With the skill installed you rarely type the commands. Write `$name` at the start
+of a line and the rest of it goes to that agent:
+
+```
+$codex add tests to src/parse.rs
+$reviewer take a look at the diff
+$7 run the migration
+```
+
+`$codex` addresses the pane named codex. An agent name or a pane id work the same
+way, so `$reviewer` and `$7` both resolve. The same targets `agent send` takes.
+
+It is a hand-off, not a wait: the agent you typed into keeps working, and the
+answer comes back when the other one is done. Ask for it to wait and it will.
+
+If the name does not resolve, the agent runs `bohay agent list` to find it or
+asks you which pane you meant.
+
 ## It is automatic with the skill
 
 The commands above are the plumbing. What lets a coding agent do this on its own

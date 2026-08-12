@@ -169,6 +169,8 @@ server:
   server start               start the background server if it isn't up
   server stop                stop the server (and all panes)
   server restart             stop + start (load a newly-installed binary)
+  server update-manifest     fetch the latest agent-detection rules from bohay.dev
+                             (applies live if the server is up; else on next start)
   integration install|uninstall <claude|copilot|codex|opencode|kimi|grok>
                              add/remove bohay's session-resume hook (uninstall
                              removes only bohay's hook, never the agent)
@@ -853,7 +855,7 @@ pub fn request_attach(pane: &str) -> Result<()> {
 }
 
 /// One request/response over the control socket.
-fn send_request(method: &str, params: Value) -> Result<Value> {
+pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
     let path = crate::persist::cli_socket_path();
     let mut stream =
         crate::ipc::transport::connect(&path).map_err(|_| anyhow!("no bohay server running"))?;

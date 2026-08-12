@@ -395,6 +395,14 @@ impl App {
     pub(crate) fn dispatch(&mut self, method: &str, p: &Value) -> Result<Value, (String, String)> {
         match method {
             "ping" => Ok(json!({"type":"pong","version": env!("CARGO_PKG_VERSION"),"protocol":1})),
+            // Re-read `~/.bohay/manifests/` (built-in + managed OTA + user) into
+            // the live engine, so `server update-manifest` applies without a
+            // restart. Detection uses the new rules on the next tick.
+            "manifest.reload" => {
+                self.manifests =
+                    crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir());
+                Ok(json!({"type":"ok","rules": self.manifests.rule_count()}))
+            }
             "server.stop" => {
                 self.should_quit = true;
                 Ok(json!({"type":"ok"}))
