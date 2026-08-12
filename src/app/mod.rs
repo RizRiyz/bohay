@@ -4510,7 +4510,17 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
         let focus = app.layout().focus;
         // Stand in for the detection scan: a claude pane started with flags.
-        app.status.get_mut(&focus).unwrap().agent = "claude".into();
+        //
+        // The session is set **explicitly**. The options are keyed off the agent in
+        // `agent_session`, and without one that resolves by scanning `~/.claude`,
+        // which makes the test pass or fail on whether the machine running it
+        // happens to have Claude sessions on disk.
+        let st = app.status.get_mut(&focus).unwrap();
+        st.agent = "claude".into();
+        st.agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "s-flags".into(),
+        });
         app.proc_commands.insert(
             focus,
             vec!["claude --model opus --permission-mode bypassPermissions".into()],
