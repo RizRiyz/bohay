@@ -229,7 +229,7 @@ pub struct NotifyConfig {
 }
 
 fn default_theme() -> String {
-    "noir".to_string()
+    "quattro-rally".to_string()
 }
 fn default_lang() -> String {
     "en".to_string()
@@ -370,12 +370,12 @@ mod tests {
     #[test]
     fn defaults_and_roundtrip() {
         let c = Config::default();
-        assert_eq!(c.theme, "noir");
+        assert_eq!(c.theme, "quattro-rally");
         assert!(c.layout.show_titles);
         assert_eq!(c.layout.col_gap, 1);
         // Empty object → all defaults (forward/back compat).
         let from_empty: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(from_empty.theme, "noir");
+        assert_eq!(from_empty.theme, "quattro-rally");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         // Round-trip preserves values.
         // Scrollback defaults to tmux's 2 000 and is clamped to sane bounds.

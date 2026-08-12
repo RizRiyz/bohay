@@ -9,6 +9,7 @@
  * does in the app.
  */
 export const THEMES: { id: string; label: string; note: string }[] = [
+  { id: 'quattro-rally', label: 'quattro rally', note: 'soft dark, rally-gold accent' },
   { id: 'noir', label: 'noir', note: 'near-black, fluo-green accent' },
   { id: 'ocean', label: 'ocean', note: 'deep cmd-blue, cyan accent' },
   { id: 'dracula', label: 'dracula', note: 'indigo dark, violet accent' },

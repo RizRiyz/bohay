@@ -6592,7 +6592,7 @@ mod tests {
         assert!(text.contains("Settings") && text.contains("Theme") && text.contains("Agents"));
 
         // Moving the selection down live-applies the next theme.
-        assert_eq!(app.config.theme, "noir");
+        assert_eq!(app.config.theme, "quattro-rally");
         app.handle_event(AppEvent::Key(KeyEvent::new(
             KeyCode::Down,
             KeyModifiers::NONE,

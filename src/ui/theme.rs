@@ -498,6 +498,8 @@ impl Theme {
 
 /// Built-in palette names, in display order (first is the default).
 pub const THEMES: &[&str] = &[
+    // The default leads the list, so Settings -> Theme opens on it.
+    "quattro-rally",
     "noir",
     "ocean",
     "dracula",
@@ -507,7 +509,6 @@ pub const THEMES: &[&str] = &[
     "catppuccin-macchiato",
     "catppuccin-frappe",
     "gruvbox",
-    "quattro-rally",
     "sunset",
     "homebrew",
     "grass",
@@ -550,7 +551,9 @@ pub fn by_name(name: &str) -> Theme {
         "catppuccin-latte" | "latte" => Theme::latte(),
         "sky" => Theme::sky(),
         "mono" => Theme::mono(),
-        _ => Theme::noir(),
+        "noir" => Theme::noir(),
+        // Anything unrecognised falls back to the default palette.
+        _ => Theme::quattro_rally(),
     }
 }
 

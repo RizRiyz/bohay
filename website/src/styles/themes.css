@@ -2,6 +2,26 @@
    Source of truth is bohay's own palette registry (src/ui/theme.rs).
    Regenerate:  cargo test emit_theme_css -- --ignored --nocapture
    These are the real palettes the app ships, so the site cannot drift. */
+html[data-bh-theme='quattro-rally'] {
+  --bg: #181926;
+  --bg2: #1e2030;
+  --base: #24273a;
+  --surface: #363a4f;
+  --line: #494d64;
+  --border: #5a5130;
+  --overlay0: #6e738d;
+  --overlay1: #8087a2;
+  --sub: #a5adcb;
+  --sub2: #b8c0e0;
+  --text: #cad3f5;
+  --accent: #dbc66f;
+  --sel: #3a3416;
+  --green: #94a143;
+  --mint: #b8cf6a;
+  --amber: #e0a154;
+  --coral: #cf5a44;
+}
+.td-sw[data-theme='quattro-rally'] { background: #dbc66f; }
 html[data-bh-theme='noir'] {
   --bg: #070709;
   --bg2: #111116;
