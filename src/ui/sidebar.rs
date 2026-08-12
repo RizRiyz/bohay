@@ -112,12 +112,16 @@ fn dock_slots(body: Rect, n: usize) -> (Vec<Rect>, Vec<u16>) {
 }
 
 /// A one-row horizontal rule between two stacked docks.
+///
+/// Drawn in `border`, the same colour a pane frame uses, so every rule in the
+/// chrome belongs to one family and a theme that tints its borders (quattro-rally
+/// gold, matrix green) tints this too.
 fn draw_dock_divider(f: &mut RenderTarget, area: Rect, y: u16, t: &Theme) {
     let buf = f.buffer_mut();
     for x in (area.x + 1)..area.right().saturating_sub(1) {
         buf[(x, y)]
             .set_symbol("─")
-            .set_style(Style::new().fg(t.surface1).bg(t.base));
+            .set_style(Style::new().fg(t.border).bg(t.base));
     }
 }
 
@@ -137,8 +141,16 @@ pub(super) fn draw_sidebar(
             Side::Left => area.right().saturating_sub(1),
             Side::Right => area.x,
         };
+        // Hovered or dragging, the seam lights up in `border_focus` — the same
+        // colour a focused pane frame uses, since it is the same kind of handle.
+        // At rest it stays `surface0`, which most palettes put *below* the sidebar
+        // background so the edge reads as a groove rather than a drawn line.
         let seam_active = app.hover_sidebar == Some(side) || app.sidebar_resize == Some(side);
-        let sep_fg = if seam_active { t.overlay0 } else { t.surface0 };
+        let sep_fg = if seam_active {
+            t.border_focus
+        } else {
+            t.surface0
+        };
         let buf = f.buffer_mut();
         for y in area.top()..area.bottom() {
             buf[(sep_x, y)]
@@ -924,6 +936,58 @@ mod tests {
         assert!(
             buffer_contains(&term, "resume"),
             "All shows session history"
+        );
+    }
+}
+
+#[cfg(test)]
+mod chrome_colour_tests {
+    use crate::app::{App, Side};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// The sidebar's rules belong to the same colour family as a pane frame, so a
+    /// theme that tints its borders (quattro-rally gold, matrix green) tints these
+    /// too instead of leaving cold grey lines in a warm palette.
+    ///
+    /// Asserted against the theme's own values rather than literal hexes, so it
+    /// holds for every palette and cannot rot when one is retuned.
+    #[test]
+    fn sidebar_rules_follow_the_theme_border() {
+        let _env = crate::persist::test_env("side-rules");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.theme = crate::ui::theme::by_name("quattro-rally");
+        let t = app.theme.clone();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let seam_x = app.sidebars.left.width.saturating_sub(1);
+        let divider_y = (0..40u16)
+            .find(|y| term.backend().buffer().cell((5, *y)).map(|c| c.symbol()) == Some("─"))
+            .expect("a dock divider is drawn");
+
+        // The dock separator uses `border`.
+        assert_eq!(
+            term.backend().buffer().cell((5, divider_y)).unwrap().fg,
+            t.border,
+            "the dock divider is drawn in the theme's border colour"
+        );
+
+        // At rest the seam stays `surface0`: most palettes put it *below* the
+        // sidebar background, so the edge reads as a groove, not a drawn line.
+        let seam =
+            |term: &Terminal<TestBackend>| term.backend().buffer().cell((seam_x, 10)).unwrap().fg;
+        assert_eq!(seam(&term), t.surface0, "the resting seam is a groove");
+
+        // Hovered, it lights up in `border_focus`, like a focused pane frame.
+        app.hover = Some((seam_x, 10));
+        app.hover_sidebar = Some(Side::Left);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert_eq!(
+            seam(&term),
+            t.border_focus,
+            "the hovered resize seam uses the focus border colour"
         );
     }
 }
