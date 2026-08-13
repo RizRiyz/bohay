@@ -69,6 +69,11 @@ pub struct Config {
     /// An empty value means the command is explicitly unbound.
     #[serde(default)]
     pub keybindings: std::collections::HashMap<String, String>,
+    /// The `Ctrl+Space`-style prefix chord that opens command mode (docs/64).
+    /// A string like `"ctrl+space"` / `"ctrl+b"`; parsed by `keys::PrefixSpec`.
+    /// Must carry Ctrl so it can never swallow a plain typed key.
+    #[serde(default = "default_prefix")]
+    pub prefix: String,
     /// Mission Control cost overrides (docs/54, MC-5): model-id substring →
     /// `[input, output, cache]` USD per **million** tokens, taking precedence over
     /// the built-in price table. Empty by default (use the bundled estimates).
@@ -257,6 +262,9 @@ fn one() -> u16 {
 fn yes() -> bool {
     true
 }
+fn default_prefix() -> String {
+    "ctrl+space".to_string()
+}
 fn default_scrollback() -> usize {
     SCROLLBACK_DEFAULT
 }
@@ -276,6 +284,7 @@ impl Default for Config {
             resume_launch_flags: false,
             install_agent_skill: true,
             keybindings: std::collections::HashMap::new(),
+            prefix: default_prefix(),
             mission_pricing: std::collections::HashMap::new(),
             mission_budget: None,
             docks_off: Vec::new(),

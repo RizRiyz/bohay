@@ -6,6 +6,12 @@ use super::*;
 use crate::config;
 use crate::ui::theme;
 
+/// The Keys tab leads with two special selectable rows before the command list
+/// (docs/64): the prefix chord, then the preset chooser.
+pub const KEYS_PREFIX_ROW: usize = 0;
+pub const KEYS_PRESET_ROW: usize = 1;
+pub const KEYS_HEADER_ROWS: usize = 2;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
     General,
@@ -218,7 +224,9 @@ impl App {
             SettingsTab::Layout => self.layout_rows().len(),
             // Rebindable commands first, then the read-only reference rows — the
             // cursor steps through both so the whole reference is keyboard-reachable.
-            SettingsTab::Keys => crate::app::Cmd::ALL.len() + crate::app::key_reference_rows(),
+            SettingsTab::Keys => {
+                KEYS_HEADER_ROWS + crate::app::Cmd::ALL.len() + crate::app::key_reference_rows()
+            }
             SettingsTab::Modules => self.module_rows().len(),
             SettingsTab::Integrations => crate::integration::AGENTS.len(),
             SettingsTab::Language => crate::i18n::LANGS.len(),
@@ -239,7 +247,16 @@ impl App {
         // like Tab / digits can themselves be bound.
         if capturing {
             if key.code != KeyCode::Esc {
-                if let (Some(cmd), Some(s)) = (Self::keys_cmd_at(cursor), keys::key_string(&key)) {
+                if cursor == KEYS_PREFIX_ROW {
+                    // Capturing the prefix chord needs the modifiers, not just the
+                    // key. Refuse anything without Ctrl and keep the old prefix.
+                    match Self::prefix_spec_from_key(&key) {
+                        Some(spec) if self.set_prefix(&spec) => {}
+                        _ => self.show_toast("Prefix must include Ctrl"),
+                    }
+                } else if let (Some(cmd), Some(s)) =
+                    (Self::keys_cmd_at(cursor), keys::key_string(&key))
+                {
                     self.rebind(cmd, s);
                 }
             }
@@ -259,10 +276,13 @@ impl App {
             KeyCode::Left => self.settings_adjust(cursor, -1),
             KeyCode::Right => self.settings_adjust(cursor, 1),
             KeyCode::Enter | KeyCode::Char(' ') => self.settings_activate(cursor),
-            // In the Keys tab, Backspace/Delete resets a binding to its default
-            // (a no-op on a reference row, which has no command).
+            // In the Keys tab, Backspace/Delete resets a binding to its default:
+            // the prefix row back to Ctrl+Space, a command row to its default key
+            // (a no-op on the preset / reference rows, which have nothing to reset).
             KeyCode::Backspace | KeyCode::Delete if tab == SettingsTab::Keys => {
-                if let Some(cmd) = Self::keys_cmd_at(cursor) {
+                if cursor == KEYS_PREFIX_ROW {
+                    self.set_prefix("ctrl+space");
+                } else if let Some(cmd) = Self::keys_cmd_at(cursor) {
                     self.reset_binding(cmd);
                 }
             }
@@ -391,7 +411,10 @@ impl App {
             SettingsTab::Theme | SettingsTab::Language => self.settings_move(delta),
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
             SettingsTab::General => self.adjust_general(cursor, delta),
-            SettingsTab::Keys => {} // rebind is Enter (capture), not ‹ ›
+            // Only the preset row responds to ‹ › (it cycles presets); rebinding a
+            // command is Enter (capture), and the prefix row captures a chord.
+            SettingsTab::Keys if cursor == KEYS_PRESET_ROW => self.cycle_preset(delta),
+            SettingsTab::Keys => {}
             SettingsTab::Integrations => self.settings_activate(cursor),
             SettingsTab::Modules => self.toggle_module(cursor, Some(delta)),
         }
@@ -416,13 +439,23 @@ impl App {
             },
             // Enter on a rebindable Keys row starts capturing the next key as its
             // binding; on a reference row there's nothing to capture.
-            SettingsTab::Keys => {
-                if Self::keys_cmd_at(cursor).is_some() {
+            SettingsTab::Keys => match cursor {
+                // The preset row applies the next preset on Enter/click.
+                KEYS_PRESET_ROW => self.cycle_preset(1),
+                // The prefix row and every command row capture the next key.
+                KEYS_PREFIX_ROW => {
                     if let Some(ui) = self.settings.as_mut() {
                         ui.capturing = true;
                     }
                 }
-            }
+                _ => {
+                    if Self::keys_cmd_at(cursor).is_some() {
+                        if let Some(ui) = self.settings.as_mut() {
+                            ui.capturing = true;
+                        }
+                    }
+                }
+            },
             SettingsTab::Integrations => self.install_integration(cursor),
             SettingsTab::Modules => self.toggle_module(cursor, None),
         }
@@ -431,7 +464,57 @@ impl App {
     /// The command at row `cursor` in the Keys tab, or `None` when the cursor is
     /// on a read-only reference row (which lives past the command list).
     fn keys_cmd_at(cursor: usize) -> Option<crate::app::Cmd> {
-        crate::app::Cmd::ALL.get(cursor).copied()
+        cursor
+            .checked_sub(KEYS_HEADER_ROWS)
+            .and_then(|i| crate::app::Cmd::ALL.get(i).copied())
+    }
+
+    /// Build a prefix spec string (e.g. `"ctrl+b"`) from a captured key event, or
+    /// `None` if it doesn't carry Ctrl. `Ctrl+Space` arrives as `Char(' ')`/`'@'`
+    /// with Ctrl or a bare `Null`; both normalize to `"ctrl+space"`.
+    fn prefix_spec_from_key(key: &KeyEvent) -> Option<String> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let base = match key.code {
+            KeyCode::Null | KeyCode::Char(' ') | KeyCode::Char('@') => "space".to_string(),
+            KeyCode::Char(c) if c.is_ascii() => c.to_ascii_lowercase().to_string(),
+            _ => return None,
+        };
+        // Ctrl is required. A bare `Null` already implies Ctrl+Space.
+        if !ctrl && !matches!(key.code, KeyCode::Null) {
+            return None;
+        }
+        let mut s = String::from("ctrl");
+        if alt {
+            s.push_str("+alt");
+        }
+        s.push('+');
+        s.push_str(&base);
+        Some(s)
+    }
+
+    /// The index of the preset that exactly matches the current config, or `None`
+    /// when the user has customized beyond any preset ("Custom").
+    pub fn current_preset(&self) -> Option<usize> {
+        keys::presets().iter().position(|p| {
+            p.prefix == self.config.prefix
+                && self.config.keybindings.len() == p.binds.len()
+                && p.binds
+                    .iter()
+                    .all(|(id, k)| self.config.keybindings.get(*id).map(|v| v == k) == Some(true))
+        })
+    }
+
+    /// Cycle to the next/previous preset and apply it (the Preset row's `‹ ›`).
+    fn cycle_preset(&mut self, delta: i32) {
+        let ps = keys::presets();
+        let n = ps.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let cur = self.current_preset().unwrap_or(0) as i32;
+        let next = (((cur + delta) % n) + n) % n;
+        self.apply_preset(ps[next as usize].id);
     }
 
     /// The Modules tab's dynamic row model: one row per installed module,

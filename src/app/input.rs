@@ -1562,7 +1562,7 @@ impl App {
         if self.mode == Mode::Normal
             && (self.active_is_git() || self.active_is_orch() || self.active_is_mission())
         {
-            if is_prefix(&key) {
+            if self.prefix.matches(&key) {
                 self.mode = Mode::Prefix;
             } else if self.active_is_orch() {
                 self.handle_orch_key(key);
@@ -1576,10 +1576,12 @@ impl App {
         match self.mode {
             Mode::Prefix => {
                 self.mode = Mode::Normal;
-                // Pressing the prefix twice sends a literal Ctrl-Space (NUL).
-                if is_prefix(&key) {
+                // Pressing the prefix twice sends a literal prefix chord into the
+                // pane (Ctrl+Space → NUL; Ctrl+b → 0x02; etc).
+                if self.prefix.matches(&key) {
+                    let bytes = self.prefix.literal_bytes();
                     if let Some(p) = self.focused() {
-                        p.send(&[0x00]);
+                        p.send(&bytes);
                     }
                     return true; // left prefix mode → the status bar updates
                 }
@@ -1623,7 +1625,7 @@ impl App {
                 true // a prefix command (and leaving prefix mode) changes the UI
             }
             Mode::Normal => {
-                if is_prefix(&key) {
+                if self.prefix.matches(&key) {
                     self.mode = Mode::Prefix;
                     return true; // entered prefix mode → the status bar updates
                 }
@@ -1662,17 +1664,6 @@ impl App {
             Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
-}
-
-/// True if `key` is the prefix chord (Ctrl+Space). Terminals and OSes report
-/// this chord inconsistently — modern Unix terminals send `Char(' ')` + Ctrl,
-/// while the Windows console / some VT terminals send `Char('@')` + Ctrl or a
-/// bare `Null` (the NUL byte Ctrl+Space produces). Accept them all so the prefix
-/// works the same everywhere.
-fn is_prefix(key: &KeyEvent) -> bool {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    matches!(key.code, KeyCode::Null)
-        || (ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('@')))
 }
 
 /// Encode one mouse-wheel notch as the bytes a mouse-tracking app expects.

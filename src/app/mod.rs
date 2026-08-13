@@ -38,10 +38,13 @@ mod switcher;
 
 pub use search::{GlobalSearch, SearchFlash, SearchHit};
 
-pub use keys::{key_reference_rows, Cmd, KEY_REFERENCE};
+pub use keys::{key_reference_rows, presets, Cmd, KEY_REFERENCE};
 pub use modules::ModuleMenuAction;
 pub use picker::{FolderPicker, Row};
-pub use settings::{GeneralRow, LayoutRow, ModuleRow, SettingsTab, SettingsUi};
+pub use settings::{
+    GeneralRow, LayoutRow, ModuleRow, SettingsTab, SettingsUi, KEYS_HEADER_ROWS, KEYS_PREFIX_ROW,
+    KEYS_PRESET_ROW,
+};
 
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
@@ -923,6 +926,8 @@ pub struct App {
     pub config: crate::config::Config,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
+    /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
+    pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
     pub settings: Option<SettingsUi>,
     /// The open folder picker (workspace chooser), if any (captures input).
@@ -1298,6 +1303,7 @@ impl App {
         let sidebars = Sidebars::from_config(&config.sidebars());
         let shell = crate::platform::resolve_shell(&config.shell);
         let keymap = keys::build_keymap(&config.keybindings);
+        let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
 
         let id = PaneId::alloc();
         let pane = Pane::spawn(
@@ -1336,6 +1342,7 @@ impl App {
             catalog,
             config,
             keymap,
+            prefix,
             agent_names: HashMap::new(),
             settings: None,
             picker: None,
@@ -1523,6 +1530,7 @@ impl App {
         let config = crate::config::load();
         let files_show_hidden = config.layout.files_show_hidden;
         let keymap = keys::build_keymap(&config.keybindings);
+        let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let shell = crate::platform::resolve_shell(&config.shell);
         let scrollback = config.scrollback();
         let modules = crate::module::registry::load();
@@ -1753,6 +1761,7 @@ impl App {
             catalog,
             config,
             keymap,
+            prefix,
             agent_names,
             settings: None,
             picker: None,
@@ -3351,6 +3360,19 @@ impl App {
     fn focus_dir(&mut self, dir: Dir) {
         let area = self.last_pane_area;
         self.layout_mut().focus_dir(area, dir);
+    }
+
+    /// Cycle focus to the next pane in the current tab, in leaf order, wrapping
+    /// at the end (tmux's `o`). A no-op with fewer than two panes.
+    fn focus_next_pane(&mut self) {
+        let leaves = self.layout().leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        let focus = self.layout().focus;
+        let idx = leaves.iter().position(|&id| id == focus).unwrap_or(0);
+        let next = leaves[(idx + 1) % leaves.len()];
+        self.layout_mut().focus = next;
     }
 
     // ── pane resize (docs/27) ───────────────────────────────────────────────
@@ -6971,7 +6993,7 @@ mod tests {
         assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Keys);
         let idx = Cmd::ALL.iter().position(|c| *c == Cmd::NewTab).unwrap();
         if let Some(ui) = app.settings.as_mut() {
-            ui.cursor = idx;
+            ui.cursor = idx + crate::app::KEYS_HEADER_ROWS;
         }
         app.handle_event(AppEvent::Key(KeyEvent::new(
             KeyCode::Enter,

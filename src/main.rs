@@ -1685,7 +1685,8 @@ mod tests {
         );
 
         // Midway: the cursor reaches the first reference block (the fixed keys).
-        for _ in 0..crate::app::Cmd::ALL.len() {
+        // Step past the two header rows (prefix / preset) and every command.
+        for _ in 0..crate::app::KEYS_HEADER_ROWS + crate::app::Cmd::ALL.len() {
             app.handle_settings_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         let mid = screen(&mut app);
