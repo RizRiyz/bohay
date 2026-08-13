@@ -335,6 +335,9 @@ pub(crate) fn window_title() -> &'static str {
 
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
+    if config::load().theme == "terminal" {
+        ui::theme::probe_terminal();
+    }
     let mut terminal = ratatui::init();
     let _ = execute!(
         std::io::stdout(),
@@ -358,6 +361,10 @@ fn run_local() -> Result<()> {
 }
 
 fn autodetect_and_attach() -> Result<()> {
+    if config::load().theme == "terminal" {
+        ui::theme::probe_terminal();
+    }
+
     let sock = persist::client_socket_path();
     let fresh = !server_running(&sock);
     if fresh {

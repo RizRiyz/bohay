@@ -23,3 +23,6 @@ __pycache__/
 *.pyc
 
 examples/modules/pixtui/
+# nix
+result
+result/**
