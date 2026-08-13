@@ -211,7 +211,8 @@ impl Cmd {
             Cmd::NewTab => "c",
             Cmd::NextTab => "n",
             Cmd::PrevTab => "p",
-            Cmd::RenameTab => "R",
+            // `,` renames the tab on both bohay and tmux (tmux's rename-window).
+            Cmd::RenameTab => ",",
             Cmd::NewWorkspace => "N",
             Cmd::CloseWorkspace => "D",
             Cmd::NextWorkspace => "w",
@@ -219,7 +220,9 @@ impl Cmd {
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
             Cmd::OpenBoard => "o",
-            Cmd::OpenSettings => ",",
+            // `=` opens Settings (`,` now renames the tab, matching tmux). The
+            // Menu button is always available too, so this is just the shortcut.
+            Cmd::OpenSettings => "=",
             Cmd::ToggleSidebar => "b",
             Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
@@ -545,12 +548,14 @@ pub fn presets() -> &'static [Preset] {
                 // tmux splits: `%` = left/right, `"` = top/bottom.
                 ("split_right", "%"),
                 ("split_down", "\""),
-                // `o` cycles to the next pane, `,` renames the window/tab.
+                // `o` cycles to the next pane (rename is `,` by default already).
                 ("next_pane", "o"),
-                ("rename_tab", ","),
                 // `(` / `)` step to the previous / next session (bohay workspace).
                 ("prev_node", "("),
                 ("next_node", ")"),
+                // `w` opens the jump palette (tmux's choose-window / -tree); the
+                // scope chips inside narrow it to tabs, workspaces, or agents.
+                ("switcher", "w"),
             ],
         },
     ]
@@ -736,6 +741,9 @@ mod tests {
         assert_eq!(m.get("h"), Some(&Cmd::FocusLeft)); // vim alias
         assert_eq!(m.get("⇥"), Some(&Cmd::NextTab));
         assert_eq!(m.get("N"), Some(&Cmd::NewWorkspace));
+        // `,` renames the tab (tmux-compatible); Settings moved to `=`.
+        assert_eq!(m.get(","), Some(&Cmd::RenameTab));
+        assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
         // every command is reachable by its default key
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} bound");
@@ -884,6 +892,54 @@ mod tests {
             app.layout().len(),
             panes + 1,
             "Ctrl+Space+v splits the pane"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_search_and_the_live_prefix() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("status-prefix-hint");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+
+        let screen = |app: &mut App| -> String {
+            let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            term.draw(|f| crate::ui::render(f, app)).unwrap();
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<Vec<_>>()
+                .join("")
+        };
+
+        // Normal mode shows the live prefix chord (default Ctrl+Space).
+        assert!(
+            screen(&mut app).contains("Ctrl+Space"),
+            "default prefix shown"
+        );
+
+        // Enter prefix mode: the hint bar includes the search key `/`.
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        let bar = screen(&mut app);
+        assert!(
+            bar.contains('/'),
+            "prefix hint bar shows the `/` search key"
+        );
+
+        // Back in normal mode, after switching to Ctrl+b the readout reflects it.
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.set_prefix("ctrl+b"));
+        assert!(
+            screen(&mut app).contains("Ctrl+B"),
+            "status bar reflects the custom prefix"
         );
     }
 

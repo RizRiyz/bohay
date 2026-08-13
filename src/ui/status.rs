@@ -49,6 +49,10 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
     let prefix = app.mode == Mode::Prefix;
 
     let mut left: Vec<Span> = vec![Span::raw(" ")];
+    // The hint keys reflect the *actual* bindings (docs/64), so they stay correct
+    // after a rebind or the tmux preset (e.g. splits show `%`/`"`, not `v`/`s`).
+    let k = |c: crate::app::Cmd| app.key_for(c);
+    let prefix_label = app.prefix.label();
     if prefix {
         // The user just pressed the prefix — give the hints the full width (the
         // right-side readout is suppressed below) and lead with `?` so the
@@ -60,16 +64,33 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
         left.push(Span::raw("  "));
         left.extend(hint("?", cat.all_keys, t));
         left.extend(hint("←↓↑→", cat.pane, t));
-        left.extend(hint("v/s", cat.act_split, t));
-        left.extend(hint("x", cat.act_close, t));
-        left.extend(hint("c", cat.act_new_tab, t));
-        left.extend(hint("n/p", cat.act_tab, t));
-        left.extend(hint("N", cat.workspace, t));
-        left.extend(hint("g", "git", t));
-        left.extend(hint("o", "orch", t));
+        left.extend(hint(
+            &format!(
+                "{}/{}",
+                k(crate::app::Cmd::SplitRight),
+                k(crate::app::Cmd::SplitDown)
+            ),
+            cat.act_split,
+            t,
+        ));
+        left.extend(hint(&k(crate::app::Cmd::ClosePane), cat.act_close, t));
+        left.extend(hint(&k(crate::app::Cmd::NewTab), cat.act_new_tab, t));
+        left.extend(hint(
+            &format!(
+                "{}/{}",
+                k(crate::app::Cmd::NextTab),
+                k(crate::app::Cmd::PrevTab)
+            ),
+            cat.act_tab,
+            t,
+        ));
+        left.extend(hint(&k(crate::app::Cmd::NewWorkspace), cat.workspace, t));
+        left.extend(hint(&k(crate::app::Cmd::OpenGit), "git", t));
+        left.extend(hint(&k(crate::app::Cmd::OpenBoard), "orch", t));
+        left.extend(hint(&k(crate::app::Cmd::GlobalSearch), cat.act_search, t));
     } else {
         left.push(Span::styled(
-            " ⌃Space ",
+            format!(" {prefix_label} "),
             Style::new().fg(t.crust).bg(t.accent).bold(),
         ));
         left.push(Span::styled(
@@ -77,7 +98,7 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
             Style::new().fg(t.subtext0),
         ));
         left.push(Span::styled("  ·  ", Style::new().fg(t.overlay0)));
-        left.extend(hint("⌃Space ?", cat.all_shortcuts, t));
+        left.extend(hint(&format!("{prefix_label} ?"), cat.all_shortcuts, t));
     }
     f.render_widget(Paragraph::new(Line::from(left)), area);
 

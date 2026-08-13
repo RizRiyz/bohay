@@ -420,6 +420,11 @@ pub const COMPACT_WIDTH: u16 = 50;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SwitcherTarget {
     Pane(PaneId),
+    /// A tab, addressed by its workspace + tab index (docs/65 — the window list).
+    Tab {
+        ws: usize,
+        tab: usize,
+    },
     Workspace(usize),
     NewWorkspace,
 }
@@ -433,6 +438,13 @@ pub enum SwitcherRow {
         title: String,
         location: String,
     },
+    /// A tab row (docs/65): a jump to a specific tab in a workspace.
+    Tab {
+        target: SwitcherTarget,
+        name: String,
+        location: String,
+        active: bool,
+    },
     Node {
         target: SwitcherTarget,
         name: String,
@@ -443,6 +455,48 @@ pub enum SwitcherRow {
         target: SwitcherTarget,
         label: String,
     },
+}
+
+/// Which sections the switcher shows (docs/65). `All` lists everything; the
+/// others narrow to one category so `w` (window list) and `s` (session tree) can
+/// open the switcher pre-scoped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SwitcherScope {
+    All,
+    Agents,
+    Tabs,
+    Workspaces,
+}
+
+impl SwitcherScope {
+    /// The chip order (also the `Tab`-to-cycle order).
+    pub const ALL: [SwitcherScope; 4] = [
+        SwitcherScope::All,
+        SwitcherScope::Agents,
+        SwitcherScope::Tabs,
+        SwitcherScope::Workspaces,
+    ];
+
+    /// True if this scope shows `section` (one of Agents/Tabs/Workspaces).
+    pub fn shows(self, section: SwitcherScope) -> bool {
+        self == SwitcherScope::All || self == section
+    }
+
+    /// The next scope in the chip order (wraps), for `Tab`.
+    pub fn next(self) -> SwitcherScope {
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// Localized chip label.
+    pub fn label(self, cat: &crate::i18n::Catalog) -> &'static str {
+        match self {
+            SwitcherScope::All => cat.switch_scope_all,
+            SwitcherScope::Agents => cat.agents,
+            SwitcherScope::Tabs => cat.switch_scope_tabs,
+            SwitcherScope::Workspaces => cat.workspaces,
+        }
+    }
 }
 
 /// A right-click context menu on a FILES-dock row (docs/38 FILE-6): file/folder
@@ -1160,8 +1214,14 @@ pub struct App {
     /// Scroll offset (in item rows) so the switcher works with more
     /// agents/nodes than fit on a phone screen.
     pub switcher_scroll: usize,
+    /// Type-to-filter query for the switcher palette (docs/65). Empty = no filter.
+    pub switcher_query: String,
+    /// Which section(s) the switcher lists (docs/65).
+    pub switcher_scope: SwitcherScope,
     /// Each switcher row's target + clickable rect, set by the renderer.
     pub switcher_rects: Vec<(SwitcherTarget, Rect)>,
+    /// The scope chips' rects (docs/65), set by the renderer for click-to-switch.
+    pub switcher_scope_rects: Vec<(SwitcherScope, Rect)>,
     /// The `≡` switcher button's rect (compact mode), for tap hit-testing.
     pub switcher_button_rect: Option<Rect>,
     /// The global scrollback-search overlay (docs/63). `Some` => it owns input.
@@ -1461,7 +1521,10 @@ impl App {
             search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
+            switcher_query: String::new(),
+            switcher_scope: SwitcherScope::All,
             switcher_rects: Vec::new(),
+            switcher_scope_rects: Vec::new(),
             switcher_button_rect: None,
             last_active_ws_shown: 0,
             hover: None,
@@ -1880,7 +1943,10 @@ impl App {
             search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
+            switcher_query: String::new(),
+            switcher_scope: SwitcherScope::All,
             switcher_rects: Vec::new(),
+            switcher_scope_rects: Vec::new(),
             switcher_button_rect: None,
             last_active_ws_shown: 0,
             hover: None,
