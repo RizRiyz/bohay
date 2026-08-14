@@ -34,8 +34,8 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.bohay/bohay.so
 | Family | Methods |
 |---|---|
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.close` |
-| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.rename` · `tab.close` |
-| panes | `pane.list` · `pane.split` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
+| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.rename` · `tab.close` |
+| panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.get` · `agent.name` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
@@ -44,8 +44,32 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.bohay/bohay.so
 | ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` |
 
 Parameter shapes mirror the CLI flags (`bohay task add --paths x` →
-`{"paths": ["x"]}`). When a method takes a pane and none is given, it defaults
-to `$BOHAY_PANE_ID`, the calling pane.
+`{"paths": ["x"]}`). For CLI commands, an omitted pane uses
+`$BOHAY_PANE_ID` when available; a raw API request with no pane uses the
+currently focused pane.
+
+## Moving panes and tabs
+
+Public tab positions are 1-based.
+
+| Method | Params | Result |
+|---|---|---|
+| `pane.move` | `{pane?, tab}` | `{type:"pane_move", pane, workspace, tab}` |
+| `pane.move` | `{pane?, new_tab:true}` | `{type:"pane_move", pane, workspace, tab}` |
+| `tab.move` | `{tab, to}` | `{type:"tab_move", from, to, active}` |
+
+`pane.move` resolves an explicit pane anywhere, then keeps the move inside that
+pane's workspace. The pane's process and PTY stay alive, focus follows it, and
+an empty source tab is removed. `tab` must name another ordinary pane tab;
+Git, orchestration, and Mission Control dashboards are not valid destinations.
+Pass exactly one of `tab` or `new_tab:true`. The result's `workspace` is the
+same zero-based workspace index used by the other workspace API results; its
+`tab` is the pane's final 1-based position after any empty source tab is removed.
+
+`tab.move` reorders the active workspace's tab vector. `to` is the desired final
+position, and the currently active tab remains active even when its number
+changes. Zero, missing, same-position, and out-of-range values return
+`invalid_request` without changing state.
 
 ## Sidebar docks
 
@@ -98,9 +122,9 @@ exactly this.
 {"event":"lease.acquired","lease":"L2","task":"t3"}
 ```
 
-Event names: `pane.created` · `pane.closed` · `pane.agent_status_changed` ·
+Event names: `pane.created` · `pane.closed` · `pane.moved` · `pane.agent_status_changed` ·
 `agent.hook` · `workspace.created` · `workspace.closed` (a module hook may
-still spell these `node.created` / `node.closed`) · `tab.created` · `tab.closed`
+still spell these `node.created` / `node.closed`) · `tab.created` · `tab.closed` · `tab.moved`
 · `task.added` · `task.claimed` · `task.started` · `task.ready` ·
 `task.gate_running` · `task.gate_passed` · `task.gate_failed` ·
 `task.needs_compaction` · `task.done` · `task.merged` ·

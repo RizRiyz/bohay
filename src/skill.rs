@@ -290,6 +290,36 @@ mod tests {
     }
 
     #[test]
+    fn bundled_and_plugin_skills_document_layout_moves() {
+        let plugin = include_str!("../plugins/bohay/skills/bohay/SKILL.md");
+        let required = [
+            "bohay pane move <pane-id> --tab <tab-number>",
+            "bohay pane move <pane-id> --new-tab",
+            "bohay tab move <from> <to>",
+            "Tab numbers are 1-based",
+        ];
+        for marker in required {
+            assert!(
+                SKILL.contains(marker),
+                "bundled skill is missing layout command marker: {marker}"
+            );
+            assert!(
+                plugin.contains(marker),
+                "Codex plugin skill is missing layout command marker: {marker}"
+            );
+        }
+        assert!(
+            ADVANCED_CONTROL.contains("bohay pane move <id>"),
+            "advanced control reference is missing pane move safety guidance"
+        );
+        assert!(
+            ADVANCED_CONTROL.contains("move <from> <to>")
+                && ADVANCED_CONTROL.contains("tab positions are 1-based"),
+            "advanced control reference is missing tab move safety guidance"
+        );
+    }
+
+    #[test]
     fn skill_valid_accepts_a_real_skill_and_rejects_junk() {
         assert!(skill_valid(SKILL), "the bundled skill validates");
         assert!(!skill_valid(""), "empty is rejected");

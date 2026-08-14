@@ -17,6 +17,7 @@ like, and bohay tiles them automatically.
 | Split side by side | right-click a pane → **Split** | `Ctrl+Space v` |
 | Split top / bottom | right-click a pane → **Split down** | `Ctrl+Space s` |
 | Focus a pane | click it | arrows or `hjkl` |
+| Move a pane to another tab | right-click → **Move to Tab** | n/a |
 | Zoom (fullscreen) a pane | n/a | `Ctrl+Space z` |
 | Close a pane | the `×` on its title, or right-click → **Close** | `Ctrl+Space x` |
 
@@ -48,6 +49,17 @@ special dashboard, such as the `⎇ git` tab or the `◇ orch` board).
 
 A renamed tab shows your label instead of its number (empty reverts to the
 number). The `⎇ git` and `◇ orch` tabs keep their fixed labels.
+
+The CLI exposes the same pane move plus tab reordering for scripts and agents:
+
+```sh
+bohay pane move 7 --tab 2       # existing tab in pane 7's workspace
+bohay pane move 7 --new-tab     # append a fresh tab for pane 7
+bohay tab move 3 1              # move current workspace tab 3 to position 1
+```
+
+All tab numbers are 1-based. A pane move keeps its process running and follows
+it with focus. Tab reordering preserves whichever tab was active.
 
 ## Workspaces
 

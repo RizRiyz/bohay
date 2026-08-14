@@ -57,6 +57,7 @@ tabs:
   tab list                   list tabs in the current workspace
   tab new                    new tab
   tab focus <n>              focus tab n (1-based)
+  tab move <from> <to>       reorder tabs in the current workspace (1-based)
   tab rename <name>          name a tab (--tab N to target one; empty clears it)
   tab close [<n>]            close a tab (default: active)
 
@@ -64,6 +65,7 @@ panes / agents:
   pane list                  list panes in the current tab
   pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
+  pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
@@ -1137,6 +1139,21 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
 
         ("tab", "new") => ("tab.new".into(), json!({})),
         ("tab", "focus") => ("tab.focus".into(), one("tab", arg0())),
+        ("tab", "move") => {
+            if rest.len() != 2 {
+                return Err(anyhow!("usage: bohay tab move <from> <to>"));
+            }
+            let parse_position = |raw: &str| -> Result<String> {
+                raw.parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .map(|n| n.to_string())
+                    .ok_or_else(|| anyhow!("tab positions must be positive 1-based numbers"))
+            };
+            let from = parse_position(&rest[0])?;
+            let to = parse_position(&rest[1])?;
+            ("tab.move".into(), json!({"tab": from, "to": to}))
+        }
         ("tab", "close") => ("tab.close".into(), one("tab", arg0())),
         // `tab rename <name>` names the active tab; `--tab N` targets another.
         ("tab", "rename") => {
@@ -1147,7 +1164,8 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("tab.rename".into(), Value::Object(obj))
         }
-        ("tab", _) => ("tab.list".into(), json!({})),
+        ("tab", "" | "list") => ("tab.list".into(), json!({})),
+        ("tab", other) => return Err(anyhow!("unknown tab command `{other}`. Try `bohay help`.")),
 
         ("pane", "split") => {
             let mut obj = serde_json::Map::new();
@@ -1160,6 +1178,66 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("pane.split".into(), with_pane(obj))
         }
         ("pane", "focus") => ("pane.focus".into(), with_pane(serde_json::Map::new())),
+        ("pane", "move") => {
+            let usage = "usage: bohay pane move [<id>] (--tab <n> | --new-tab)";
+            let mut pane_id: Option<String> = None;
+            let mut tab: Option<String> = None;
+            let mut new_tab = false;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--tab" => {
+                        let raw = rest
+                            .get(i + 1)
+                            .filter(|v| !v.starts_with("--"))
+                            .ok_or_else(|| anyhow!("--tab needs a positive 1-based number"))?;
+                        if tab.is_some() {
+                            return Err(anyhow!("--tab may be passed only once"));
+                        }
+                        tab = Some(raw.clone());
+                        i += 2;
+                    }
+                    "--new-tab" => {
+                        if new_tab {
+                            return Err(anyhow!("--new-tab may be passed only once"));
+                        }
+                        new_tab = true;
+                        i += 1;
+                    }
+                    arg if arg.starts_with("--") => {
+                        return Err(anyhow!("unknown pane move option `{arg}`. {usage}"));
+                    }
+                    raw => {
+                        if pane_id.is_some() || raw.parse::<u32>().is_err() {
+                            return Err(anyhow!("pane id must be one numeric value. {usage}"));
+                        }
+                        pane_id = Some(raw.to_string());
+                        i += 1;
+                    }
+                }
+            }
+            if new_tab == tab.is_some() {
+                return Err(anyhow!(
+                    "pass exactly one destination: --tab <n> or --new-tab"
+                ));
+            }
+            let mut obj = serde_json::Map::new();
+            if new_tab {
+                obj.insert("new_tab".to_string(), json!(true));
+            } else {
+                let raw = tab.unwrap();
+                let n = raw
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| anyhow!("--tab must be a positive 1-based number"))?;
+                obj.insert("tab".to_string(), json!(n.to_string()));
+            }
+            if let Some(pane) = pane_id.or_else(|| std::env::var("BOHAY_PANE_ID").ok()) {
+                obj.insert("pane".to_string(), json!(pane));
+            }
+            ("pane.move".into(), Value::Object(obj))
+        }
         ("pane", "run") => {
             let command = tail().join(" ");
             let mut obj = serde_json::Map::new();
@@ -1221,7 +1299,10 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("pane.report_event".into(), with_pane(obj))
         }
-        ("pane", _) => ("pane.list".into(), json!({})),
+        ("pane", "" | "list") => ("pane.list".into(), json!({})),
+        ("pane", other) => {
+            return Err(anyhow!("unknown pane command `{other}`. Try `bohay help`."))
+        }
 
         ("module", "link") => {
             let mut obj = serde_json::Map::new();
@@ -1530,6 +1611,42 @@ mod tests {
         assert_eq!(m, "tab.new");
         let (m, _) = parse(&argv("bohay agent list")).unwrap();
         assert_eq!(m, "agent.list");
+    }
+
+    #[test]
+    fn maps_pane_and_tab_moves_and_rejects_bad_syntax() {
+        let (m, p) = parse(&argv("bohay pane move 7 --tab 3")).unwrap();
+        assert_eq!(m, "pane.move");
+        assert_eq!(p["pane"], "7");
+        assert_eq!(p["tab"], "3");
+        assert!(p.get("new_tab").is_none());
+
+        let (m, p) = parse(&argv("bohay pane move 7 --new-tab")).unwrap();
+        assert_eq!(m, "pane.move");
+        assert_eq!(p["pane"], "7");
+        assert_eq!(p["new_tab"], true);
+        assert!(p.get("tab").is_none());
+
+        let (m, p) = parse(&argv("bohay tab move 3 1")).unwrap();
+        assert_eq!(m, "tab.move");
+        assert_eq!(p, json!({"tab": "3", "to": "1"}));
+
+        for bad in [
+            "bohay pane move 7",
+            "bohay pane move 7 --tab 0",
+            "bohay pane move 7 --tab 2 --new-tab",
+            "bohay pane move worker --tab 2",
+            "bohay pane move 7 8 --tab 2",
+            "bohay pane move 7 --new-tab extra",
+            "bohay pane move 7 --where 2",
+            "bohay tab move 1",
+            "bohay tab move 0 1",
+            "bohay tab move 1 two",
+            "bohay pane teleport 7",
+            "bohay tab reorder 2 1",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
     }
 
     #[test]

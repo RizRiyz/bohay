@@ -608,6 +608,33 @@ pub enum MoveTarget {
     NewTab,
 }
 
+/// Why an existing pane could not be re-parented to another tab. Indices in
+/// [`MoveTarget`] are internal (zero-based); the CLI/API translates its public
+/// one-based tab numbers before calling the mutation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PaneMoveError {
+    PaneNotFound,
+    SourceNotPaneTab,
+    TargetOutOfRange,
+    SameTab,
+    TargetNotPaneTab,
+    NoChange,
+}
+
+/// The pane's new location after a successful move (internal zero-based indices).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PaneMoveResult {
+    pub workspace: usize,
+    pub tab: usize,
+}
+
+/// Why a tab could not be moved to a new position.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabMoveError {
+    PositionOutOfRange,
+    SamePosition,
+}
+
 /// An action offered by the pane context menu. `SplitVertical` puts the new pane
 /// side by side (a vertical divider, like `v`); `SplitHorizontal` stacks it (a
 /// horizontal divider, like `s`). `Divider` is a non-interactive separator.
@@ -2948,9 +2975,9 @@ impl App {
     }
 
     /// Open the pane context menu (split / close) for `pane`, anchored at the
-    /// click. No-op on a git/orch dashboard tab (no real panes to act on).
+    /// click. No-op on a dashboard tab (no real panes to act on).
     pub fn open_pane_menu(&mut self, pane: PaneId, col: u16, row: u16) {
-        if self.active_is_git() || self.active_is_orch() {
+        if self.active_is_git() || self.active_is_orch() || self.active_is_mission() {
             return;
         }
         let move_targets = self.pane_move_targets();
@@ -2973,14 +3000,14 @@ impl App {
     }
 
     /// The tabs this pane could move into: every other real pane tab in the
-    /// workspace (not the current one, not the git/orch dashboards), then a fresh
-    /// tab. Empty when there's nowhere useful to move (one pane in one tab).
+    /// workspace (not the current one, not a dashboard), then a fresh tab. Empty
+    /// when there's nowhere useful to move (one pane in one tab).
     fn pane_move_targets(&self) -> Vec<(MoveTarget, String)> {
         let wsi = self.active_ws;
         let cur = self.workspaces[wsi].active_tab;
         let mut targets = Vec::new();
         for (ti, tab) in self.workspaces[wsi].tabs.iter().enumerate() {
-            if ti == cur || tab.is_git() || tab.is_orch() {
+            if ti == cur || !tab.is_renameable() {
                 continue;
             }
             // A named tab shows its name; an unnamed one its number (as in the tab
@@ -3001,53 +3028,138 @@ impl App {
         targets
     }
 
-    /// Move `pane` out of the current tab into `target`, keeping the process
-    /// alive (the pane's id is just re-parented between layout trees — never
-    /// through `close_pane`, which would kill it). If the source tab empties, it
-    /// is removed. Focus follows the pane to its new tab.
-    pub fn move_pane_to_tab(&mut self, pane: PaneId, target: MoveTarget) {
-        let wsi = self.active_ws;
-        let src = self.workspaces[wsi].active_tab;
-        // Detach from the source layout without touching `App.panes`.
-        let emptied = self.workspaces[wsi].tabs[src].layout.remove(pane);
+    /// Move `pane` into another tab in its current workspace, keeping its process
+    /// alive. Validation happens before the source layout is touched, so a stale
+    /// socket request cannot detach a pane. Existing-tab indices refer to the
+    /// pre-move tab order. If the source empties it is removed; focus follows the
+    /// pane, matching the TUI context-menu behavior.
+    pub fn move_pane_to_tab(
+        &mut self,
+        pane: PaneId,
+        target: MoveTarget,
+    ) -> Result<PaneMoveResult, PaneMoveError> {
+        let (wsi, src) = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(wi, ws)| {
+                ws.tabs
+                    .iter()
+                    .position(|tab| tab.layout.leaves().contains(&pane))
+                    .map(|ti| (wi, ti))
+            })
+            .ok_or(PaneMoveError::PaneNotFound)?;
+
+        if !self.workspaces[wsi].tabs[src].is_renameable() {
+            return Err(PaneMoveError::SourceNotPaneTab);
+        }
         match target {
             MoveTarget::Tab(ti) => {
-                if ti >= self.workspaces[wsi].tabs.len()
-                    || ti == src
-                    || self.workspaces[wsi].tabs[ti].is_git()
-                    || self.workspaces[wsi].tabs[ti].is_orch()
-                {
-                    return; // stale/invalid target — leave the pane where it is
+                let tabs = &self.workspaces[wsi].tabs;
+                if ti >= tabs.len() {
+                    return Err(PaneMoveError::TargetOutOfRange);
+                }
+                if ti == src {
+                    return Err(PaneMoveError::SameTab);
+                }
+                if !tabs[ti].is_renameable() {
+                    return Err(PaneMoveError::TargetNotPaneTab);
+                }
+            }
+            MoveTarget::NewTab => {
+                let source_is_lone_tab = self.workspaces[wsi].tabs.len() == 1
+                    && self.workspaces[wsi].tabs[src].layout.len() == 1;
+                if source_is_lone_tab {
+                    return Err(PaneMoveError::NoChange);
+                }
+            }
+        }
+
+        // Detach only after every fallible check has passed. The pane remains in
+        // `App.panes`; only its layout-tree parent changes.
+        let emptied = self.workspaces[wsi].tabs[src].layout.remove(pane);
+        let final_tab = match target {
+            MoveTarget::Tab(mut ti) => {
+                if emptied {
+                    self.workspaces[wsi].tabs.remove(src);
+                    if src < ti {
+                        ti -= 1;
+                    }
                 }
                 self.workspaces[wsi].tabs[ti]
                     .layout
                     .split_focused(Axis::Col, pane);
+                ti
             }
             MoveTarget::NewTab => {
+                if emptied {
+                    self.workspaces[wsi].tabs.remove(src);
+                }
                 self.workspaces[wsi]
                     .tabs
                     .push(Tab::panes(TileLayout::new(pane)));
+                self.workspaces[wsi].tabs.len() - 1
             }
-        }
-        if emptied {
-            self.workspaces[wsi].tabs.remove(src);
-        }
-        // Re-focus whichever tab now holds the pane (index math is fragile after a
-        // possible removal, so just find it).
-        if let Some(ti) = self.workspaces[wsi]
-            .tabs
-            .iter()
-            .position(|t| t.layout.leaves().contains(&pane))
-        {
-            self.workspaces[wsi].active_tab = ti;
-            self.workspaces[wsi].tabs[ti].layout.focus = pane;
-        }
+        };
+
+        self.active_ws = wsi;
+        self.workspaces[wsi].active_tab = final_tab;
+        self.workspaces[wsi].tabs[final_tab].layout.focus = pane;
         self.zoomed = false;
+        self.scroll_pane = None;
         self.session_dirty = true;
         self.emit_event(
             "pane.moved",
-            serde_json::json!({"pane": pane.0.to_string()}),
+            serde_json::json!({
+                "pane": pane.0.to_string(),
+                "workspace": wsi.to_string(),
+                "tab": (final_tab + 1).to_string(),
+            }),
         );
+        Ok(PaneMoveResult {
+            workspace: wsi,
+            tab: final_tab,
+        })
+    }
+
+    /// Move a tab within the active workspace. `from` and `to` are zero-based
+    /// final positions. The active tab follows the same tab object rather than
+    /// staying on the old numeric slot.
+    pub fn move_tab(&mut self, from: usize, to: usize) -> Result<usize, TabMoveError> {
+        let len = self.ws().tabs.len();
+        if from >= len || to >= len {
+            return Err(TabMoveError::PositionOutOfRange);
+        }
+        if from == to {
+            return Err(TabMoveError::SamePosition);
+        }
+
+        let active = self.ws().active_tab;
+        let new_active = {
+            let ws = &mut self.workspaces[self.active_ws];
+            let tab = ws.tabs.remove(from);
+            ws.tabs.insert(to, tab);
+            ws.active_tab = if active == from {
+                to
+            } else if from < active && active <= to {
+                active - 1
+            } else if to <= active && active < from {
+                active + 1
+            } else {
+                active
+            };
+            ws.active_tab
+        };
+        self.session_dirty = true;
+        self.emit_event(
+            "tab.moved",
+            serde_json::json!({
+                "from": (from + 1).to_string(),
+                "to": (to + 1).to_string(),
+                "active": (new_active + 1).to_string(),
+            }),
+        );
+        Ok(new_active)
     }
 
     /// A click inside the open pane menu: a submenu tab (move the pane), the
@@ -3064,7 +3176,7 @@ impl App {
         if let Some(tg) = tab_hit {
             if let Some(pane) = self.pane_menu.as_ref().map(|m| m.pane) {
                 self.pane_menu = None;
-                self.move_pane_to_tab(pane, tg);
+                let _ = self.move_pane_to_tab(pane, tg);
             }
             return;
         }
@@ -4547,7 +4659,14 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&resp).unwrap()
         };
 
-        for method in ["tab.list", "tab.new", "tab.close", "tab.rename"] {
+        for method in [
+            "tab.list",
+            "tab.new",
+            "tab.move",
+            "tab.close",
+            "tab.rename",
+            "pane.move",
+        ] {
             let res = call(&mut app, method, serde_json::json!({}));
             assert_eq!(
                 res.pointer("/error/code").and_then(|v| v.as_str()),
@@ -6556,7 +6675,8 @@ mod tests {
 
         // Move `p` into tab 1. Tab 0 (now empty) is removed, so the target becomes
         // the only tab, holding both panes; the process is untouched.
-        app.move_pane_to_tab(p, MoveTarget::Tab(1));
+        app.move_pane_to_tab(p, MoveTarget::Tab(1))
+            .expect("valid destination tab");
         assert!(
             app.panes.contains_key(&p),
             "the pane's process survived the move"
@@ -6618,6 +6738,97 @@ mod tests {
             app.ws().tabs.iter().any(|t| t.layout.leaves().contains(&p)),
             "pane landed in a tab"
         );
+    }
+
+    #[test]
+    fn pane_move_validates_before_detaching_and_excludes_dashboards() {
+        let _env = crate::persist::test_env("pane-move-validation");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let original = app.layout().leaves();
+
+        assert_eq!(
+            app.move_pane_to_tab(pane, MoveTarget::Tab(0)),
+            Err(PaneMoveError::SameTab)
+        );
+        assert_eq!(
+            app.move_pane_to_tab(pane, MoveTarget::Tab(99)),
+            Err(PaneMoveError::TargetOutOfRange)
+        );
+        assert_eq!(
+            app.move_pane_to_tab(pane, MoveTarget::NewTab),
+            Err(PaneMoveError::NoChange)
+        );
+        assert_eq!(app.layout().leaves(), original, "failed moves are atomic");
+
+        app.open_mission_control(0);
+        app.workspaces[0].active_tab = 0;
+        assert!(
+            !app.pane_move_targets()
+                .iter()
+                .any(|(target, _)| *target == MoveTarget::Tab(1)),
+            "dashboard tabs are not offered as pane destinations"
+        );
+        assert_eq!(
+            app.move_pane_to_tab(pane, MoveTarget::Tab(1)),
+            Err(PaneMoveError::TargetNotPaneTab)
+        );
+        assert_eq!(
+            app.layout().leaves(),
+            original,
+            "pane remains in its source tab"
+        );
+    }
+
+    #[test]
+    fn tab_move_preserves_the_active_tab_identity() {
+        let _env = crate::persist::test_env("tab-move");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].tabs[0].name = Some("a".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("b".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[2].name = Some("c".into());
+        assert_eq!(app.ws().active_tab, 2);
+
+        // Move A from first to last. C stays active and shifts from slot 3 to 2.
+        assert_eq!(app.move_tab(0, 2), Ok(1));
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["b", "c", "a"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c")
+        );
+
+        // Move the active C to the first slot; focus follows that same tab.
+        assert_eq!(app.move_tab(1, 0), Ok(0));
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["c", "b", "a"]);
+        assert_eq!(app.ws().active_tab, 0);
+        assert!(app.session_dirty);
+
+        let before = names;
+        assert_eq!(app.move_tab(0, 0), Err(TabMoveError::SamePosition));
+        assert_eq!(app.move_tab(0, 9), Err(TabMoveError::PositionOutOfRange));
+        let after = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before, "failed tab moves leave the order untouched");
     }
 
     #[test]

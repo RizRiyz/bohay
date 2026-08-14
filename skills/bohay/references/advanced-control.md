@@ -16,6 +16,7 @@ release or the Codex plugin. If it conflicts with `SKILL.md`, follow `SKILL.md`.
   `bohay module actions`, `bohay module settings <id>`,
   `bohay module log <id>`
 - UI: `bohay ui dock list`
+- Layout: `bohay workspace list`, `bohay tab list`, `bohay pane list`
 
 Run `bohay help` only when the requested command grammar is uncertain.
 
@@ -33,6 +34,9 @@ Run `bohay help` only when the requested command grammar is uncertain.
   clear authorization.
 - Inspect docks before moving them. Avoid sidebar, dock, toast, or focus changes
   unless they serve the user's request.
+- Resolve a pane and list its workspace's tabs before `bohay pane move <id>
+  --tab <n>` or `--new-tab`. List the active workspace's tabs before `bohay tab
+  move <from> <to>`; tab positions are 1-based.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 - Do not remove worktrees, delete or merge tasks, uninstall modules, or

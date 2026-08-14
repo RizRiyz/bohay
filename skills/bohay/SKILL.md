@@ -191,6 +191,21 @@ bohay wait output <new-pane-id> --match "test result" --timeout 300
 bohay pane read <new-pane-id> --lines 120
 ```
 
+Move an existing pane only after resolving its id and listing the destination
+tabs in that pane's workspace. Tab numbers are 1-based:
+
+```sh
+bohay pane move <pane-id> --tab <tab-number>
+bohay pane move <pane-id> --new-tab
+```
+
+Reorder tabs in the active workspace only after `bohay tab list` confirms the
+source and final positions:
+
+```sh
+bohay tab move <from> <to>
+```
+
 ## Control advanced surfaces safely
 
 This section is complete when `SKILL.md` was installed by itself, including by

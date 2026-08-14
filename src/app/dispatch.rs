@@ -465,6 +465,38 @@ impl App {
                 }
                 Ok(json!({"type":"pane","pane": new.0.to_string()}))
             }
+            "pane.move" => {
+                let id = self.resolve_pane(p).ok_or_else(not_found)?;
+                let new_tab = match p.get("new_tab") {
+                    None => false,
+                    Some(Value::Bool(v)) => *v,
+                    Some(_) => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "new_tab must be a boolean".to_string(),
+                        ))
+                    }
+                };
+                let tab = param_usize(p, "tab");
+                if new_tab == tab.is_some() {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "pass exactly one destination: tab (1-based) or new_tab=true".to_string(),
+                    ));
+                }
+                let target = if new_tab {
+                    MoveTarget::NewTab
+                } else {
+                    MoveTarget::Tab(required_one_based_param(p, "tab")?)
+                };
+                let moved = self.move_pane_to_tab(id, target).map_err(pane_move_error)?;
+                Ok(json!({
+                    "type": "pane_move",
+                    "pane": id.0.to_string(),
+                    "workspace": moved.workspace.to_string(),
+                    "tab": (moved.tab + 1).to_string(),
+                }))
+            }
             "pane.run" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
                 let cmd = p.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -685,6 +717,17 @@ impl App {
                     self.switch_tab(i.saturating_sub(1));
                 }
                 Ok(json!({"type":"ok"}))
+            }
+            "tab.move" => {
+                let from = required_one_based_param(p, "tab")?;
+                let to = required_one_based_param(p, "to")?;
+                let active = self.move_tab(from, to).map_err(tab_move_error)?;
+                Ok(json!({
+                    "type": "tab_move",
+                    "from": (from + 1).to_string(),
+                    "to": (to + 1).to_string(),
+                    "active": (active + 1).to_string(),
+                }))
             }
             // Name a tab from a module (docs/13 §3.9) — the same label the
             // tab-rename modal writes. An empty name clears it back to a number.
@@ -1708,6 +1751,30 @@ fn not_found() -> (String, String) {
     ("not_found".to_string(), "pane not found".to_string())
 }
 
+fn pane_move_error(err: PaneMoveError) -> (String, String) {
+    let message = match err {
+        PaneMoveError::PaneNotFound => "pane not found",
+        PaneMoveError::SourceNotPaneTab => "source pane is not in a normal pane tab",
+        PaneMoveError::TargetOutOfRange => "destination tab is out of range",
+        PaneMoveError::SameTab => "source and destination tabs must differ",
+        PaneMoveError::TargetNotPaneTab => "destination must be a normal pane tab",
+        PaneMoveError::NoChange => "moving the only pane to a new tab would not change the layout",
+    };
+    let code = if err == PaneMoveError::PaneNotFound {
+        "not_found"
+    } else {
+        "invalid_request"
+    };
+    (code.to_string(), message.to_string())
+}
+
+fn tab_move_error(err: TabMoveError) -> (String, String) {
+    let message = match err {
+        TabMoveError::PositionOutOfRange => "tab position is out of range",
+        TabMoveError::SamePosition => "source and destination tab positions must differ",
+    };
+    ("invalid_request".to_string(), message.to_string())
+}
 /// Strip a leading decorative icon/glyph that some agents prepend to their OSC
 /// title (a spinner or status emoji), plus the surrounding whitespace, so the
 /// sidebar shows just the text. A non-ASCII symbol/emoji leads is dropped;
@@ -1852,6 +1919,23 @@ fn param_usize(p: &Value, key: &str) -> Option<usize> {
     v.as_u64()
         .map(|n| n as usize)
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Required public tab position: accepts a JSON integer or numeric string and
+/// converts the one-based API value to an internal zero-based index.
+fn required_one_based_param(p: &Value, key: &str) -> Result<usize, (String, String)> {
+    let n = param_usize(p, key).ok_or_else(|| {
+        (
+            "invalid_request".to_string(),
+            format!("{key} must be a positive 1-based tab number"),
+        )
+    })?;
+    n.checked_sub(1).ok_or_else(|| {
+        (
+            "invalid_request".to_string(),
+            format!("{key} must be a positive 1-based tab number"),
+        )
+    })
 }
 
 fn state_str(s: State) -> &'static str {
@@ -2202,6 +2286,111 @@ mod tests {
         // Default split still moves focus to the new pane.
         let out2 = app.dispatch("pane.split", &json!({})).unwrap();
         assert_eq!(app.layout().focus.0.to_string(), out2["pane"]);
+    }
+
+    #[test]
+    fn pane_move_api_moves_to_new_and_existing_tabs_without_restarting() {
+        let _env = crate::persist::test_env("pane-move-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let a = app.layout().focus;
+        app.split(crate::layout::Axis::Col);
+        let b = app.layout().focus;
+
+        let out = app
+            .dispatch(
+                "pane.move",
+                &json!({"pane": b.0.to_string(), "new_tab": true}),
+            )
+            .expect("split pane can move to a fresh tab");
+        assert_eq!(out["type"], "pane_move");
+        assert_eq!(out["pane"], b.0.to_string());
+        assert_eq!(out["tab"], "2");
+        assert_eq!(app.workspaces[0].tabs.len(), 2);
+        assert!(app.panes.contains_key(&a) && app.panes.contains_key(&b));
+
+        // Resolve A globally while B's destination tab is active. A's source tab
+        // empties and collapses, so the old tab 2 becomes final tab 1.
+        let out = app
+            .dispatch("pane.move", &json!({"pane": a.0.to_string(), "tab": 2}))
+            .expect("pane id resolves outside the active tab");
+        assert_eq!(out["tab"], "1");
+        assert_eq!(app.workspaces[0].tabs.len(), 1);
+        let leaves = app.layout().leaves();
+        assert!(leaves.contains(&a) && leaves.contains(&b));
+        assert_eq!(app.layout().focus, a, "focus follows the moved pane");
+        assert!(app.panes.contains_key(&a), "the existing PTY remains live");
+    }
+
+    #[test]
+    fn pane_move_api_validates_destination_shape_and_range() {
+        let _env = crate::persist::test_env("pane-move-api-invalid");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let original = app.layout().leaves();
+
+        for params in [
+            json!({"pane": pane.0.to_string()}),
+            json!({"pane": pane.0.to_string(), "tab": 1, "new_tab": true}),
+            json!({"pane": pane.0.to_string(), "tab": 0}),
+            json!({"pane": pane.0.to_string(), "tab": 9}),
+            json!({"pane": pane.0.to_string(), "new_tab": "yes"}),
+        ] {
+            let err = app
+                .dispatch("pane.move", &params)
+                .expect_err("invalid pane move must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            assert_eq!(app.layout().leaves(), original, "failure is atomic");
+        }
+    }
+
+    #[test]
+    fn tab_move_api_reorders_and_preserves_active_tab() {
+        let _env = crate::persist::test_env("tab-move-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].tabs[0].name = Some("a".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("b".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[2].name = Some("c".into());
+
+        let out = app
+            .dispatch("tab.move", &json!({"tab": "1", "to": 3}))
+            .expect("valid tab reorder");
+        assert_eq!(
+            out,
+            json!({
+                "type": "tab_move",
+                "from": "1",
+                "to": "3",
+                "active": "2",
+            })
+        );
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["b", "c", "a"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c")
+        );
+
+        for params in [
+            json!({"tab": 0, "to": 1}),
+            json!({"tab": 1, "to": 1}),
+            json!({"tab": 1, "to": 9}),
+            json!({"tab": 1}),
+        ] {
+            let err = app
+                .dispatch("tab.move", &params)
+                .expect_err("invalid tab move must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+        }
     }
 
     #[test]
