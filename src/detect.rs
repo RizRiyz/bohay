@@ -777,26 +777,39 @@ impl Manifests {
     /// Both pattern classes apply, because a command line is as deliberate as
     /// it gets. Matching is per-argv-token against the bare binary name, so
     /// `/opt/homebrew/bin/amp` counts while `--example` never can.
-    fn agent_in_processes(&self, running: &[String]) -> Option<String> {
-        for cmd in running {
-            let low = cmd.to_lowercase();
-            let mut tokens = low.split_whitespace();
-            let Some(first) = tokens.next() else { continue };
-            let first = binary_name(first);
-            if let Some(a) = self.match_binary(first) {
-                return Some(a);
-            }
-            // Several agents ship as a script run by an interpreter, so argv[0]
-            // is `node` / `python` and the real name is the script slot: the
-            // first non-flag argument. Nothing later counts -- `cargo test
-            // --example amp` must not resolve to amp.
-            if is_interpreter(first) {
-                for t in tokens {
-                    if t.starts_with('-') {
-                        continue;
-                    }
-                    return self.match_binary(binary_name(t));
+    pub(crate) fn agent_in_processes(&self, running: &[String]) -> Option<String> {
+        running
+            .iter()
+            .find_map(|cmd| self.agent_in_process_command(cmd))
+    }
+
+    /// Whether one specific agent is still present anywhere in the pane's
+    /// process tree. Lifecycle detection needs the targeted form: an agent may
+    /// itself launch another recognised agent as a child, and that must not make
+    /// its own process look absent.
+    pub(crate) fn process_has_agent(&self, running: &[String], agent: &str) -> bool {
+        running
+            .iter()
+            .any(|cmd| self.agent_in_process_command(cmd).as_deref() == Some(agent))
+    }
+
+    fn agent_in_process_command(&self, cmd: &str) -> Option<String> {
+        let low = cmd.to_lowercase();
+        let mut tokens = low.split_whitespace();
+        let first = binary_name(tokens.next()?);
+        if let Some(a) = self.match_binary(first) {
+            return Some(a);
+        }
+        // Several agents ship as a script run by an interpreter, so argv[0]
+        // is `node` / `python` and the real name is the script slot: the first
+        // non-flag argument. Nothing later counts -- `cargo test --example amp`
+        // must not resolve to amp.
+        if is_interpreter(first) {
+            for t in tokens {
+                if t.starts_with('-') {
+                    continue;
                 }
+                return self.match_binary(binary_name(t));
             }
         }
         None

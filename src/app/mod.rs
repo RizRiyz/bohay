@@ -806,6 +806,11 @@ pub struct PaneStatus {
     pub last_input: Instant,
     pub seen: bool,
     pub agent_session: Option<AgentSession>,
+    /// Consecutive successful process scans that saw this pane's shell/process
+    /// tree but not the agent bound in `agent_session`. Two confirmations mean
+    /// the agent really returned to the shell, rather than briefly disappearing
+    /// during startup/re-exec; see `apply_proc_scan`.
+    agent_absent_scans: u8,
     prev_working: bool,
     done: bool,
     /// Whether a blocked/done bell may fire. Set false after one fires; re-armed
@@ -844,6 +849,7 @@ impl PaneStatus {
                 .unwrap_or_else(Instant::now),
             seen: true,
             agent_session: None,
+            agent_absent_scans: 0,
             prev_working: false,
             done: false,
             notify_armed: true,
