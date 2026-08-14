@@ -3472,6 +3472,7 @@ impl App {
     }
 
     fn focus_pane_global(&mut self, id: PaneId) {
+        let changed = self.layout().focus != id;
         let mut found = None;
         for (wi, ws) in self.workspaces.iter().enumerate() {
             for (ti, tab) in ws.tabs.iter().enumerate() {
@@ -3484,6 +3485,9 @@ impl App {
             self.active_ws = wi;
             self.workspaces[wi].active_tab = ti;
             self.workspaces[wi].tabs[ti].layout.focus = id;
+            if changed {
+                self.scroll_pane = None;
+            }
             self.mode = Mode::Normal;
         }
     }
@@ -5477,6 +5481,90 @@ mod tests {
             content.x + 7,
             content.y + 3,
         ))));
+    }
+
+    #[test]
+    fn clicking_another_pane_keeps_the_scrolled_pane_at_its_position() {
+        let _env = crate::persist::test_env("scroll-focus-keeps-position");
+        use crate::event::AppEvent;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::Terminal;
+        use std::sync::{Arc, Mutex};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let leaves = app.layout().leaves();
+        let (left, right) = (leaves[0], leaves[1]);
+
+        // Give the left pane deterministic history. Its real shell reader keeps
+        // its old engine, so it cannot race this viewport assertion.
+        let (response_tx, _response_rx) = std::sync::mpsc::channel();
+        app.panes.get_mut(&left).unwrap().engine = Arc::new(Mutex::new(
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(60, 38, response_tx, 2_000),
+        ));
+        if let Some(pane) = app.panes.get(&left) {
+            let mut engine = pane.engine.lock().unwrap();
+            for i in 0..200 {
+                engine.advance(format!("history {i}\r\n").as_bytes());
+            }
+        }
+
+        app.layout_mut().focus = left;
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let rect = |app: &App, id| {
+            app.pane_content_rects
+                .iter()
+                .find(|(pane, _)| *pane == id)
+                .map(|(_, rect)| *rect)
+                .unwrap()
+        };
+        let left_rect = rect(&app, left);
+        let right_rect = rect(&app, right);
+        let mouse = |kind, rect: Rect| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column: rect.x + 2,
+                row: rect.y + 2,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        assert!(app.handle_event(mouse(MouseEventKind::ScrollUp, left_rect)));
+        let stopped_at = app.panes.get(&left).unwrap().scroll_state().0;
+        assert!(stopped_at > 0, "the left pane is stopped in its history");
+        assert_eq!(app.scroll_pane, Some(left));
+
+        assert!(app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), right_rect,)));
+        assert_eq!(
+            app.layout().focus,
+            right,
+            "the click focuses the right pane"
+        );
+        assert!(
+            app.scroll_pane.is_none(),
+            "the old pane no longer owns keyboard scroll mode"
+        );
+        assert_eq!(
+            app.panes.get(&left).unwrap().scroll_state().0,
+            stopped_at,
+            "focus leaves the left viewport exactly where the user stopped"
+        );
+
+        assert!(!app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(app.layout().focus, right);
+        assert_eq!(
+            app.panes.get(&left).unwrap().scroll_state().0,
+            stopped_at,
+            "typing in the right pane cannot snap the left pane to live"
+        );
     }
 
     #[test]

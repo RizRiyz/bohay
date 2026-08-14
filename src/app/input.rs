@@ -1107,6 +1107,11 @@ impl App {
         }
         if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
             let id = *id;
+            if self.layout().focus != id {
+                // Leave the old pane's viewport exactly where it is. Only drop
+                // keyboard ownership so subsequent input follows the new focus.
+                self.scroll_pane = None;
+            }
             self.layout_mut().focus = id;
             self.mode = Mode::Normal;
         }
@@ -1272,6 +1277,7 @@ impl App {
             return false;
         }
         pane.scroll_to_bottom(); // the app's coordinates are the live screen's
+        self.scroll_pane = None;
         self.layout_mut().focus = id;
         self.mode = Mode::Normal;
         let g = crate::app::MouseGrab {
@@ -1535,6 +1541,16 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
+        }
+        // Scroll mode belongs to one pane, not to the whole tab. A focus change
+        // must never let the next key snap and type into the previously scrolled
+        // pane. Pointer focus clears this eagerly below; this guard also covers
+        // focus changes made by tabs, workspaces, the switcher, or API actions.
+        if self
+            .scroll_pane
+            .is_some_and(|scrolling| scrolling != self.layout().focus)
+        {
+            self.scroll_pane = None;
         }
         // The running-command overlay: scroll it, refresh it, or dismiss.
         if self.cmd_inspect.is_some() {
