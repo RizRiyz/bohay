@@ -1,7 +1,7 @@
 {
   "name": "bohay",
-  "version": "0.1.0",
-  "description": "Delegate to coding agents and control Bohay workspaces, tabs, panes, and sessions from Codex.",
+  "version": "0.2.0",
+  "description": "Delegate, fork, and arrange Bohay coding agents and sessions from Codex.",
   "author": {
     "name": "Riz",
     "url": "https://github.com/RizRiyz"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Bohay",
-    "shortDescription": "Delegate agents and control Bohay sessions.",
-    "longDescription": "Delegate work and control Bohay agents, panes, tabs, and workspaces from Codex. Inside Bohay it uses the inherited session. From an external terminal it uses the installed production Bohay command and configured session.",
+    "shortDescription": "Delegate, fork, and arrange Bohay agents.",
+    "longDescription": "Delegate work, fork supported Bohay agent sessions, arrange panes and tabs, and manage workspaces from Codex. Inside Bohay it uses the inherited session. From an external terminal it uses the installed production Bohay command and configured session.",
     "developerName": "Riz",
     "category": "Productivity",
     "capabilities": [
@@ -37,7 +37,7 @@
     "defaultPrompt": [
       "Show me the panes and coding agents in the current Bohay session.",
       "Delegate a review to the Bohay agent named reviewer.",
-      "Inspect the current Bohay workspace, tabs, and Git state."
+      "Fork a supported live Bohay agent into a named sibling pane."
     ]
   }
 }

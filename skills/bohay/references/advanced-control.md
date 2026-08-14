@@ -34,6 +34,9 @@ Run `bohay help` only when the requested command grammar is uncertain.
   clear authorization.
 - Inspect docks before moving them. Avoid sidebar, dock, toast, or focus changes
   unless they serve the user's request.
+- Resolve a live agent with `bohay agent get <target>` before `bohay agent fork
+  <target> [--name <alias>] [--no-focus]`; the fork creates a new independent
+  session and may change focus unless `--no-focus` is passed.
 - Resolve a pane and list its workspace's tabs before `bohay pane move <id>
   --tab <n>` or `--new-tab`. List the active workspace's tabs before `bohay tab
   move <from> <to>`; tab positions are 1-based.

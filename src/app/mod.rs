@@ -635,6 +635,26 @@ pub enum TabMoveError {
     SamePosition,
 }
 
+/// Why an existing agent session could not be forked into a sibling pane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentForkError {
+    PaneNotFound,
+    SourceNotPaneTab,
+    UnsupportedAgent,
+    SessionUnknown,
+    SpawnFailed,
+}
+
+/// The live pane and location created by an agent-session fork.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AgentForkResult {
+    pub from: PaneId,
+    pub pane: PaneId,
+    pub agent: String,
+    pub workspace: usize,
+    pub tab: usize,
+}
+
 /// An action offered by the pane context menu. `SplitVertical` puts the new pane
 /// side by side (a vertical divider, like `v`); `SplitHorizontal` stacks it (a
 /// horizontal divider, like `s`). `Divider` is a non-interactive separator.
@@ -2380,42 +2400,79 @@ impl App {
         }
     }
 
-    /// Fork `pane`'s agent session into a new pane split off to its right,
-    /// preserving the original conversation under a *new* session id (the
-    /// original session keeps running, untouched). No-op unless the pane runs a
-    /// fork-capable agent (docs/23) whose session id can be resolved — from the
-    /// integration hook's exact id, else disk discovery keyed by the pane's cwd.
-    /// Returns whether a fork pane was spawned. The pane's process is spawned on
-    /// the agent's fork command (never typed), like a resume.
-    pub fn fork_pane(&mut self, pane: PaneId) -> bool {
-        let Some(st) = self.status.get(&pane) else {
-            return false;
-        };
+    /// Fork `pane`'s agent session into a new sibling on its right, preserving
+    /// the parent conversation. The source is resolved globally so Mission
+    /// Control and socket callers can fork an inactive pane safely. With
+    /// `focus=false`, the current UI focus and zoom state are preserved.
+    pub fn fork_agent_pane(
+        &mut self,
+        pane: PaneId,
+        focus: bool,
+    ) -> Result<AgentForkResult, AgentForkError> {
+        if !self.panes.contains_key(&pane) {
+            return Err(AgentForkError::PaneNotFound);
+        }
+        let (wsi, ti) = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(wi, ws)| {
+                ws.tabs
+                    .iter()
+                    .position(|tab| tab.layout.leaves().contains(&pane))
+                    .map(|tab| (wi, tab))
+            })
+            .ok_or(AgentForkError::SourceNotPaneTab)?;
+        if !self.workspaces[wsi].tabs[ti].is_renameable() {
+            return Err(AgentForkError::SourceNotPaneTab);
+        }
+
+        let st = self
+            .status
+            .get(&pane)
+            .ok_or(AgentForkError::UnsupportedAgent)?;
         let agent = st.agent.clone();
         if !crate::agent::can_fork(&agent) {
-            return false;
+            return Err(AgentForkError::UnsupportedAgent);
         }
-        let Some(cwd) = self.panes.get(&pane).map(|p| p.cwd.clone()) else {
-            return false;
-        };
+        let cwd = self
+            .panes
+            .get(&pane)
+            .map(|p| p.cwd.clone())
+            .ok_or(AgentForkError::PaneNotFound)?;
         let sid = st
             .agent_session
             .as_ref()
             .map(|s| s.session_id.clone())
             .or_else(|| crate::agent::latest_session(&agent, &cwd));
-        let Some(sid) = sid else {
-            return false; // nothing to fork from
-        };
-        let Some(fork) = crate::agent::fork_command(&agent, &sid) else {
-            return false;
-        };
-        let Some(new_id) = self.spawn_resume_pane(cwd, &fork) else {
-            return false;
-        };
-        // Split off to the right of the *source* pane (a vertical divider),
-        // regardless of what was focused before.
-        self.layout_mut().focus = pane;
-        self.layout_mut().split_focused(Axis::Col, new_id);
+        let sid = sid.ok_or(AgentForkError::SessionUnknown)?;
+        let fork =
+            crate::agent::fork_command(&agent, &sid).ok_or(AgentForkError::UnsupportedAgent)?;
+
+        // `spawn_resume_pane` changes the global zoom flag. Capture the complete
+        // view state needed by --no-focus before spawning, then restore it after
+        // inserting the new leaf into the source tab.
+        let previous_zoom = self.zoomed;
+        let previous_source_focus = self.workspaces[wsi].tabs[ti].layout.focus;
+        let new_id = self
+            .spawn_resume_pane(cwd, &fork)
+            .ok_or(AgentForkError::SpawnFailed)?;
+        {
+            let layout = &mut self.workspaces[wsi].tabs[ti].layout;
+            layout.focus = pane;
+            layout.split_focused(Axis::Col, new_id);
+            if !focus {
+                layout.focus = previous_source_focus;
+            }
+        }
+        if focus {
+            self.active_ws = wsi;
+            self.workspaces[wsi].active_tab = ti;
+            self.scroll_pane = None;
+            self.zoomed = false;
+        } else {
+            self.zoomed = previous_zoom;
+        }
         // Label the new pane as the same agent right away (detection will confirm
         // it, and pick up the fork's fresh session id, on the next tick).
         if let Some(nst) = self.status.get_mut(&new_id) {
@@ -2439,7 +2496,6 @@ impl App {
                 });
             }
         }
-        self.zoomed = false;
         self.session_dirty = true;
         self.show_toast(format!("forked {agent} session"));
         self.emit_event(
@@ -2448,9 +2504,23 @@ impl App {
                 "from": pane.0.to_string(),
                 "to": new_id.0.to_string(),
                 "agent": agent,
+                "workspace": wsi.to_string(),
+                "tab": (ti + 1).to_string(),
             }),
         );
-        true
+        Ok(AgentForkResult {
+            from: pane,
+            pane: new_id,
+            agent,
+            workspace: wsi,
+            tab: ti,
+        })
+    }
+
+    /// TUI compatibility wrapper: the existing pane/mission actions fork and
+    /// follow the new sibling, while unsupported panes remain a quiet no-op.
+    pub fn fork_pane(&mut self, pane: PaneId) -> bool {
+        self.fork_agent_pane(pane, true).is_ok()
     }
 
     fn new_tab(&mut self) {
@@ -7126,6 +7196,34 @@ mod tests {
         let new = app.layout().focus;
         assert_ne!(new, src);
         assert_eq!(app.status.get(&new).unwrap().agent, "claude");
+    }
+
+    #[test]
+    fn fork_from_mission_control_uses_the_agents_real_tab() {
+        let _env = crate::persist::test_env("fork-pane-mission");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let source = app.layout().focus;
+        {
+            let status = app.status.get_mut(&source).unwrap();
+            status.agent = "claude".into();
+            status.agent_session = Some(AgentSession {
+                agent: "claude".into(),
+                session_id: "sess-mission-fork".into(),
+            });
+        }
+
+        app.open_mission_control(0);
+        assert!(app.active_is_mission());
+        assert!(app.fork_pane(source), "Mission Control can fork its row");
+        assert!(
+            !app.active_is_mission(),
+            "focus follows the fork's real tab"
+        );
+        let leaves = app.layout().leaves();
+        assert_eq!(leaves.len(), 2);
+        assert!(leaves.contains(&source));
+        assert_ne!(app.layout().focus, source, "the fork is focused");
     }
 
     #[test]

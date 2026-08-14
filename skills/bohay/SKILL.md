@@ -191,6 +191,19 @@ bohay wait output <new-pane-id> --match "test result" --timeout 300
 bohay pane read <new-pane-id> --lines 120
 ```
 
+Fork a supported live agent only after resolving it with `agent get`. The fork
+inherits the source conversation but receives its own new session:
+
+```sh
+bohay agent get <target>
+bohay agent fork <target> [--name <alias>] [--no-focus]
+```
+
+Native forks currently support Claude, Codex, and Pi. Report
+`unsupported_agent`, `session_unknown`, or `spawn_failed` exactly when returned.
+Do not approximate a failed fork with `pane split`, `agent start`, or `resume`,
+because those paths do not guarantee an independent copy of the conversation.
+
 Move an existing pane only after resolving its id and listing the destination
 tabs in that pane's workspace. Tab numbers are 1-based:
 

@@ -844,6 +844,47 @@ impl App {
                 self.set_agent_name(pane, Some(name));
                 Ok(json!({"type":"agent_name","pane": pane.0.to_string(), "name": name}))
             }
+            // Fork a live agent's native session into a sibling pane. Target
+            // resolution matches agent.send/get: alias, pane id, or unique kind.
+            "agent.fork" => {
+                let pane = self.resolve_agent_target(p)?;
+                let focus = match p.get("focus") {
+                    None => true,
+                    Some(Value::Bool(v)) => *v,
+                    Some(_) => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "focus must be a boolean".to_string(),
+                        ))
+                    }
+                };
+                let name = match p.get("name") {
+                    None => None,
+                    Some(Value::String(v)) if valid_agent_name(v) => Some(v.as_str()),
+                    Some(_) => {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "name must match [a-z][a-z0-9_-]{0,31}".to_string(),
+                        ))
+                    }
+                };
+                let forked = self
+                    .fork_agent_pane(pane, focus)
+                    .map_err(agent_fork_error)?;
+                if let Some(alias) = name {
+                    self.set_agent_name(forked.pane, Some(alias));
+                }
+                Ok(json!({
+                    "type": "agent_fork",
+                    "from": forked.from.0.to_string(),
+                    "pane": forked.pane.0.to_string(),
+                    "agent": forked.agent,
+                    "name": name,
+                    "workspace": forked.workspace.to_string(),
+                    "tab": (forked.tab + 1).to_string(),
+                    "focused": focus,
+                }))
+            }
             // Submit a prompt to a target agent: paste the text (bracketed when the
             // child asked for it), then send Enter once the paste has landed.
             "agent.send" => {
@@ -1775,6 +1816,26 @@ fn tab_move_error(err: TabMoveError) -> (String, String) {
     };
     ("invalid_request".to_string(), message.to_string())
 }
+
+fn agent_fork_error(err: AgentForkError) -> (String, String) {
+    let (code, message) = match err {
+        AgentForkError::PaneNotFound => ("not_found", "agent pane not found"),
+        AgentForkError::SourceNotPaneTab => {
+            ("invalid_request", "agent pane is not in a normal pane tab")
+        }
+        AgentForkError::UnsupportedAgent => (
+            "unsupported_agent",
+            "target agent does not support native session forks",
+        ),
+        AgentForkError::SessionUnknown => (
+            "session_unknown",
+            "target agent's session id could not be resolved",
+        ),
+        AgentForkError::SpawnFailed => ("spawn_failed", "fork pane failed to start"),
+    };
+    (code.to_string(), message.to_string())
+}
+
 /// Strip a leading decorative icon/glyph that some agents prepend to their OSC
 /// title (a spinner or status emoji), plus the surrounding whitespace, so the
 /// sidebar shows just the text. A non-ASCII symbol/emoji leads is dropped;
@@ -2133,6 +2194,87 @@ mod tests {
         // Closing the pane drops the alias.
         app.close_pane(pane);
         assert!(app.agent_names.is_empty());
+    }
+
+    #[test]
+    fn agent_fork_api_targets_an_inactive_tab_and_can_preserve_focus() {
+        let _env = crate::persist::test_env("agent-fork-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let source = app.layout().focus;
+        {
+            let status = app.status.get_mut(&source).unwrap();
+            status.agent = "claude".into();
+            status.agent_session = Some(AgentSession {
+                agent: "claude".into(),
+                session_id: "sess-api-fork".into(),
+            });
+        }
+        app.set_agent_name(source, Some("reviewer"));
+
+        // Leave the source in tab 1, then issue the request from tab 2. The
+        // mutation must use the target's location without stealing UI focus.
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        let active_pane = app.layout().focus;
+        app.zoomed = true;
+        let out = app
+            .dispatch(
+                "agent.fork",
+                &json!({
+                    "target": "reviewer",
+                    "name": "experiment",
+                    "focus": false,
+                }),
+            )
+            .expect("known Claude session forks");
+
+        assert_eq!(out["type"], "agent_fork");
+        assert_eq!(out["from"], source.0.to_string());
+        assert_eq!(out["agent"], "claude");
+        assert_eq!(out["name"], "experiment");
+        assert_eq!(out["workspace"], "0");
+        assert_eq!(out["tab"], "1");
+        assert_eq!(out["focused"], false);
+        let fork = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+        assert_ne!(fork, source);
+        assert_eq!(app.ws().active_tab, 1, "active tab was preserved");
+        assert_eq!(app.layout().focus, active_pane, "active pane was preserved");
+        assert!(app.zoomed, "--no-focus preserves the current zoom state");
+        assert!(app.workspaces[0].tabs[0].layout.leaves().contains(&fork));
+        assert_eq!(app.agent_names.get("experiment"), Some(&fork));
+        assert_eq!(app.status.get(&fork).unwrap().agent, "claude");
+    }
+
+    #[test]
+    fn agent_fork_api_reports_validation_and_capability_errors() {
+        let _env = crate::persist::test_env("agent-fork-api-errors");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let target = pane.0.to_string();
+        let before = app.panes.len();
+
+        for params in [
+            json!({"target": target, "focus": "no"}),
+            json!({"target": target, "name": "Bad Name"}),
+        ] {
+            let err = app
+                .dispatch("agent.fork", &params)
+                .expect_err("invalid request must fail before spawning");
+            assert_eq!(err.0, "invalid_request");
+            assert_eq!(app.panes.len(), before);
+        }
+
+        let err = app
+            .dispatch("agent.fork", &json!({"target": target}))
+            .expect_err("a shell has no native agent fork");
+        assert_eq!(err.0, "unsupported_agent");
+        assert_eq!(app.panes.len(), before);
+
+        let err = app
+            .dispatch("agent.fork", &json!({"target": "missing"}))
+            .expect_err("unknown targets are rejected");
+        assert_eq!(err.0, "not_found");
     }
 
     #[test]

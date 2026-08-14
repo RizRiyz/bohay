@@ -111,6 +111,47 @@ Try requests such as:
 
 > Read the visible screen of the blocked Codex agent before answering it.
 
+### Fork an agent session
+
+The plugin can fork a supported live agent into a sibling pane while the
+original keeps running. Resolve the source first, then optionally name the new
+fork or preserve the current focus:
+
+```sh
+bohay agent get reviewer
+bohay agent fork reviewer --name experiment --no-focus
+```
+
+The fork inherits the source conversation and receives its own new session.
+Native forks currently support Claude, Codex, and Pi. If the target is
+unsupported, its session cannot be resolved, or its pane cannot start, the
+plugin reports Bohay's structured error instead of substituting a split, new
+agent, or resume operation that could lose or reuse the wrong context.
+
+### Arrange panes and tabs
+
+The plugin can move a running pane to another tab without restarting its
+process, or append a new tab for it. Resolve the pane and inspect the tabs in
+its workspace before changing the layout:
+
+```sh
+bohay pane move 7 --tab 2
+bohay pane move 7 --new-tab
+```
+
+It can also reorder tabs in the active workspace:
+
+```sh
+bohay tab list
+bohay tab move 3 1
+```
+
+Tab positions are 1-based. A pane move stays inside that pane's workspace,
+removes an empty source tab, keeps the process and terminal history alive, and
+follows the pane with focus. Reordering tabs keeps the same tab active even
+when its position changes. The plugin uses explicit pane IDs and confirmed tab
+positions instead of inferring either from the visible sidebar.
+
 From an external terminal there is no implicit caller pane. The skill resolves
 live IDs first and uses explicit targets for state changes. It also uses bounded
 reads and waits, preserves focus where possible, and asks before destructive

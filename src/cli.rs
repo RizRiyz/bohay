@@ -75,6 +75,8 @@ panes / agents:
   agent list                 list every agent across all workspaces/tabs
   agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
                              spawn beside an anchor or reuse a pane, wait until ready, name it
+  agent fork <target> [--name <alias>] [--no-focus]
+                             fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
   agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
                              prompt an agent (target = a name, pane id, or kind)
@@ -1021,6 +1023,54 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
         ("agent", "sessions") => ("agent.sessions".into(), json!({})),
         ("agent", "resume") => ("agent.resume".into(), one("session_id", arg0())),
+        ("agent", "fork") => {
+            let usage = "usage: bohay agent fork <target> [--name <alias>] [--no-focus]";
+            let target = rest
+                .first()
+                .filter(|v| !v.starts_with("--"))
+                .ok_or_else(|| anyhow!(usage))?
+                .clone();
+            let mut name: Option<String> = None;
+            let mut no_focus = false;
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--name" => {
+                        let alias = rest
+                            .get(i + 1)
+                            .filter(|v| !v.starts_with("--"))
+                            .ok_or_else(|| anyhow!("--name needs an agent alias"))?;
+                        if name.is_some() {
+                            return Err(anyhow!("--name may be passed only once"));
+                        }
+                        name = Some(alias.clone());
+                        i += 2;
+                    }
+                    "--no-focus" => {
+                        if no_focus {
+                            return Err(anyhow!("--no-focus may be passed only once"));
+                        }
+                        no_focus = true;
+                        i += 1;
+                    }
+                    option if option.starts_with("--") => {
+                        return Err(anyhow!("unknown agent fork option `{option}`. {usage}"));
+                    }
+                    extra => {
+                        return Err(anyhow!("unexpected agent fork argument `{extra}`. {usage}"));
+                    }
+                }
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("target".to_string(), json!(target));
+            if let Some(alias) = name {
+                obj.insert("name".to_string(), json!(alias));
+            }
+            if no_focus {
+                obj.insert("focus".to_string(), json!(false));
+            }
+            ("agent.fork".into(), Value::Object(obj))
+        }
         ("agent", "name") => {
             // `agent name <name>` names the current pane; `--pane <id>` overrides;
             // `--clear` drops the pane's alias. The name never doubles as a pane id.
@@ -1644,6 +1694,35 @@ mod tests {
             "bohay tab move 1 two",
             "bohay pane teleport 7",
             "bohay tab reorder 2 1",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn maps_agent_fork_and_rejects_ambiguous_syntax() {
+        let (method, params) = parse(&argv(
+            "bohay agent fork reviewer --name experiment --no-focus",
+        ))
+        .unwrap();
+        assert_eq!(method, "agent.fork");
+        assert_eq!(
+            params,
+            json!({"target": "reviewer", "name": "experiment", "focus": false})
+        );
+
+        let (method, params) = parse(&argv("bohay agent fork 7")).unwrap();
+        assert_eq!(method, "agent.fork");
+        assert_eq!(params, json!({"target": "7"}));
+
+        for bad in [
+            "bohay agent fork",
+            "bohay agent fork --no-focus",
+            "bohay agent fork 7 extra",
+            "bohay agent fork 7 --name",
+            "bohay agent fork 7 --name one --name two",
+            "bohay agent fork 7 --no-focus --no-focus",
+            "bohay agent fork 7 --down",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }

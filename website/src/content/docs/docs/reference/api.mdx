@@ -36,7 +36,7 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.bohay/bohay.so
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.close` |
 | tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.rename` · `tab.close` |
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
-| agents | `agent.list` · `agent.get` · `agent.name` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
+| agents | `agent.list` · `agent.get` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
@@ -70,6 +70,22 @@ same zero-based workspace index used by the other workspace API results; its
 position, and the currently active tab remains active even when its number
 changes. Zero, missing, same-position, and out-of-range values return
 `invalid_request` without changing state.
+
+## Forking an agent session
+
+| Method | Params | Result |
+|---|---|---|
+| `agent.fork` | `{target, name?, focus?}` | `{type:"agent_fork", from, pane, agent, name, workspace, tab, focused}` |
+
+`target` is a live alias, numeric pane ID, or a unique agent kind. Bohay uses
+the agent's native fork command and creates the sibling to the right of the
+source pane in that pane's own workspace and tab. The parent stays running.
+`name` optionally assigns the new fork a live alias. `focus` defaults to `true`;
+when false, the current workspace, tab, pane focus, and zoom state are preserved.
+
+Unsupported agents return `unsupported_agent`; a supported agent whose session
+ID cannot be resolved returns `session_unknown`; and PTY launch failure returns
+`spawn_failed`. Validation completes before a new pane is spawned.
 
 ## Sidebar docks
 
@@ -122,7 +138,7 @@ exactly this.
 {"event":"lease.acquired","lease":"L2","task":"t3"}
 ```
 
-Event names: `pane.created` · `pane.closed` · `pane.moved` · `pane.agent_status_changed` ·
+Event names: `pane.created` · `pane.closed` · `pane.forked` · `pane.moved` · `pane.agent_status_changed` ·
 `agent.hook` · `workspace.created` · `workspace.closed` (a module hook may
 still spell these `node.created` / `node.closed`) · `tab.created` · `tab.closed` · `tab.moved`
 · `task.added` · `task.claimed` · `task.started` · `task.ready` ·

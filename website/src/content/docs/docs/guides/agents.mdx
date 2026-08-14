@@ -107,6 +107,8 @@ Two ways to trigger it:
 
 - **Right-click** the pane and choose **Fork to New Pane**.
 - Press **`Ctrl+Space f`** to fork the focused pane.
+- Run `bohay agent fork <target>` from the CLI. Add `--name <alias>` to name
+  the new fork or `--no-focus` to leave the current view unchanged.
 
 The new pane opens straight into the agent, already caught up on the whole
 conversation, exactly as if you had resumed it, except the original session is
@@ -121,9 +123,9 @@ support it natively:
 | Codex | `codex fork <id>` |
 | Pi | `pi --fork <id>` |
 
-The action (and the shortcut) only does something for a pane running one of
-these. For everything else it is a no-op, and the right-click entry does not
-appear, so you never get a fork that quietly dropped its context.
+The TUI action only appears for supported agents and otherwise remains a no-op.
+The CLI reports a structured error instead, so automation never mistakes an
+unsupported or unresolved fork for success.
 
 ## Precise events: the integration hook
 

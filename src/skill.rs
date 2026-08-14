@@ -320,6 +320,41 @@ mod tests {
     }
 
     #[test]
+    fn codex_plugin_documents_native_agent_forks() {
+        let plugin = include_str!("../plugins/bohay/skills/bohay/SKILL.md");
+        let manifest = include_str!("../plugins/bohay/.codex-plugin/plugin.json");
+        let metadata = include_str!("../plugins/bohay/skills/bohay/agents/openai.yaml");
+        let guide = include_str!("../website/src/content/docs/docs/guides/codex-plugin.mdx");
+
+        let skill_markers = [
+            "bohay agent get <target>",
+            "bohay agent fork <target> [--name <alias>] [--no-focus]",
+            "Native forks currently support Claude, Codex, and Pi",
+            "`unsupported_agent`, `session_unknown`, or `spawn_failed`",
+            "Do not approximate a failed fork",
+        ];
+        for marker in skill_markers {
+            assert!(
+                SKILL.contains(marker),
+                "bundled skill is missing native fork guidance: {marker}"
+            );
+            assert!(
+                plugin.contains(marker),
+                "Codex plugin skill is missing native fork guidance: {marker}"
+            );
+        }
+
+        assert!(
+            ADVANCED_CONTROL.contains("bohay agent fork"),
+            "advanced control reference is missing agent fork safety guidance"
+        );
+        assert!(manifest.contains("Fork a supported live Bohay agent"));
+        assert!(metadata.contains("Use $bohay to fork a supported live agent"));
+        assert!(guide.contains("### Fork an agent session"));
+        assert!(guide.contains("bohay agent fork reviewer --name experiment --no-focus"));
+    }
+
+    #[test]
     fn skill_valid_accepts_a_real_skill_and_rejects_junk() {
         assert!(skill_valid(SKILL), "the bundled skill validates");
         assert!(!skill_valid(""), "empty is rejected");
