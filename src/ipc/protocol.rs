@@ -10,17 +10,28 @@ use ratatui::style::{Color, Modifier};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+use crate::terminal::theme_probe::TerminalColors;
+
+pub const PROTOCOL_VERSION: u32 = 2;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ClientMessage {
-    Hello { version: u32, cols: u16, rows: u16 },
+    Hello {
+        version: u32,
+        cols: u16,
+        rows: u16,
+    },
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Detach,
+    /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
+    TerminalColors(Option<TerminalColors>),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -50,6 +61,11 @@ pub enum ServerMessage {
     Detach,
     ServerShutdown {
         reason: String,
+    },
+    /// Completes negotiation after `Welcome`. Kept separate so a new client can
+    /// still decode the version-mismatch reply from an older server.
+    Ready {
+        probe_terminal: bool,
     },
 }
 

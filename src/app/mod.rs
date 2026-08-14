@@ -1933,6 +1933,14 @@ impl App {
         }
     }
 
+    /// Apply colors reported by the terminal displaying the foreground client.
+    pub fn apply_terminal_colors(&mut self, colors: &crate::terminal::theme_probe::TerminalColors) {
+        self.theme = crate::ui::theme::Theme::from_terminal(colors);
+        if self.downsample {
+            self.theme = self.theme.to_256();
+        }
+    }
+
     /// Set a sidebar's width, clamped to the supported range, and persist.
     pub fn set_side_width(&mut self, side: Side, cols: u16) {
         self.sidebars.get_mut(side).width = cols.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);

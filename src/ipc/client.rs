@@ -35,21 +35,6 @@ where
     W: Write + Send + 'static,
 {
     let mut terminal = ratatui::init();
-    // One clean window title — empty on Terminal.app, which already shows the
-    // process name in its title bar (see `main::window_title`).
-    let _ = execute!(
-        std::io::stdout(),
-        EnableBracketedPaste,
-        EnableMouseCapture,
-        // Focus reporting: regaining focus (e.g. after moving the window or tabbing
-        // back) is our cue that the terminal may have been repainted underneath us,
-        // so we ask the server for a full frame (see the input loop).
-        EnableFocusChange,
-        crossterm::terminal::SetTitle(crate::window_title())
-    );
-    // Let the terminal report Shift+Enter et al. as distinct keys, so agents get
-    // a real "new line" key instead of a bare CR (see `push_key_protocol`).
-    crate::push_key_protocol();
     crate::install_tui_panic_hook();
     let result = run_inner(reader, writer, &mut terminal);
     let _ = execute!(
@@ -93,8 +78,37 @@ where
         _ => return Err(anyhow!("unexpected handshake")),
     }
 
+    let probe_terminal = match protocol::read_message::<_, ServerMessage>(&mut reader)? {
+        ServerMessage::Ready { probe_terminal } => probe_terminal,
+        _ => return Err(anyhow!("unexpected handshake negotiation")),
+    };
+    let pending = if probe_terminal {
+        let probe = crate::terminal::theme_probe::probe();
+        protocol::write_message(&mut writer, &ClientMessage::TerminalColors(probe.colors))?;
+        probe.pending
+    } else {
+        Vec::new()
+    };
+
+    // Enable input protocols only after probing. That bounds the pending-input
+    // decoder to ordinary terminal key sequences and avoids mouse/paste replies
+    // becoming interleaved with OSC palette responses.
+    let _ = execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        // Focus reporting: regaining focus (e.g. after moving the window or tabbing
+        // back) is our cue that the terminal may have been repainted underneath us,
+        // so we ask the server for a full frame (see the input loop).
+        EnableFocusChange,
+        crossterm::terminal::SetTitle(crate::window_title())
+    );
+    // Let the terminal report Shift+Enter et al. as distinct keys, so agents get
+    // a real "new line" key instead of a bare CR (see `push_key_protocol`).
+    crate::push_key_protocol();
+
     // Input thread: terminal events → the server.
-    thread::spawn(move || input_loop(writer));
+    thread::spawn(move || input_loop(writer, pending));
 
     // Main thread: paint frames as they arrive. A full frame repaints the screen; a
     // diff writes only its changed cells straight to the terminal (no full re-blit,
@@ -133,26 +147,39 @@ where
     Ok(())
 }
 
-fn input_loop<W: Write>(mut writer: W) {
-    loop {
-        let msg = match read_event() {
-            Ok(Event::Key(k)) => ClientMessage::Key(k),
-            Ok(Event::Mouse(m)) => ClientMessage::Mouse(m),
-            Ok(Event::Resize(w, h)) => ClientMessage::Resize { cols: w, rows: h },
-            Ok(Event::Paste(s)) => ClientMessage::Paste(s),
-            // Regained focus: the window may have moved or been repainted while we
-            // were away, and bohay never saw it. Re-send the current size, which the
-            // server treats as a forced full repaint, healing any stale cells.
-            Ok(Event::FocusGained) => match crossterm::terminal::size() {
-                Ok((cols, rows)) => ClientMessage::Resize { cols, rows },
-                Err(_) => continue,
-            },
-            Ok(_) => continue,
-            Err(_) => break,
+fn input_loop<W: Write>(mut writer: W, pending: Vec<Event>) {
+    for event in pending {
+        let Some(msg) = event_message(event) else {
+            continue;
+        };
+        if protocol::write_message(&mut writer, &msg).is_err() {
+            return;
+        }
+    }
+    while let Ok(event) = read_event() {
+        let msg = match event_message(event) {
+            Some(msg) => msg,
+            None => continue,
         };
         if protocol::write_message(&mut writer, &msg).is_err() {
             break;
         }
+    }
+}
+
+fn event_message(event: Event) -> Option<ClientMessage> {
+    match event {
+        Event::Key(k) => Some(ClientMessage::Key(k)),
+        Event::Mouse(m) => Some(ClientMessage::Mouse(m)),
+        Event::Resize(cols, rows) => Some(ClientMessage::Resize { cols, rows }),
+        Event::Paste(s) => Some(ClientMessage::Paste(s)),
+        // Regained focus: the window may have moved or been repainted while we
+        // were away, and bohay never saw it. Re-send the current size, which the
+        // server treats as a forced full repaint, healing any stale cells.
+        Event::FocusGained => crossterm::terminal::size()
+            .ok()
+            .map(|(cols, rows)| ClientMessage::Resize { cols, rows }),
+        _ => None,
     }
 }
 
@@ -372,13 +399,13 @@ mod tests {
         assert_eq!(output, b"world", "server reply forwarded to output");
     }
 
-    /// Faithful end-to-end remote path (docs/18 RA) minus the transparent ssh
-    /// transport: a real `bohay server` + `bohay remote-client-bridge`, driven
-    /// with the actual Hello handshake, must relay back a real server Frame.
+    /// A real scratch server must negotiate a client-owned terminal palette and
+    /// return a frame. The byte-transparent bridge is covered separately by
+    /// `relay_pumps_both_directions`.
     /// Ignored: spawns processes and needs the built binary.
     #[test]
     #[ignore]
-    fn remote_bridge_relays_a_real_server_frame() {
+    fn real_server_accepts_a_terminal_palette() {
         use crate::ipc::protocol::{self, ClientMessage, ServerMessage, PROTOCOL_VERSION};
         use std::process::{Command, Stdio};
 
@@ -392,11 +419,23 @@ mod tests {
         let home = std::env::temp_dir().join(format!("bohay-remote-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
+        let config = crate::config::Config {
+            theme: "terminal".into(),
+            ..Default::default()
+        };
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
 
         // A real server on a scratch home.
         let mut server = Command::new(&bin)
             .arg("server")
             .env("BOHAY_HOME", &home)
+            // An agent pane inherits the live session's socket. The scratch
+            // server and its cleanup must never escape this test home.
+            .env_remove("BOHAY_SOCKET_PATH")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -411,21 +450,13 @@ mod tests {
         }
         assert!(sock.exists(), "server never created its client socket");
 
-        // The bridge, exactly as ssh runs it on the remote host.
-        let mut bridge = Command::new(&bin)
-            .arg("remote-client-bridge")
-            .env("BOHAY_HOME", &home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut bstdin = bridge.stdin.take().unwrap();
-        let mut bstdout = bridge.stdout.take().unwrap();
+        let conn = crate::ipc::transport::connect(&sock).unwrap();
+        let mut writer = conn.clone();
+        let mut reader = std::io::BufReader::new(conn);
 
-        // Drive the client handshake through the bridge.
+        // Drive the same handshake used by local and SSH-relayed clients.
         protocol::write_message(
-            &mut bstdin,
+            &mut writer,
             &ClientMessage::Hello {
                 version: PROTOCOL_VERSION,
                 cols: 80,
@@ -433,10 +464,11 @@ mod tests {
             },
         )
         .unwrap();
-        bstdin.flush().unwrap();
+        writer.flush().unwrap();
 
-        // Welcome first, then a full Frame — relayed from the remote socket.
-        match protocol::read_message::<_, ServerMessage>(&mut bstdout).unwrap() {
+        // Welcome is backward-decodable, then the server explicitly requests
+        // the palette from the terminal displaying this remote client.
+        match protocol::read_message::<_, ServerMessage>(&mut reader).unwrap() {
             ServerMessage::Welcome { version, error } => {
                 assert_eq!(version, PROTOCOL_VERSION);
                 assert!(error.is_none(), "handshake error: {error:?}");
@@ -446,9 +478,26 @@ mod tests {
                 std::mem::discriminant(&other)
             ),
         }
+        match protocol::read_message::<_, ServerMessage>(&mut reader).unwrap() {
+            ServerMessage::Ready {
+                probe_terminal: true,
+            } => {}
+            _ => panic!("terminal theme should request the client palette"),
+        }
+        let colors = crate::terminal::theme_probe::TerminalColors {
+            fg: [238, 238, 238],
+            bg: [20, 20, 20],
+            palette: crate::terminal::theme_probe::default_ansi_palette(
+                [238, 238, 238],
+                [20, 20, 20],
+            ),
+        };
+        protocol::write_message(&mut writer, &ClientMessage::TerminalColors(Some(colors))).unwrap();
+        writer.flush().unwrap();
+
         let mut got_frame = false;
         for _ in 0..8 {
-            match protocol::read_message::<_, ServerMessage>(&mut bstdout) {
+            match protocol::read_message::<_, ServerMessage>(&mut reader) {
                 Ok(ServerMessage::Frame(fr)) => {
                     assert!(fr.width > 0 && fr.height > 0, "frame has real dimensions");
                     got_frame = true;
@@ -460,17 +509,13 @@ mod tests {
         }
         assert!(
             got_frame,
-            "the bridge relayed a real server frame end to end"
+            "the server returned a real frame after palette negotiation"
         );
 
-        let _ = bridge.kill();
-        let _ = Command::new(&bin)
-            .arg("server")
-            .arg("stop")
-            .env("BOHAY_HOME", &home)
-            .output();
+        // Kill only the child handle this test spawned. Never address a server
+        // by an inherited environment socket during cleanup.
+        let _ = server.kill();
         let _ = server.wait();
-        let _ = bridge.wait();
         let _ = std::fs::remove_dir_all(&home);
     }
 }

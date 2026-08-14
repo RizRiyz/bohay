@@ -2,4 +2,5 @@
 //! See docs/05-pty-and-terminal.md.
 
 pub mod pty;
+pub mod theme_probe;
 pub mod vt;

@@ -1,320 +1,8 @@
 //! Color palette. "bohay vr46" — a near-black dark UI with a fluorescent
 //! stabilo/Valentino-Rossi green accent for active/selected elements.
 
-use std::sync::OnceLock;
-
+use crate::terminal::theme_probe::TerminalColors;
 use ratatui::style::Color;
-
-// ── Terminal color inference ────────────────────────────────────────────────
-
-/// Colors probed from the host terminal via OSC escape sequences.
-#[derive(Clone)]
-pub struct TerminalColors {
-    pub fg: [u8; 3],
-    pub bg: [u8; 3],
-    pub palette: [[u8; 3]; 16],
-}
-
-static PROBED: OnceLock<TerminalColors> = OnceLock::new();
-
-/// Must be called **before** `ratatui::init()` — enters raw mode briefly to
-/// read the terminal's OSC 10/11/4 color responses.
-#[cfg(unix)]
-pub fn probe_terminal() {
-    if PROBED.get().is_some() {
-        return;
-    }
-
-    use std::io::{Read, Write};
-    use std::os::unix::io::AsRawFd;
-    use std::time::{Duration, Instant};
-
-    if crossterm::terminal::enable_raw_mode().is_err() {
-        return;
-    }
-
-    let result = (|| -> Option<(TerminalColors, Vec<u8>)> {
-        let mut stdout = std::io::stdout();
-
-        write!(stdout, "\x1b]10;?\x07\x1b]11;?\x07").ok()?;
-        for i in 0..16u8 {
-            write!(stdout, "\x1b]4;{i};?\x07").ok()?;
-        }
-        stdout.flush().ok()?;
-
-        let mut buf = Vec::with_capacity(2048);
-        let deadline = Instant::now() + Duration::from_millis(200);
-        let stdin_fd = std::io::stdin().as_raw_fd();
-
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let mut fds = [libc::pollfd {
-                fd: stdin_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            }];
-            let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, remaining.as_millis() as i32) };
-            if ret <= 0 {
-                break;
-            }
-            let mut tmp = [0u8; 512];
-            if let Ok(n) = std::io::stdin().read(&mut tmp) {
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..n]);
-                if count_osc_terminators(&buf) >= 18 {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
-        let leftover = extract_non_osc_bytes(&buf);
-        parse_osc_responses(&buf).map(|c| (c, leftover))
-    })();
-
-    let _ = crossterm::terminal::disable_raw_mode();
-
-    if let Some((colors, leftover)) = result {
-        std::env::set_var("BOHAY_TERMINAL_COLORS", encode_colors(&colors));
-        let _ = PROBED.set(colors);
-        stuff_stdin(&leftover);
-    }
-}
-
-// TIOCSTI is deprecated in Linux 6.2+ but still the only portable POSIX
-// mechanism; callers should be tolerant if this silently no-ops.
-#[cfg(unix)]
-fn stuff_stdin(bytes: &[u8]) {
-    use std::os::unix::io::AsRawFd;
-    let fd = std::io::stdin().as_raw_fd();
-    for &b in bytes {
-        unsafe { libc::ioctl(fd, libc::TIOCSTI, &b as *const u8) };
-    }
-}
-
-#[cfg(not(unix))]
-pub fn probe_terminal() {}
-
-fn probed_colors() -> Option<&'static TerminalColors> {
-    if let Some(c) = PROBED.get() {
-        return Some(c);
-    }
-    if let Ok(val) = std::env::var("BOHAY_TERMINAL_COLORS") {
-        if let Some(colors) = decode_colors(&val) {
-            let _ = PROBED.set(colors);
-            return PROBED.get();
-        }
-    }
-    None
-}
-
-// ── OSC response parsing ────────────────────────────────────────────────────
-
-#[cfg(unix)]
-fn extract_non_osc_bytes(data: &[u8]) -> Vec<u8> {
-    let mut leftover = Vec::new();
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b']' {
-            i += 2;
-            while i < data.len() {
-                if data[i] == 0x07 {
-                    i += 1;
-                    break;
-                }
-                if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\' {
-                    i += 2;
-                    break;
-                }
-                i += 1;
-            }
-        } else {
-            leftover.push(data[i]);
-            i += 1;
-        }
-    }
-    leftover
-}
-
-/// Count OSC response terminators (BEL or ST) without allocating.
-#[cfg(unix)]
-fn count_osc_terminators(data: &[u8]) -> usize {
-    let mut count = 0;
-    let mut in_osc = false;
-    let mut i = 0;
-    while i < data.len() {
-        if !in_osc {
-            if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b']' {
-                in_osc = true;
-                i += 2;
-                continue;
-            }
-        } else if data[i] == 0x07 {
-            count += 1;
-            in_osc = false;
-        } else if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\' {
-            count += 1;
-            in_osc = false;
-            i += 1;
-        }
-        i += 1;
-    }
-    count
-}
-
-fn parse_osc_responses(data: &[u8]) -> Option<TerminalColors> {
-    let s = String::from_utf8_lossy(data);
-    let mut fg = None;
-    let mut bg = None;
-    let mut palette = [[0u8; 3]; 16];
-    let mut palette_set = [false; 16];
-
-    for chunk in s.split('\x1b') {
-        if let Some(rest) = chunk.strip_prefix("]10;") {
-            fg = parse_rgb_value(rest);
-        } else if let Some(rest) = chunk.strip_prefix("]11;") {
-            bg = parse_rgb_value(rest);
-        } else if let Some(rest) = chunk.strip_prefix("]4;") {
-            if let Some((idx_str, color_part)) = rest.split_once(';') {
-                if let Ok(idx) = idx_str.parse::<usize>() {
-                    if idx < 16 {
-                        if let Some(rgb) = parse_rgb_value(color_part) {
-                            palette[idx] = rgb;
-                            palette_set[idx] = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let fg = fg?;
-    let bg = bg?;
-
-    // Fill any missing palette entries with sensible defaults derived from
-    // fg/bg so the theme still works even if OSC 4 partially failed.
-    if !palette_set.iter().all(|&s| s) {
-        let defaults = default_ansi_palette(fg, bg);
-        for (i, set) in palette_set.iter().enumerate() {
-            if !set {
-                palette[i] = defaults[i];
-            }
-        }
-    }
-
-    Some(TerminalColors { fg, bg, palette })
-}
-
-fn parse_rgb_value(s: &str) -> Option<[u8; 3]> {
-    let s = s.strip_prefix("rgb:")?;
-    let s = s.split(['\x07', '\\']).next()?;
-    let parts: Vec<&str> = s.split('/').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let parse_component = |s: &str| -> Option<u8> {
-        let v = u16::from_str_radix(s, 16).ok()?;
-        Some(match s.len() {
-            1 => (v * 17) as u8,
-            2 => v as u8,
-            3 => (v >> 4) as u8,
-            4 => (v >> 8) as u8,
-            _ => return None,
-        })
-    };
-    Some([
-        parse_component(parts[0])?,
-        parse_component(parts[1])?,
-        parse_component(parts[2])?,
-    ])
-}
-
-fn default_ansi_palette(fg: [u8; 3], bg: [u8; 3]) -> [[u8; 3]; 16] {
-    let is_dark = luminance(bg) < luminance(fg);
-    if is_dark {
-        [
-            bg,
-            [204, 0, 0],
-            [78, 154, 6],
-            [196, 160, 0],
-            [52, 101, 164],
-            [117, 80, 123],
-            [6, 152, 154],
-            [211, 215, 207],
-            [85, 87, 83],
-            [239, 41, 41],
-            [138, 226, 52],
-            [252, 233, 79],
-            [114, 159, 207],
-            [173, 127, 168],
-            [52, 226, 226],
-            fg,
-        ]
-    } else {
-        [
-            [0, 0, 0],
-            [170, 0, 0],
-            [0, 110, 0],
-            [170, 110, 0],
-            [0, 0, 170],
-            [110, 0, 110],
-            [0, 110, 110],
-            bg,
-            [85, 85, 85],
-            [255, 85, 85],
-            [85, 255, 85],
-            [255, 255, 85],
-            [85, 85, 255],
-            [255, 85, 255],
-            [85, 255, 255],
-            fg,
-        ]
-    }
-}
-
-// ── Env-var encoding ────────────────────────────────────────────────────────
-
-/// Encode colors as a hex string: fg(6) + bg(6) + 16*palette(96) = 108 chars.
-fn encode_colors(c: &TerminalColors) -> String {
-    let mut s = String::with_capacity(108);
-    let hex = |rgb: [u8; 3], s: &mut String| {
-        for b in rgb {
-            use std::fmt::Write;
-            let _ = write!(s, "{b:02x}");
-        }
-    };
-    hex(c.fg, &mut s);
-    hex(c.bg, &mut s);
-    for p in &c.palette {
-        hex(*p, &mut s);
-    }
-    s
-}
-
-fn decode_colors(s: &str) -> Option<TerminalColors> {
-    if s.len() != 108 {
-        return None;
-    }
-    let bytes: Vec<u8> = (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect::<Result<_, _>>()
-        .ok()?;
-    let rgb = |i: usize| [bytes[i], bytes[i + 1], bytes[i + 2]];
-    let fg = rgb(0);
-    let bg = rgb(3);
-    let mut palette = [[0u8; 3]; 16];
-    for (j, slot) in palette.iter_mut().enumerate() {
-        *slot = rgb(6 + j * 3);
-    }
-    Some(TerminalColors { fg, bg, palette })
-}
 
 // ── Theme derivation from terminal colors ───────────────────────────────────
 
@@ -334,6 +22,34 @@ fn pal(c: [u8; 3]) -> Color {
 }
 
 impl Theme {
+    /// A zero-probe terminal theme. `Reset` follows the terminal's configured
+    /// foreground/background and ANSI indices follow its palette, so selecting
+    /// Terminal never flashes or falls back to a bundled bohay theme. A
+    /// successful OSC probe replaces this with the richer derived palette.
+    pub fn terminal_native() -> Self {
+        let ansi = Color::Indexed;
+        Theme {
+            crust: Color::Reset,
+            mantle: Color::Reset,
+            base: Color::Reset,
+            surface0: Color::Reset,
+            surface1: ansi(8),
+            overlay0: ansi(8),
+            overlay1: ansi(7),
+            subtext0: ansi(8),
+            subtext1: ansi(7),
+            text: Color::Reset,
+            accent: ansi(4),
+            sel_bg: ansi(8),
+            border: ansi(8),
+            border_focus: ansi(7),
+            green: ansi(2),
+            mint: ansi(6),
+            amber: ansi(3),
+            coral: ansi(1),
+        }
+    }
+
     pub fn from_terminal(c: &TerminalColors) -> Self {
         let (bg, fg) = (c.bg, c.fg);
         let is_dark = luminance(bg) < luminance(fg);
@@ -893,7 +609,6 @@ impl Theme {
 pub const THEMES: &[&str] = &[
     // The default leads the list, so Settings -> Theme opens on it.
     "quattro-rally",
-    "terminal",
     "noir",
     "ocean",
     "dracula",
@@ -910,6 +625,9 @@ pub const THEMES: &[&str] = &[
     "catppuccin-latte",
     "gruvbox-light",
     "mono",
+    // Terminal is capability-derived rather than a bundled palette, and is
+    // newest, so keep it after the built-in themes.
+    "terminal",
 ];
 
 /// Map a stored theme name onto its current registry name. The Catppuccin
@@ -928,9 +646,9 @@ pub fn canonical(name: &str) -> &str {
 
 pub fn by_name(name: &str) -> Theme {
     match name {
-        "terminal" => probed_colors()
-            .map(Theme::from_terminal)
-            .unwrap_or_else(Theme::quattro_rally),
+        // The client-supplied RGB palette is applied after startup. Until then,
+        // use terminal-native Reset/ANSI colors rather than a bundled palette.
+        "terminal" => Theme::terminal_native(),
         "ocean" => Theme::ocean(),
         "homebrew" => Theme::homebrew(),
         "redsands" => Theme::red_sands(),
@@ -1150,6 +868,7 @@ mod tests {
             );
         }
         assert!(THEMES.len() >= 15, "the new palettes are registered");
+        assert_eq!(THEMES.last(), Some(&"terminal"));
 
         // Legacy config values must keep resolving to the same palette.
         for (old, new) in [
@@ -1167,67 +886,15 @@ mod tests {
     }
 
     #[test]
-    fn osc_parse_round_trip() {
-        // Simulate a terminal response for fg, bg, and two palette entries.
-        let response = b"\x1b]10;rgb:e7e7/e7e7/eded\x1b\\\
-                         \x1b]11;rgb:1e1e/2020/3030\x1b\\\
-                         \x1b]4;1;rgb:ed00/8787/9696\x1b\\\
-                         \x1b]4;4;rgb:8a8a/adad/f4f4\x1b\\";
-        let colors = parse_osc_responses(response).unwrap();
-        assert_eq!(colors.fg, [0xe7, 0xe7, 0xed]);
-        assert_eq!(colors.bg, [0x1e, 0x20, 0x30]);
-        assert_eq!(colors.palette[1], [0xed, 0x87, 0x96]);
-        assert_eq!(colors.palette[4], [0x8a, 0xad, 0xf4]);
-    }
-
-    #[test]
-    fn osc_parse_bel_terminator() {
-        // Some terminals use BEL (\x07) instead of ST (\x1b\\).
-        let response = b"\x1b]10;rgb:ff/ff/ff\x07\x1b]11;rgb:00/00/00\x07";
-        let colors = parse_osc_responses(response).unwrap();
-        assert_eq!(colors.fg, [0xff, 0xff, 0xff]);
-        assert_eq!(colors.bg, [0x00, 0x00, 0x00]);
-    }
-
-    #[test]
-    fn env_encode_decode_round_trip() {
-        let colors = TerminalColors {
-            fg: [0xca, 0xd3, 0xf5],
-            bg: [0x24, 0x27, 0x3a],
-            palette: [
-                [0x18, 0x19, 0x26],
-                [0xed, 0x87, 0x96],
-                [0xa6, 0xda, 0x95],
-                [0xee, 0xd4, 0x9f],
-                [0x8a, 0xad, 0xf4],
-                [0xc6, 0xa0, 0xf6],
-                [0x8b, 0xd5, 0xca],
-                [0xb8, 0xc0, 0xe0],
-                [0x6e, 0x73, 0x8d],
-                [0xed, 0x87, 0x96],
-                [0xa6, 0xda, 0x95],
-                [0xee, 0xd4, 0x9f],
-                [0x8a, 0xad, 0xf4],
-                [0xc6, 0xa0, 0xf6],
-                [0x8b, 0xd5, 0xca],
-                [0xca, 0xd3, 0xf5],
-            ],
-        };
-        let encoded = encode_colors(&colors);
-        assert_eq!(encoded.len(), 108);
-        let decoded = decode_colors(&encoded).unwrap();
-        assert_eq!(decoded.fg, colors.fg);
-        assert_eq!(decoded.bg, colors.bg);
-        assert_eq!(decoded.palette, colors.palette);
-    }
-
-    #[test]
     fn from_terminal_does_not_panic() {
         // Dark terminal.
         let dark = TerminalColors {
             fg: [0xee, 0xee, 0xee],
             bg: [0x1a, 0x1a, 0x2e],
-            palette: default_ansi_palette([0xee; 3], [0x1a, 0x1a, 0x2e]),
+            palette: crate::terminal::theme_probe::default_ansi_palette(
+                [0xee; 3],
+                [0x1a, 0x1a, 0x2e],
+            ),
         };
         let _ = Theme::from_terminal(&dark);
 
@@ -1235,9 +902,28 @@ mod tests {
         let light = TerminalColors {
             fg: [0x33, 0x33, 0x33],
             bg: [0xf5, 0xf5, 0xf0],
-            palette: default_ansi_palette([0x33; 3], [0xf5, 0xf5, 0xf0]),
+            palette: crate::terminal::theme_probe::default_ansi_palette(
+                [0x33; 3],
+                [0xf5, 0xf5, 0xf0],
+            ),
         };
         let _ = Theme::from_terminal(&light);
+    }
+
+    #[test]
+    fn terminal_fallback_uses_the_terminal_palette() {
+        let terminal = by_name("terminal");
+        assert_eq!(terminal.base, Color::Reset);
+        assert_eq!(terminal.text, Color::Reset);
+        assert_eq!(terminal.accent, Color::Indexed(4));
+        assert_eq!(terminal.green, Color::Indexed(2));
+        assert_eq!(terminal.mint, Color::Indexed(6));
+        assert_eq!(terminal.amber, Color::Indexed(3));
+        assert_eq!(terminal.coral, Color::Indexed(1));
+
+        let quattro = by_name("quattro-rally");
+        assert_ne!(terminal.base, quattro.base);
+        assert_ne!(terminal.accent, quattro.accent);
     }
 }
 

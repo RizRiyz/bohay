@@ -6,7 +6,9 @@ use crate::ipc::transport::{self, Conn};
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,7 +43,13 @@ pub fn run() -> Result<()> {
 
     let (api_tx, api_rx) = mpsc::channel::<api::ApiRequest>();
     api::start_server(sock, api_tx, app.events.clone());
-    start_client_listener(persist::client_socket_path(), tx.clone());
+    let mut terminal_theme_enabled = app.config.theme == "terminal";
+    let terminal_theme = Arc::new(AtomicBool::new(terminal_theme_enabled));
+    start_client_listener(
+        persist::client_socket_path(),
+        tx.clone(),
+        terminal_theme.clone(),
+    );
     // The session is restored and the API socket is listening, so a module's
     // `[[startup]]` hooks can now call back in — this is where a module
     // repaints the docks it owns (docs/13 §3.7).
@@ -126,6 +134,11 @@ pub fn run() -> Result<()> {
             let resp = app.handle_api(&req);
             let _ = req.reply.send(resp);
             activity = true;
+        }
+        let enabled = app.config.theme == "terminal";
+        if enabled != terminal_theme_enabled {
+            terminal_theme_enabled = enabled;
+            terminal_theme.store(enabled, Ordering::Relaxed);
         }
 
         if app.should_quit {
@@ -320,7 +333,13 @@ fn apply(
             frames,
             cols,
             rows,
+            terminal_colors,
         } => {
+            if app.config.theme == "terminal" {
+                if let Some(colors) = terminal_colors.as_ref() {
+                    app.apply_terminal_colors(colors);
+                }
+            }
             clients.insert(id, frames);
             *foreground = Some(id);
             *size = (cols.max(1), rows.max(1));
@@ -406,7 +425,7 @@ fn send_frame(
     behind.retain(|id| clients.contains_key(id));
 }
 
-fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>) {
+fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {
     // Creates the state dir owner-only (0700) — this socket drives the UI.
     let _ = crate::persist::ensure_config_dir();
     let listener = match transport::bind(&path) {
@@ -416,12 +435,13 @@ fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>) {
     thread::spawn(move || {
         for (id, stream) in (1u64..).zip(transport::incoming(&listener)) {
             let app_tx = app_tx.clone();
-            thread::spawn(move || handle_client(id, stream, app_tx));
+            let terminal_theme = terminal_theme.clone();
+            thread::spawn(move || handle_client(id, stream, app_tx, terminal_theme));
         }
     });
 }
 
-fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>) {
+fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {
     let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
 
@@ -458,6 +478,19 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>) {
         return;
     }
 
+    let probe_terminal = terminal_theme.load(Ordering::Relaxed);
+    if protocol::write_message(&mut writer, &ServerMessage::Ready { probe_terminal }).is_err() {
+        return;
+    }
+    let terminal_colors = if probe_terminal {
+        match protocol::read_message::<_, ClientMessage>(&mut reader) {
+            Ok(ClientMessage::TerminalColors(colors)) => colors,
+            _ => return,
+        }
+    } else {
+        None
+    };
+
     let (frame_tx, frame_rx) = mpsc::sync_channel::<ServerMessage>(1);
     thread::spawn(move || {
         for msg in frame_rx {
@@ -477,6 +510,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>) {
             frames: frame_tx,
             cols,
             rows,
+            terminal_colors,
         })
         .is_err()
     {
@@ -509,7 +543,7 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>) {
                 let _ = app_tx.send(AppEvent::ClientDetach { id });
                 break;
             }
-            Ok(ClientMessage::Hello { .. }) => {}
+            Ok(ClientMessage::Hello { .. } | ClientMessage::TerminalColors(_)) => {}
         }
     }
 }

@@ -7,6 +7,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::ids::PaneId;
 use crate::ipc::protocol::ServerMessage;
+use crate::terminal::theme_probe::TerminalColors;
 
 pub enum AppEvent {
     Key(KeyEvent),
@@ -23,6 +24,7 @@ pub enum AppEvent {
         frames: SyncSender<ServerMessage>,
         cols: u16,
         rows: u16,
+        terminal_colors: Option<TerminalColors>,
     },
     /// A binary client detached.
     ClientDetach {

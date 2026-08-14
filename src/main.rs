@@ -335,18 +335,7 @@ pub(crate) fn window_title() -> &'static str {
 
 /// Run the app monolithically against the real terminal (dev/escape hatch).
 fn run_local() -> Result<()> {
-    if config::load().theme == "terminal" {
-        ui::theme::probe_terminal();
-    }
     let mut terminal = ratatui::init();
-    let _ = execute!(
-        std::io::stdout(),
-        EnableBracketedPaste,
-        EnableMouseCapture,
-        EnableFocusChange,
-        crossterm::terminal::SetTitle(window_title())
-    );
-    push_key_protocol();
     install_tui_panic_hook();
     let result = run(&mut terminal);
     let _ = execute!(
@@ -361,10 +350,6 @@ fn run_local() -> Result<()> {
 }
 
 fn autodetect_and_attach() -> Result<()> {
-    if config::load().theme == "terminal" {
-        ui::theme::probe_terminal();
-    }
-
     let sock = persist::client_socket_path();
     let fresh = !server_running(&sock);
     if fresh {
@@ -719,11 +704,6 @@ fn server_version() -> Option<String> {
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
-    {
-        let tx = tx.clone();
-        thread::spawn(move || input_loop(tx));
-    }
-
     let size = terminal.size()?;
     // Rough initial PTY size; the first draw resizes it to the exact pane rect.
     let cols = size.width.saturating_sub(34).max(20);
@@ -734,6 +714,29 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     ipc::api::set_socket_path(sock.clone());
     let mut app = App::restore_or_new(cols, rows, tx.clone())?;
     app.set_color_mode(ipc::protocol::truecolor_supported());
+    let pending = if app.config.theme == "terminal" {
+        let probe = terminal::theme_probe::probe();
+        if let Some(colors) = probe.colors.as_ref() {
+            app.apply_terminal_colors(colors);
+        }
+        probe.pending
+    } else {
+        Vec::new()
+    };
+    // Match the client path: query colors before enabling input protocols, so
+    // any interleaved bytes are ordinary keys that can be replayed losslessly.
+    let _ = execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        EnableFocusChange,
+        crossterm::terminal::SetTitle(window_title())
+    );
+    push_key_protocol();
+    {
+        let tx = tx.clone();
+        thread::spawn(move || input_loop(tx, pending));
+    }
     let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
     ipc::api::start_server(sock, api_tx, app.events.clone());
     app.run_module_startup_hooks(); // docs/13 §3.7 — same point as the server role
@@ -823,25 +826,38 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
-fn input_loop(tx: Sender<AppEvent>) {
-    loop {
-        let sent = match read_event() {
-            Ok(Event::Key(k)) => tx.send(AppEvent::Key(k)),
-            Ok(Event::Mouse(m)) => tx.send(AppEvent::Mouse(m)),
-            Ok(Event::Resize(w, h)) => tx.send(AppEvent::Resize(w, h)),
-            Ok(Event::Paste(s)) => tx.send(AppEvent::Paste(s)),
-            // Regained focus: treat like a resize to the current size, which forces
-            // a full repaint and clears any stale cells from a move/expose.
-            Ok(Event::FocusGained) => match crossterm::terminal::size() {
-                Ok((w, h)) => tx.send(AppEvent::Resize(w, h)),
-                Err(_) => Ok(()),
-            },
-            Ok(_) => Ok(()),
-            Err(_) => break,
+fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
+    for event in pending {
+        let Some(event) = app_event(event) else {
+            continue;
+        };
+        if tx.send(event).is_err() {
+            return;
+        }
+    }
+    while let Ok(event) = read_event() {
+        let sent = match app_event(event) {
+            Some(event) => tx.send(event),
+            None => Ok(()),
         };
         if sent.is_err() {
             break;
         }
+    }
+}
+
+fn app_event(event: Event) -> Option<AppEvent> {
+    match event {
+        Event::Key(k) => Some(AppEvent::Key(k)),
+        Event::Mouse(m) => Some(AppEvent::Mouse(m)),
+        Event::Resize(w, h) => Some(AppEvent::Resize(w, h)),
+        Event::Paste(s) => Some(AppEvent::Paste(s)),
+        // Regained focus: treat like a resize to the current size, which forces
+        // a full repaint and clears any stale cells from a move/expose.
+        Event::FocusGained => crossterm::terminal::size()
+            .ok()
+            .map(|(w, h)| AppEvent::Resize(w, h)),
+        _ => None,
     }
 }
 
