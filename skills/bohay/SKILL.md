@@ -1,6 +1,6 @@
 ---
 name: bohay
-description: "Control Bohay, mission control for your AI coding agents, through its local CLI. USE THIS WHENEVER A prompt line begins with `=target message`, where target is a live agent name, pane id, or unique agent kind. Delegate that line to the target and do not perform it yourself. Also use when asked to delegate work, inspect or control Bohay workspaces, tabs, panes, agents, output, files, Git views, worktrees, tasks, leases, modules, docks, or UI state. Inside Bohay, use the inherited session. Outside Bohay, use the installed production Bohay command and its configured session. Do not use merely because parallel work could help."
+description: "Control Bohay through its local CLI. Use only for a line beginning with `=target message`, an explicit request naming Bohay, a request to delegate to a named live Bohay agent or pane, or an explicit Bohay session operation on a workspace, tab, pane, agent, worktree, task, lease, module, dock, or Bohay UI. Do not use for ordinary coding, file edits, Git operations, tests, task planning, generic agent work, or parallelization unless the user explicitly connects the request to Bohay. Being inside Bohay does not trigger this skill by itself. Inside Bohay use the inherited session; outside use the installed production Bohay command and configured session."
 ---
 
 # Bohay
@@ -67,8 +67,12 @@ Use the installed production Bohay client:
   `$HOME/.bohay/bohay.sock`.
 - Never substitute `BOHAY_BIN_PATH` or a repository build for a missing
   installed command.
-- If `bohay` is not installed, report that clearly and point to the supported
-  Cargo, Homebrew, and `install.sh` installation choices.
+- Only after an attempted Bohay action cannot run because command lookup finds
+  no `bohay` client, report that Bohay is not installed and stop. Offer one of
+  the supported commands: `curl -fsSL https://bohay.dev/install.sh | sh`,
+  `brew install RizRiyz/bohay/bohay`, or `cargo install bohay`. Do not show this
+  guidance preemptively or for socket, permission, server, or other command
+  failures. Do not imply Bohay is available until a later lookup succeeds.
 - Start the production server only when the user asked to start or use Bohay
   and starting it is a normal required step.
 

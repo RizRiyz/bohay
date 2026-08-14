@@ -355,6 +355,62 @@ mod tests {
     }
 
     #[test]
+    fn bundled_and_plugin_skills_explain_how_to_install_a_missing_client() {
+        let plugin = include_str!("../plugins/bohay/skills/bohay/SKILL.md");
+        let required = [
+            "Only after an attempted Bohay action cannot run because command lookup finds",
+            "no `bohay` client, report that Bohay is not installed and stop",
+            "curl -fsSL https://bohay.dev/install.sh | sh",
+            "brew install RizRiyz/bohay/bohay",
+            "cargo install bohay",
+            "Do not show this",
+            "preemptively or for socket, permission, server, or other command",
+            "failures",
+        ];
+        for marker in required {
+            assert!(
+                SKILL.contains(marker),
+                "bundled skill is missing installation guidance: {marker}"
+            );
+            assert!(
+                plugin.contains(marker),
+                "Codex plugin skill is missing installation guidance: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_and_plugin_skills_require_explicit_bohay_intent() {
+        let plugin = include_str!("../plugins/bohay/skills/bohay/SKILL.md");
+        let required = [
+            "Use only for a line beginning with `=target message`",
+            "an explicit request naming Bohay",
+            "a request to delegate to a named live Bohay agent or pane",
+            "Do not use for ordinary coding, file edits, Git operations, tests",
+            "unless the user explicitly connects the request to Bohay",
+            "Being inside Bohay does not trigger this skill by itself",
+        ];
+        for marker in required {
+            assert!(
+                SKILL.contains(marker),
+                "bundled skill is missing explicit trigger guidance: {marker}"
+            );
+            assert!(
+                plugin.contains(marker),
+                "Codex plugin skill is missing explicit trigger guidance: {marker}"
+            );
+        }
+        assert!(
+            !SKILL.contains("Also use when asked to delegate work, inspect or control Bohay"),
+            "bundled skill still has the broad automatic trigger"
+        );
+        assert!(
+            !plugin.contains("Also use when asked to delegate work, inspect or control Bohay"),
+            "Codex plugin skill still has the broad automatic trigger"
+        );
+    }
+
+    #[test]
     fn skill_valid_accepts_a_real_skill_and_rejects_junk() {
         assert!(skill_valid(SKILL), "the bundled skill validates");
         assert!(!skill_valid(""), "empty is rejected");
