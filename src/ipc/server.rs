@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,7 +30,43 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// than the frame cap so an idle session doesn't spin the CPU.
 const IDLE_INTERVAL: Duration = Duration::from_millis(33);
 
-type Clients = HashMap<u64, SyncSender<ServerMessage>>;
+#[derive(Clone)]
+struct ClientSender {
+    messages: Sender<ServerMessage>,
+    frame_pending: Arc<AtomicBool>,
+}
+
+enum FrameSendError {
+    Full,
+    Disconnected,
+}
+
+impl ClientSender {
+    /// Control messages are intentionally reliable. They are infrequent and
+    /// small, while rendered frames retain their independent one-frame gate.
+    fn send_control(&self, msg: ServerMessage) -> Result<(), ()> {
+        self.messages.send(msg).map_err(|_| ())
+    }
+
+    /// Queue at most one frame while the socket writer is busy. Dropped frames
+    /// are repaired by the existing `behind` full-frame resync path.
+    fn try_send_frame(&self, msg: ServerMessage) -> Result<(), FrameSendError> {
+        if self
+            .frame_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(FrameSendError::Full);
+        }
+        if self.messages.send(msg).is_err() {
+            self.frame_pending.store(false, Ordering::Release);
+            return Err(FrameSendError::Disconnected);
+        }
+        Ok(())
+    }
+}
+
+type Clients = HashMap<u64, ClientSender>;
 
 pub fn run() -> Result<()> {
     let (tx, rx) = mpsc::channel::<AppEvent>();
@@ -168,20 +204,11 @@ pub fn run() -> Result<()> {
         // with no nodes; `server stop` is still what ends it.
         if app.end_session {
             app.end_session = false;
-            // NOT `broadcast`: that uses `try_send` on a capacity-1 channel and
-            // drops the message when the slot is occupied — which is routine
-            // (see `behind`). A dropped frame is self-healing; a dropped Detach
-            // is not, and would strand the client on a session with no nodes.
-            // `ServerShutdown` survives the same hazard only because the process
-            // then exits and closes every socket; here the server keeps running.
-            //
-            // So block until the writer thread takes it — on a detached thread,
-            // never on this loop, since a wedged client (a stalled ssh link)
-            // would otherwise hang the whole server.
-            for (_, tx) in clients.drain() {
-                thread::spawn(move || {
-                    let _ = tx.send(ServerMessage::Detach);
-                });
+            // Detach is a reliable control message. It does not compete with the
+            // one-frame backpressure slot, so a busy or remote client cannot
+            // lose it and cannot block this loop.
+            for (_, client) in clients.drain() {
+                let _ = client.send_control(ServerMessage::Detach);
             }
             foreground = None;
             // Persist immediately rather than waiting out the 2s debounce: the
@@ -196,7 +223,7 @@ pub fn run() -> Result<()> {
             app.detach_requested = false;
             if let Some(id) = foreground.take() {
                 if let Some(c) = clients.remove(&id) {
-                    let _ = c.try_send(ServerMessage::Detach);
+                    let _ = c.send_control(ServerMessage::Detach);
                 }
                 foreground = clients.keys().next().copied();
             }
@@ -330,7 +357,8 @@ fn apply(
     match ev {
         AppEvent::ClientConnected {
             id,
-            frames,
+            messages,
+            frame_pending,
             cols,
             rows,
             terminal_colors,
@@ -340,7 +368,13 @@ fn apply(
                     app.apply_terminal_colors(colors);
                 }
             }
-            clients.insert(id, frames);
+            clients.insert(
+                id,
+                ClientSender {
+                    messages,
+                    frame_pending,
+                },
+            );
             *foreground = Some(id);
             *size = (cols.max(1), rows.max(1));
             // Force a full frame so the new client (which diffs from nothing)
@@ -370,7 +404,7 @@ fn apply(
 }
 
 fn broadcast(clients: &mut Clients, msg: ServerMessage) {
-    clients.retain(|_, tx| !matches!(tx.try_send(msg.clone()), Err(TrySendError::Disconnected(_))));
+    clients.retain(|_, client| client.send_control(msg.clone()).is_ok());
 }
 
 /// Whether this tick must render, even when nothing in the app changed.
@@ -401,10 +435,10 @@ fn send_frame(
     for (id, tx) in clients.iter() {
         let send_full = full_for_all || behind.contains(id);
         let result = if send_full {
-            Some(tx.try_send(ServerMessage::Frame(frame.clone())))
+            Some(tx.try_send_frame(ServerMessage::Frame(frame.clone())))
         } else {
             // Up-to-date client + nothing changed ⇒ send nothing.
-            diff_msg.map(|d| tx.try_send(d.clone()))
+            diff_msg.map(|d| tx.try_send_frame(d.clone()))
         };
         match result {
             None => {}
@@ -413,10 +447,10 @@ fn send_frame(
                     behind.remove(id);
                 }
             }
-            Some(Err(TrySendError::Full(_))) => {
+            Some(Err(FrameSendError::Full)) => {
                 behind.insert(*id);
             }
-            Some(Err(TrySendError::Disconnected(_))) => dead.push(*id),
+            Some(Err(FrameSendError::Disconnected)) => dead.push(*id),
         }
     }
     for id in dead {
@@ -491,9 +525,16 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
         None
     };
 
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<ServerMessage>(1);
+    let (message_tx, message_rx) = mpsc::channel::<ServerMessage>();
+    let frame_pending = Arc::new(AtomicBool::new(false));
+    let writer_frame_pending = frame_pending.clone();
     thread::spawn(move || {
-        for msg in frame_rx {
+        for msg in message_rx {
+            if matches!(msg, ServerMessage::Frame(_) | ServerMessage::FrameDiff(_)) {
+                // Match sync_channel(1): receiving frees the single frame slot,
+                // even while the socket write itself is still in progress.
+                writer_frame_pending.store(false, Ordering::Release);
+            }
             let stop = matches!(
                 msg,
                 ServerMessage::Detach | ServerMessage::ServerShutdown { .. }
@@ -507,7 +548,8 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     if app_tx
         .send(AppEvent::ClientConnected {
             id,
-            frames: frame_tx,
+            messages: message_tx,
+            frame_pending,
             cols,
             rows,
             terminal_colors,
@@ -588,10 +630,13 @@ mod shutdown {
 
 #[cfg(test)]
 mod tests {
-    use super::needs_render;
     use super::ServerMessage;
+    use super::{broadcast, needs_render, ClientSender, FrameSendError};
+    use crate::ipc::protocol::FrameDiff;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
-    use std::thread;
+    use std::sync::Arc;
 
     /// A client that dropped a diff must get its full-frame resync even when the
     /// screen goes quiet. The resync only ships from inside a render, so a
@@ -615,40 +660,73 @@ mod tests {
         );
     }
 
-    /// Ending a session must actually reach the client (docs/43 §3.3). The frame
-    /// channel is `sync_channel(1)`, and `broadcast` uses `try_send`, which drops
-    /// the message when that single slot is occupied — routine enough that the
-    /// loop tracks it as `behind`. A dropped *frame* is self-healing; a dropped
-    /// *Detach* strands the client on a session with no nodes, which is the
-    /// original "the app is not closing" symptom. `ServerShutdown` survives the
-    /// same hazard only because the process then exits and closes every socket.
+    /// A tab switch requests a frame at the same time a finished selection sends
+    /// its clipboard payload. Frames may be dropped and repaired, but clipboard
+    /// writes must remain queued or the next paste uses stale clipboard content.
     #[test]
-    fn ending_a_session_delivers_detach_even_when_the_channel_is_full() {
-        use std::sync::mpsc::TrySendError;
+    fn clipboard_is_reliable_when_a_tab_frame_is_already_queued() {
+        let (messages, rx) = mpsc::channel();
+        let client = ClientSender {
+            messages,
+            frame_pending: Arc::new(AtomicBool::new(false)),
+        };
+        let frame = || {
+            ServerMessage::FrameDiff(FrameDiff {
+                width: 120,
+                height: 32,
+                runs: Vec::new(),
+                cursor: None,
+            })
+        };
 
-        let (tx, rx) = mpsc::sync_channel::<ServerMessage>(1);
-        // A queued frame occupies the only slot.
-        tx.try_send(ServerMessage::Sound).expect("slot is free");
+        assert!(client.try_send_frame(frame()).is_ok());
+        // Frame backpressure is still one deep, so output bursts cannot build an
+        // unbounded queue while a client is slow.
+        assert!(
+            matches!(client.try_send_frame(frame()), Err(FrameSendError::Full)),
+            "a second frame remains coalesced into the resync path"
+        );
 
-        // What the old path did: silently drop it.
+        let mut clients = HashMap::from([(7, client)]);
+        broadcast(
+            &mut clients,
+            ServerMessage::Clipboard("exact selection".into()),
+        );
+
+        assert!(
+            matches!(rx.recv().unwrap(), ServerMessage::FrameDiff(_)),
+            "the already queued tab frame stays first"
+        );
         assert!(
             matches!(
-                tx.try_send(ServerMessage::Detach),
-                Err(TrySendError::Full(_))
+                rx.recv().unwrap(),
+                ServerMessage::Clipboard(text) if text == "exact selection"
             ),
-            "a full channel is exactly the case that used to lose the Detach"
+            "clipboard control data cannot be dropped behind a frame"
         );
+    }
 
-        // What it does now: block until the writer drains — off-thread, so a
-        // wedged client can never hang the server loop.
-        let h = thread::spawn(move || {
-            let _ = tx.send(ServerMessage::Detach);
-        });
-        assert!(matches!(rx.recv().unwrap(), ServerMessage::Sound));
-        assert!(
-            matches!(rx.recv().unwrap(), ServerMessage::Detach),
-            "the client is told to detach even though the channel was full"
-        );
-        h.join().unwrap();
+    /// Session detach is carried by the same reliable control path. Preserve the
+    /// earlier guarantee that closing the last node cannot strand a client just
+    /// because its writer already has a frame waiting.
+    #[test]
+    fn ending_a_session_delivers_detach_behind_a_queued_frame() {
+        let (messages, rx) = mpsc::channel();
+        let client = ClientSender {
+            messages,
+            frame_pending: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(client
+            .try_send_frame(ServerMessage::FrameDiff(FrameDiff {
+                width: 1,
+                height: 1,
+                runs: Vec::new(),
+                cursor: None,
+            }))
+            .is_ok());
+        assert!(client.send_control(ServerMessage::Detach).is_ok());
+
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::FrameDiff(_)));
+        assert!(matches!(rx.recv().unwrap(), ServerMessage::Detach));
     }
 }

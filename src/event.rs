@@ -1,7 +1,9 @@
 //! Messages flowing into the main loop from input/PTY threads and (in server
 //! mode) from client connections.
 
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
@@ -18,10 +20,15 @@ pub enum AppEvent {
     PtyData(PaneId),
     /// The given pane's child process exited.
     PtyExit(PaneId),
-    /// A binary client attached (server mode); `frames` receives rendered frames.
+    /// A binary client attached (server mode); `messages` feeds its socket writer.
     ClientConnected {
         id: u64,
-        frames: SyncSender<ServerMessage>,
+        messages: Sender<ServerMessage>,
+        /// At most one rendered frame may wait behind the socket writer. Control
+        /// messages use the unbounded sender above, so clipboard writes and
+        /// detach notifications can never be dropped merely because a frame is
+        /// already queued.
+        frame_pending: Arc<AtomicBool>,
         cols: u16,
         rows: u16,
         terminal_colors: Option<TerminalColors>,
