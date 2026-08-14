@@ -10,7 +10,7 @@ fails if they ever drift apart.
 :::
 
 ```txt
-bohay: Mission controlfor your AI agents
+bohay: Mission control for your AI coding agents
 
 usage: bohay <command> [args]
 
@@ -44,8 +44,8 @@ panes / agents:
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
-  agent start <name> --kind <k> [--pane <id>] [--down] [--timeout <s>] [-- <args>]
-                             spawn an agent in a sibling pane, wait until ready, name it
+  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
+                             spawn beside an anchor or reuse a pane, wait until ready, name it
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
   agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
                              prompt an agent (target = a name, pane id, or kind)
@@ -54,7 +54,7 @@ panes / agents:
   agent get <target>         one agent's live info (pane, name, kind, status, cwd)
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
-  skill                      print the agent skill (teaches an agent to delegate)
+  skill                      print the agent skill (delegation + session control)
   skill install [--dir <p>]  install the skill where a coding agent auto-loads it
   skill uninstall [--dir <p>]   remove the installed skill
   skill update               fetch the latest skill from the bohay repo (no reinstall)

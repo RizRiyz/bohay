@@ -91,7 +91,7 @@ depends = ""
 recommends = "git, openssh-client, xclip"
 suggests = "gh, wl-clipboard"
 extended-description = """
-A terminal workspace manager for AI coding agents: persistent panes, tabs, and \
+Mission control for your AI coding agents: persistent panes, tabs, and \
 workspaces that survive detach, a live sidebar of agent states, zero-config \
 agent session resume, a built-in git tab, worktrees, remote attach over plain \
 SSH, and an extension system. Ships as a single static binary."""

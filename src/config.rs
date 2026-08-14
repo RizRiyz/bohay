@@ -107,7 +107,7 @@ pub struct LayoutConfig {
     #[serde(default)]
     pub pane_title_path: bool,
     /// In the AGENTS sidebar, show each agent's live session title (the OSC title
-    /// it sets, e.g. "Ship the desktop release…") in place of the `wsname · p<id>`
+    /// it sets, e.g. "Ship the desktop release…") in place of the `wsname · =<id>`
     /// meta line. Off by default; falls back to the meta line when an agent set no
     /// useful title.
     #[serde(default)]

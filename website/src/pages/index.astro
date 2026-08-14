@@ -306,7 +306,7 @@ const ogImage = 'https://bohay.dev/og.png';
             </div>
 
             <!-- Agents talking to each other: a job handed down the line with
-                 `$name` and reported back to where it started. Four real panes in
+                 `=name` and reported back to where it started. Four real panes in
                  a 2x2, so it reads as the app rather than a diagram. -->
             <div class="demo-view" id="view-talk" hidden>
               <div class="demo-panes quad">
@@ -465,14 +465,14 @@ const ogImage = 'https://bohay.dev/og.png';
           <span class="fr-k">Talk</span>
           <div class="fr-text">
             <h3>Agents that hand work to each other</h3>
-            <p>Type <code>$</code> and a pane name to delegate the rest of the line. <code>$codex add tests to src/parse.rs</code> sends that instruction to the pane named codex. An agent name or a pane number works just as well. The sender does not wait: it carries on working and picks up the reply when it arrives.</p>
+            <p>Type <code>=</code> and a pane name to delegate the rest of the line. <code>=codex add tests to src/parse.rs</code> sends that instruction to the pane named codex. An agent name or a pane number works just as well. The sender does not wait: it carries on working and picks up the reply when it arrives.</p>
             <a class="fc-go" href="/docs/guides/agent-messaging/">Agent messaging →</a>
           </div>
           <div class="fm bare talk" aria-hidden="true">
             <div class="fm-panes">
               <div class="fm-pane">
                 <div class="fm-pt"><span class="d run"></span>claude</div>
-                <div class="fm-ln" style="--i:0"><i>❯</i> <u>$codex</u> add tests to <b>src/parse.rs</b></div>
+                <div class="fm-ln" style="--i:0"><i>❯</i> <u>=codex</u> add tests to <b>src/parse.rs</b></div>
                 <div class="fm-ln sent" style="--i:1">→ sent · not waiting</div>
                 <div class="fm-ln dim" style="--i:4">⏺ meanwhile: profiling…</div>
                 <div class="fm-ln back" style="--i:7">← codex: 12 cases, 155 passed</div>
@@ -1038,7 +1038,7 @@ const ogImage = 'https://bohay.dev/og.png';
         git: () => 'the git tab: click the sections · commits · flow · branches · PRs',
         orch: () => 'the orchestration board · click a task to select it',
         ctrl: () => 'Mission Control · every agent in one list · click a row to jump',
-        talk: () => 'agents talking · $name hands the rest of the line to that agent',
+        talk: () => 'agents talking · =name hands the rest of the line to that agent',
       };
       let activeTab = 'main';
 
@@ -1067,7 +1067,7 @@ const ogImage = 'https://bohay.dev/og.png';
       }
       /* One job handed down the line and reported back: claude briefs codex,
          codex hands the tests to gemini, gemini hands the docs to copilot, and
-         copilot reports the whole thing back to claude. Every hop is a `$name`.
+         copilot reports the whole thing back to claude. Every hop is an `=name`.
 
          `p` is the pane, `wait` the pause *after* the line lands. Paced to be
          read rather than skimmed, with a long beat at the end before it loops. */
@@ -1920,7 +1920,7 @@ const ogImage = 'https://bohay.dev/og.png';
       @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
       .c-dim { color: var(--overlay1); } .c-acc { color: var(--accent); }
       .c-grn { color: var(--mint); } .c-mint { color: var(--mint); }
-      /* The `$name` token, so the shorthand is the thing your eye lands on. */
+      /* The `=name` token, so the shorthand is the thing your eye lands on. */
       .mention {
         color: var(--accent); font-weight: 600;
         background: rgb(from var(--accent) r g b / 0.14);
@@ -2068,7 +2068,7 @@ const ogImage = 'https://bohay.dev/og.png';
       .fm-ln.dim { color: var(--overlay1); }
       .fm-ln.ok, .fm-ln.sent, .fm-ln.back { color: var(--mint); }
       .fm-ln.got { color: var(--accent); }
-      /* The `$name` token: the one thing on the mock that should catch the eye. */
+      /* The `=name` token: the one thing on the mock that should catch the eye. */
       .fm-ln u {
         text-decoration: none; color: var(--accent); font-weight: 600;
         background: rgb(from var(--accent) r g b / 0.14); padding: 0 0.2rem;

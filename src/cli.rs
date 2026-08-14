@@ -37,7 +37,7 @@ pub fn is_cli(args: &[String]) -> bool {
 }
 
 const USAGE: &str = "\
-bohay: Mission controlfor your AI agents
+bohay: Mission control for your AI coding agents
 
 usage: bohay <command> [args]
 
@@ -71,8 +71,8 @@ panes / agents:
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs
-  agent start <name> --kind <k> [--pane <id>] [--down] [--timeout <s>] [-- <args>]
-                             spawn an agent in a sibling pane, wait until ready, name it
+  agent start <name> --kind <k> [--pane <id> | --anchor <id>] [--down] [--timeout <s>] [-- <args>]
+                             spawn beside an anchor or reuse a pane, wait until ready, name it
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
   agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
                              prompt an agent (target = a name, pane id, or kind)
@@ -81,7 +81,7 @@ panes / agents:
   agent get <target>         one agent's live info (pane, name, kind, status, cwd)
   agent sessions             list resumable sessions found on disk
   agent resume <id>          reopen a resumable session into a pane
-  skill                      print the agent skill (teaches an agent to delegate)
+  skill                      print the agent skill (delegation + session control)
   skill install [--dir <p>]  install the skill where a coding agent auto-loads it
   skill uninstall [--dir <p>]   remove the installed skill
   skill update               fetch the latest skill from the bohay repo (no reinstall)
@@ -554,13 +554,36 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
     }
 }
 
-/// `bohay agent start <name> --kind <kind> [--pane <id>] [--down] [--timeout S] [-- <extra…>]` —
+#[derive(Debug, PartialEq)]
+enum AgentStartTarget {
+    Existing(String),
+    Split { anchor: Option<String>, down: bool },
+}
+
+fn parse_agent_start_target(args: &[String], caller: Option<String>) -> Result<AgentStartTarget> {
+    let pane = flag(args, "--pane");
+    let anchor = flag(args, "--anchor");
+    if pane.is_some() && anchor.is_some() {
+        return Err(anyhow!(
+            "agent start accepts either --pane <id> or --anchor <id>, not both"
+        ));
+    }
+    Ok(match pane {
+        Some(pane) => AgentStartTarget::Existing(pane),
+        None => AgentStartTarget::Split {
+            anchor: anchor.or(caller),
+            down: args.iter().any(|a| a == "--down"),
+        },
+    })
+}
+
+/// `bohay agent start <name> --kind <kind> [--pane <id> | --anchor <id>] [--down] [--timeout S] [-- <extra…>]` —
 /// spawn a coding agent in a sibling pane (or a given one), wait until detection
 /// recognizes it, and give it a name, all in one command. Exit 0 when it becomes
 /// ready, 2 if it did not within the timeout (the pane and name still exist).
 fn agent_start_cmd(args: &[String]) -> Result<i32> {
     let name = args.get(3).cloned().ok_or_else(|| {
-        anyhow!("usage: bohay agent start <name> --kind <kind> [--pane <id>] [--down] [--timeout S] [-- <extra>]")
+        anyhow!("usage: bohay agent start <name> --kind <kind> [--pane <id> | --anchor <id>] [--down] [--timeout S] [-- <extra>]")
     })?;
     let kind = flag(args, "--kind").ok_or_else(|| anyhow!("agent start requires --kind <kind>"))?;
     // Native agent args after `--` are appended to the launch command.
@@ -575,25 +598,27 @@ fn agent_start_cmd(args: &[String]) -> Result<i32> {
         format!("{kind} {extra}")
     };
 
-    // Target pane: an explicit `--pane`, else a fresh background (no-focus) split
-    // beside the caller.
-    let pane = if let Some(p) = flag(args, "--pane") {
-        p
-    } else {
-        let mut split = serde_json::Map::new();
-        if let Ok(b) = std::env::var("BOHAY_PANE_ID") {
-            split.insert("pane".to_string(), json!(b));
+    // `--pane` reuses an existing pane. `--anchor` creates a background sibling
+    // beside an explicit pane. Without either, a managed caller pane is the anchor.
+    let target = parse_agent_start_target(args, std::env::var("BOHAY_PANE_ID").ok())?;
+    let pane = match target {
+        AgentStartTarget::Existing(pane) => pane,
+        AgentStartTarget::Split { anchor, down } => {
+            let mut split = serde_json::Map::new();
+            if let Some(anchor) = anchor {
+                split.insert("pane".to_string(), json!(anchor));
+            }
+            if down {
+                split.insert("direction".to_string(), json!("down"));
+            }
+            split.insert("focus".to_string(), json!(false));
+            let v = send_request("pane.split", Value::Object(split))?;
+            v.get("result")
+                .and_then(|r| r.get("pane"))
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow!("agent start: could not create a pane"))?
+                .to_string()
         }
-        if args.iter().any(|a| a == "--down") {
-            split.insert("direction".to_string(), json!("down"));
-        }
-        split.insert("focus".to_string(), json!(false));
-        let v = send_request("pane.split", Value::Object(split))?;
-        v.get("result")
-            .and_then(|r| r.get("pane"))
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| anyhow!("agent start: could not create a pane"))?
-            .to_string()
     };
 
     // Launch the agent in the pane.
@@ -1664,6 +1689,45 @@ mod tests {
         let s = parse_wait(&argv("bohay wait output --match hi")).unwrap();
         assert_eq!(s.pane, "9");
         std::env::remove_var("BOHAY_PANE_ID");
+    }
+
+    #[test]
+    fn parses_agent_start_target() {
+        assert_eq!(
+            parse_agent_start_target(
+                &argv("bohay agent start worker --kind codex --pane 9"),
+                Some("2".into())
+            )
+            .unwrap(),
+            AgentStartTarget::Existing("9".into())
+        );
+        assert_eq!(
+            parse_agent_start_target(
+                &argv("bohay agent start worker --kind codex --anchor 4 --down"),
+                None
+            )
+            .unwrap(),
+            AgentStartTarget::Split {
+                anchor: Some("4".into()),
+                down: true,
+            }
+        );
+        assert_eq!(
+            parse_agent_start_target(
+                &argv("bohay agent start worker --kind codex"),
+                Some("7".into())
+            )
+            .unwrap(),
+            AgentStartTarget::Split {
+                anchor: Some("7".into()),
+                down: false,
+            }
+        );
+        assert!(parse_agent_start_target(
+            &argv("bohay agent start worker --kind codex --pane 9 --anchor 4"),
+            None
+        )
+        .is_err());
     }
 
     #[test]

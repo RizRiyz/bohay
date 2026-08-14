@@ -1,9 +1,10 @@
 //! The bundled **agent skill** (docs): instructions that teach a coding agent
-//! running inside a pane to delegate to other agents over the `bohay` CLI.
+//! to delegate to other agents and control bohay over the local CLI.
 //!
 //! Two delivery shapes, because agents differ:
-//! - **Claude Code** loads *skills* by relevance, so it gets the full
-//!   `SKILL.md` under `~/.claude/skills/bohay/` (auto-triggered, low cost).
+//! - **Claude Code** loads *skills* by relevance, so it gets `SKILL.md` and its
+//!   on-demand reference under `~/.claude/skills/bohay/` (auto-triggered, low
+//!   cost).
 //! - **Codex** and **opencode** read an always-on `AGENTS.md`, so they get a
 //!   short, delimited pointer block instead of the whole skill (kept small
 //!   because it is always in context). The block never touches the user's own
@@ -20,6 +21,11 @@ use std::path::{Path, PathBuf};
 /// fallback when no OTA update has been fetched.
 pub const SKILL: &str = include_str!("../skills/bohay/SKILL.md");
 
+/// Optional command index installed beside [`SKILL`] by current releases. The
+/// primary skill keeps the complete targeting and safety contract because
+/// the OTA updater shipped with Bohay 0.10.2 can download only `SKILL.md`.
+pub const ADVANCED_CONTROL: &str = include_str!("../skills/bohay/references/advanced-control.md");
+
 /// The skill text actually in use: the OTA-updated copy in the managed cache
 /// (`~/.bohay/skill/SKILL.md`, written by `bohay skill update`) when present and
 /// valid, else the compiled-in [`SKILL`]. This is what lets a skill fix reach
@@ -32,12 +38,16 @@ pub fn effective_skill() -> std::borrow::Cow<'static, str> {
     }
 }
 
-/// Cheap sanity check for a skill download: the bohay skill's YAML frontmatter
-/// (`name: bohay`) plus a sensible size, so a 404 page or a truncated fetch is
-/// rejected before it can replace the working skill.
+/// Cheap sanity check for a skill download: the bohay YAML frontmatter, unified
+/// delegation and control markers, and a sensible size. This rejects stale `$`
+/// delegation skills, 404 pages, and truncated downloads before replacement.
 pub fn skill_valid(s: &str) -> bool {
     let t = s.trim_start();
-    t.starts_with("---") && t.contains("name: bohay") && (400..200_000).contains(&s.len())
+    t.starts_with("---")
+        && t.contains("name: bohay")
+        && t.contains("=target")
+        && t.contains("agent send")
+        && (400..200_000).contains(&s.len())
 }
 
 /// Save an OTA-fetched skill into the managed cache (`~/.bohay/skill/SKILL.md`),
@@ -52,22 +62,36 @@ pub fn save_managed(text: &str) -> std::io::Result<PathBuf> {
 
 // ── full skill (Claude Code) ────────────────────────────────────────────────
 
-/// Write the skill to `<dir>/SKILL.md`, creating `dir`. Returns the file path.
+/// Write the skill and advanced reference under `<dir>`. Returns the skill path.
 pub fn install_to(dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join("SKILL.md");
     std::fs::write(&path, effective_skill().as_bytes())?;
+    let references = dir.join("references");
+    std::fs::create_dir_all(&references)?;
+    std::fs::write(
+        references.join("advanced-control.md"),
+        ADVANCED_CONTROL.as_bytes(),
+    )?;
     Ok(path)
 }
 
-/// Remove `<dir>/SKILL.md`, and the dir if it becomes empty. Returns whether a
-/// file was actually removed.
+/// Remove the skill and advanced reference, then empty directories. Returns
+/// whether either managed file was actually removed.
 pub fn uninstall_from(dir: &Path) -> std::io::Result<bool> {
     let path = dir.join("SKILL.md");
-    if !path.exists() {
+    let reference = dir.join("references").join("advanced-control.md");
+    let existed = path.exists() || reference.exists();
+    if !existed {
         return Ok(false);
     }
-    std::fs::remove_file(&path)?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    if reference.exists() {
+        std::fs::remove_file(&reference)?;
+    }
+    let _ = std::fs::remove_dir(dir.join("references"));
     let _ = std::fs::remove_dir(dir); // best effort: drop the now-empty skill dir
     Ok(true)
 }
@@ -88,9 +112,9 @@ const POINTER_END: &str = "<!-- END bohay -->";
 /// truth (`bohay skill`), so nothing here can drift from `SKILL.md`. Kept tiny
 /// because an `AGENTS.md` is in the agent's context on every turn.
 const POINTER_BODY: &str = "\
-## bohay: delegating to other agents
+## bohay: delegate and control the current session
 
-When `$BOHAY_ENV` is `1` you are running inside bohay, a terminal multiplexer, and can hand work to other coding agents in other panes. Run `bohay skill` to learn how. Only delegate when the user asks.";
+When `$BOHAY_ENV` is `1` you are inside bohay and may control its workspaces, tabs, panes, and agents when asked. A line beginning `=target message` delegates that message to the named agent, pane id, or unique agent kind. Run `bohay skill` to learn how. Never delegate unless the user asks.";
 
 /// The full managed block as it appears in an `AGENTS.md`.
 fn pointer_block() -> String {
@@ -186,7 +210,9 @@ pub fn install_default() -> Vec<PathBuf> {
     if let Some(dir) = claude_skill_dir() {
         let path = dir.join("SKILL.md");
         let eff = effective_skill();
-        let current = std::fs::read_to_string(&path).ok().as_deref() == Some(eff.as_ref());
+        let reference = dir.join("references").join("advanced-control.md");
+        let current = std::fs::read_to_string(&path).ok().as_deref() == Some(eff.as_ref())
+            && std::fs::read_to_string(reference).ok().as_deref() == Some(ADVANCED_CONTROL);
         if current {
             done.push(path);
         } else if let Ok(p) = install_to(&dir) {
@@ -237,9 +263,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = install_to(&dir).expect("install");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL);
-        // Sanity: it really is the delegation skill, not an empty file.
-        assert!(SKILL.contains("agent send") && SKILL.contains("name: bohay"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("references/advanced-control.md")).unwrap(),
+            ADVANCED_CONTROL
+        );
+        // Sanity: this is the unified control skill, not an empty file.
+        assert!(
+            SKILL.contains("agent send")
+                && SKILL.contains("workspace list")
+                && SKILL.contains("=target")
+                && SKILL.contains("name: bohay")
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_plugin_mirrors_the_bundled_skill() {
+        assert_eq!(
+            include_str!("../plugins/bohay/skills/bohay/SKILL.md"),
+            SKILL
+        );
+        assert_eq!(
+            include_str!("../plugins/bohay/skills/bohay/references/advanced-control.md"),
+            ADVANCED_CONTROL
+        );
     }
 
     #[test]
@@ -257,6 +304,39 @@ mod tests {
     }
 
     #[test]
+    fn skill_is_self_contained_for_v0102_single_file_updates() {
+        // Bohay 0.10.2 fetches and installs SKILL.md only. Keep every required
+        // advanced read route and the mutation safety contract in that file so
+        // a current skill remains complete even when no reference is present.
+        let required = [
+            "bohay files tree",
+            "bohay git status",
+            "bohay worktree list",
+            "bohay task list",
+            "bohay lease list",
+            "bohay module list",
+            "bohay ui dock list",
+            "Removal requires",
+            "explicit authorization",
+            "never retain an unbounded stream",
+            "Its absence is not a blocker",
+        ];
+        for marker in required {
+            assert!(
+                SKILL.contains(marker),
+                "single-file skill is missing compatibility marker: {marker}"
+            );
+        }
+
+        // Match the validator shipped in v0.10.2. If this fails, that release
+        // would reject the current main-branch skill before installing it.
+        let trimmed = SKILL.trim_start();
+        assert!(trimmed.starts_with("---"));
+        assert!(trimmed.contains("name: bohay"));
+        assert!((400..200_000).contains(&SKILL.len()));
+    }
+
+    #[test]
     fn effective_skill_prefers_the_managed_cache() {
         let _env = crate::persist::test_env("skill-ota");
         let _ = std::fs::remove_dir_all(crate::persist::skill_dir()); // fresh: no leftover cache
@@ -266,7 +346,7 @@ mod tests {
         // An OTA'd (valid) skill in the managed cache wins, and install_to writes
         // it instead of the default.
         let ota = format!(
-            "---\nname: bohay\ndescription: updated\n---\n\n# bohay\n\nagent send is here.\n{}",
+            "---\nname: bohay\ndescription: updated\n---\n\n# bohay\n\n=target delegates with agent send.\n{}",
             "Body long enough to clear the size floor. ".repeat(12)
         );
         let ota = ota.as_str();
@@ -292,6 +372,7 @@ mod tests {
         install_to(&dir).unwrap();
         assert!(uninstall_from(&dir).unwrap(), "removed an installed skill");
         assert!(!dir.join("SKILL.md").exists());
+        assert!(!dir.join("references/advanced-control.md").exists());
         assert!(
             !uninstall_from(&dir).unwrap(),
             "no-op when nothing is there to remove"
@@ -315,6 +396,7 @@ mod tests {
             after.contains("bohay skill"),
             "points at the source of truth"
         );
+        assert!(after.contains("=target"), "documents delegation syntax");
 
         // Running again changes nothing.
         assert!(!upsert_pointer(&file).unwrap(), "second upsert is a no-op");

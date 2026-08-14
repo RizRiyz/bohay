@@ -4,7 +4,7 @@
 
 <img src="assets/logo.png" alt="Bohay logo" width="220" />
 
-**Next-Gen mission control for your AI agents.**
+**Mission control for your AI coding agents.**
 
 [![crates.io](https://img.shields.io/crates/v/bohay.svg)](https://crates.io/crates/bohay)
 [![ci](https://github.com/RizRiyz/bohay/actions/workflows/ci.yml/badge.svg)](https://github.com/RizRiyz/bohay/actions/workflows/ci.yml)
@@ -81,6 +81,20 @@ and start your agents — bohay recognizes them automatically.
 > **macOS:** free the `Ctrl+Space` prefix under *System Settings → Keyboard →
 > Keyboard Shortcuts → Input Sources* (untick *Select the previous input source*).
 > Everything is mouse-driven too, so you're never locked out.
+
+## Codex plugin
+
+Install the `bohay` plugin from the repository marketplace so Codex can inspect
+and control your local Bohay session:
+
+```bash
+codex plugin marketplace add RizRiyz/bohay
+codex plugin add bohay@bohay
+```
+
+Start a new Codex thread after installation. See the
+[Codex plugin guide](https://bohay.dev/docs/guides/codex-plugin/) for delegation,
+permissions, and production setup.
 
 ## Supported agents
 

@@ -538,7 +538,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     // Live agents across every workspace/tab (real agents or panes with a session).
     // `(pane, workspace name, tab label)`. The tab label follows the tab bar: a
     // The row's second line is `workspace · mention`, where the mention is how you
-    // address the pane (`@name` or `p<id>`). The tab is intentionally dropped here
+    // delegate to the pane (`=name` or `=<id>`). The tab is intentionally dropped here
     // in favor of the pane token, which is what a script or delegation needs.
     let mut live: Vec<(PaneId, String)> = Vec::new();
     for ws in app.workspaces.iter() {
@@ -624,12 +624,12 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 // lands on `sel_bg` for the focused row and is then all but
                 // unreadable — the same reason the workspaces dock brightens its
                 // path when active. The trailing token is the pane's live alias
-                // (`@name`, set by `agent name`) or its pane id (`p3`), so the
-                // reader knows exactly what to pass to `agent send` / `agent read`.
+                // (`=name`, set by `agent name`) or its pane id (`=3`), so the
+                // reader can paste the token directly into a delegation line.
                 let mention = app
                     .agent_name_for(id)
-                    .map(|n| format!("@{n}"))
-                    .unwrap_or_else(|| format!("p{}", id.0));
+                    .map(|n| format!("={n}"))
+                    .unwrap_or_else(|| format!("={}", id.0));
                 // When enabled, show the agent's live session title (its OSC
                 // title, e.g. "Ship the desktop release…") in place of the meta
                 // line; fall back to it when the agent set no useful title.
@@ -811,7 +811,7 @@ mod tests {
     // Regression: the agent row's second line showed a hardcoded `tab N` built
     // from the tab index, so renaming a tab (docs/28) left the sidebar stale.
     #[test]
-    fn agent_row_shows_the_pane_mention_token() {
+    fn agent_row_shows_the_pane_delegation_token() {
         let _env = crate::persist::test_env("agent-mention");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
@@ -823,16 +823,16 @@ mod tests {
         // in place of the tab that used to sit here.
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
-            buffer_contains(&term, &format!("· p{}", id.0)),
+            buffer_contains(&term, &format!("· ={}", id.0)),
             "an unnamed agent row shows its pane id token"
         );
 
-        // Naming the pane switches the token to `@name`.
+        // Naming the pane switches the token to `=name`.
         app.agent_names.insert("worker".into(), id);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
-            buffer_contains(&term, "· @worker"),
-            "a named agent row shows @name"
+            buffer_contains(&term, "· =worker"),
+            "a named agent row shows =name"
         );
     }
 
@@ -861,7 +861,7 @@ mod tests {
         );
     }
 
-    // The focused agent's "project · tab N" line sits on the selection
+    // The focused agent's "project · =pane" line sits on the selection
     // background, so it must use the same readable colour the workspaces dock
     // gives its path row. Pinned to `overlay0` it was almost invisible on green.
     #[test]
@@ -875,7 +875,7 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
         let t = crate::ui::theme::by_name(&app.config.theme);
-        let meta = fg_of_row(&term, &format!("· p{}", id.0)).expect("the agent meta row is drawn");
+        let meta = fg_of_row(&term, &format!("· ={}", id.0)).expect("the agent meta row is drawn");
         assert_eq!(
             meta, t.subtext0,
             "the focused agent's meta line must match the workspace path colour"

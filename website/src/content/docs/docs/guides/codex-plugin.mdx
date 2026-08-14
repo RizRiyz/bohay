@@ -1,0 +1,178 @@
+---
+title: Control Bohay from Codex
+description: Install Bohay's Codex plugin to delegate work and control agents, panes, tabs, and workspaces from a managed pane or local terminal.
+---
+
+The Bohay Codex plugin provides one primary `bohay` skill for agent delegation
+and full session control. It covers workspaces, tabs, panes, agents, files, Git,
+worktrees, tasks, leases, modules, and UI state.
+
+Inside a Bohay pane, the skill uses that pane's inherited binary, socket, and
+pane identity. This lets the same skill delegate and control the current Bohay
+session without guessing which server owns the pane.
+
+Outside Bohay, the plugin resolves the installed `bohay` command and controls
+its configured production session. With the default configuration this is the
+server at `~/.bohay/bohay.sock`.
+
+## Install from the Bohay marketplace
+
+Register the public Bohay repository as a Codex marketplace, then install the
+plugin:
+
+```sh
+codex plugin marketplace add RizRiyz/bohay
+codex plugin add bohay@bohay
+```
+
+Start a new Codex thread after installation so Codex loads the
+`bohay` skill. Confirm the install at any time with:
+
+```sh
+codex plugin list
+```
+
+## Connect to Bohay
+
+The plugin supports two modes:
+
+- **Managed pane:** Codex is running inside Bohay. The plugin uses the injected
+  `BOHAY_BIN_PATH`, `BOHAY_SOCKET_PATH`, and `BOHAY_PANE_ID` values exactly. It
+  controls only that inherited session and never substitutes another socket or
+  binary.
+- **External terminal:** Codex is running in any other local terminal. The
+  plugin resolves the installed `bohay` command from `PATH` and uses its
+  configured production session.
+
+### Approve local socket access in the Codex app
+
+The Codex app normally runs shell commands in a workspace sandbox. Bohay uses a
+local Unix socket outside that workspace, so the app will ask for permission
+before `ping` or another control command. Approve the request if you want that
+thread to operate Bohay.
+
+Without this approval, the operating system returns the same connection error
+as an offline server. The plugin retries with explicit permission and reports
+`Bohay access was not approved` when permission is declined. It only reports
+the server offline after an approved connection attempt fails.
+
+Do not disable the Codex sandbox globally. The plugin requests only the local
+execution permission when it needs to connect to Bohay.
+
+### Install and start Bohay
+
+The external plugin works with every supported Bohay installation method:
+
+```sh
+curl -fsSL https://bohay.dev/install.sh | sh
+brew install RizRiyz/bohay/bohay
+cargo install bohay
+```
+
+Only one installation method is needed. Confirm the command is available, then
+start the production server when it is not already running:
+
+```sh
+bohay --version
+bohay server start
+```
+
+The plugin supports custom production locations. If `BOHAY_HOME` or
+`BOHAY_SOCKET_PATH` is explicitly configured, it preserves that configuration.
+Otherwise the installed release uses `~/.bohay/bohay.sock`. The plugin never
+runs bare `bohay` for discovery because that launches or attaches the
+interactive TUI.
+
+## Ask Codex to control the session
+
+Use `$bohay` when you want to invoke the skill explicitly:
+
+> Use `$bohay` to show the active workspaces, tabs, panes, and agents.
+
+Inside Bohay, start a line with `=target` to delegate the rest of that line:
+
+```text
+=reviewer inspect the current diff
+=7 run the test suite
+=codex fix the parser
+```
+
+The target can be a live agent name, pane id, or unique agent kind. The marker
+must be the first non-whitespace character on the line. `$` remains reserved
+for Codex skill invocation.
+
+Try requests such as:
+
+> Show me every coding agent running in Bohay.
+
+> Split a pane on the right, run the tests there, and show me the result.
+
+> Inspect the active workspace, Git state, tasks, and path leases.
+
+> Read the visible screen of the blocked Codex agent before answering it.
+
+From an external terminal there is no implicit caller pane. The skill resolves
+live IDs first and uses explicit targets for state changes. It also uses bounded
+reads and waits, preserves focus where possible, and asks before destructive
+operations such as closing panes, removing worktrees, merging tasks, or
+stopping the server.
+
+Inside a managed pane, delegation sends work without waiting by default and
+keeps the current pane focused. When a result must return asynchronously, the
+sender can name itself and ask the worker to report back through `agent send`.
+
+### How agent readiness works
+
+Bohay reports agent identity separately from lifecycle status. Once a pane is
+recognized as Codex, the plugin considers `idle`, `done`, `working`, and
+`blocked` ready states. An idle or completed agent is ready for a stable name
+and a new prompt, so the plugin does not wait for it to become `working` first.
+
+For new agents, the plugin prefers `agent start`, which launches, recognizes,
+and names the agent with one bounded command. `wait agent-status` is reserved
+for waiting on a specific lifecycle state after work has been sent.
+
+From an external Codex terminal, `agent start --anchor <pane-id>` creates the
+new no-focus sibling beside an explicit pane and completes the launch in one
+invocation. Omit `--down` for a right-side split and add it for a split below.
+On an older installed release without `--anchor`, the skill uses `pane split
+<pane-id> --no-focus` followed by `agent start --pane <new-pane-id>`. This keeps
+Cargo, Homebrew, and `install.sh` releases compatible while newer versions use
+the faster path.
+
+### Fast command path
+
+The plugin does not run `help` or `ping` before every control command. A normal
+command already proves whether the production server is reachable. It also reuses
+resolved pane IDs and successful command results instead of immediately listing
+or reading the same state again.
+
+A successful `agent start` result with `ready: true` is complete. The plugin
+does not follow it with another status or agent lookup. It waits only when the
+next requested action depends on a state transition or when you explicitly ask
+it to wait.
+
+Common pane and agent instructions stay in the small core skill. Guidance for
+worktrees, orchestration, modules, UI, and destructive operations loads only
+when a request needs it, which keeps normal startup and control prompts lighter.
+
+## Update or remove
+
+Reinstall the plugin to pick up a new marketplace release, then start a new
+Codex thread:
+
+```sh
+codex plugin marketplace upgrade bohay
+codex plugin add bohay@bohay
+```
+
+`bohay skill update` refreshes Bohay's auto-installed agent guidance, not the
+versioned plugin cache. Use the marketplace command above for the plugin.
+
+Remove only the Codex plugin with:
+
+```sh
+codex plugin remove bohay@bohay
+```
+
+Removing the plugin does not stop Bohay or change any Bohay session.

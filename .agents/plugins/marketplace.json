@@ -1,0 +1,20 @@
+{
+  "name": "bohay",
+  "interface": {
+    "displayName": "Bohay"
+  },
+  "plugins": [
+    {
+      "name": "bohay",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bohay"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

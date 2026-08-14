@@ -1,5 +1,5 @@
-//! bohay — Mission controlfor your AI agents.
-//! A client/server terminal multiplexer with live agent detection.
+//! bohay — mission control for your AI coding agents.
+//! A client/server terminal workspace with live agent detection.
 //! See docs/12-execution-plan.md.
 
 mod agent;

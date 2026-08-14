@@ -1,0 +1,43 @@
+{
+  "name": "bohay",
+  "version": "0.1.0",
+  "description": "Delegate to coding agents and control Bohay workspaces, tabs, panes, and sessions from Codex.",
+  "author": {
+    "name": "Riz",
+    "url": "https://github.com/RizRiyz"
+  },
+  "homepage": "https://bohay.dev/docs/",
+  "repository": "https://github.com/RizRiyz/bohay",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "bohay",
+    "terminal",
+    "agents",
+    "orchestration",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Bohay",
+    "shortDescription": "Delegate agents and control Bohay sessions.",
+    "longDescription": "Delegate work and control Bohay agents, panes, tabs, and workspaces from Codex. Inside Bohay it uses the inherited session. From an external terminal it uses the installed production Bohay command and configured session.",
+    "developerName": "Riz",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://bohay.dev/",
+    "privacyPolicyURL": "https://bohay.dev/privacy/",
+    "termsOfServiceURL": "https://bohay.dev/terms/",
+    "brandColor": "#DBC66F",
+    "composerIcon": "./assets/logo.svg",
+    "logo": "./assets/logo.svg",
+    "logoDark": "./assets/logo.svg",
+    "defaultPrompt": [
+      "Show me the panes and coding agents in the current Bohay session.",
+      "Delegate a review to the Bohay agent named reviewer.",
+      "Inspect the current Bohay workspace, tabs, and Git state."
+    ]
+  }
+}

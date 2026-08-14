@@ -41,7 +41,8 @@ bohay agent name web --pane 4
 bohay agent send api "add the /health endpoint" --wait
 ```
 
-The AGENTS sidebar also shows each agent's mention token on its second line: `@name` once you name it, otherwise `p<id>`.
+The AGENTS sidebar also shows each agent's delegation token on its second line:
+`=name` once you name it, otherwise `=<id>`.
 
 ## A delegation, end to end
 
@@ -94,19 +95,22 @@ and it is bounded by `--timeout` (default 300s, exit 2 on timeout; exit 0 on
 settle). So a broken worker never traps you — but since it blocks, reach for it
 only when you actually need to wait.
 
-## The `$` shorthand
+## The `=` shorthand
 
-With the skill installed you rarely type the commands. Write `$name` at the start
+With the skill installed you rarely type the commands. Write `=name` at the start
 of a line and the rest of it goes to that agent:
 
 ```
-$codex add tests to src/parse.rs
-$reviewer take a look at the diff
-$7 run the migration
+=codex add tests to src/parse.rs
+=reviewer take a look at the diff
+=7 run the migration
 ```
 
-`$codex` addresses the pane named codex. An agent name or a pane id work the same
-way, so `$reviewer` and `$7` both resolve. The same targets `agent send` takes.
+`=codex` addresses the pane named codex. An agent name or a pane id work the same
+way, so `=reviewer` and `=7` both resolve. The same targets `agent send` takes.
+The marker is recognized only as the first non-whitespace character on a line,
+so equations and shell assignments do not trigger delegation. Codex keeps `$`
+for invoking skills such as `$bohay` or `$changelog`.
 
 It is a hand-off, not a wait: the agent you typed into keeps working, and the
 answer comes back when the other one is done. Ask for it to wait and it will.
@@ -122,7 +126,7 @@ for you** on startup, for every supported agent that is set up, and keeps it
 current across bohay updates. You do not need to run anything:
 
 - **Claude Code** gets the full skill at `~/.claude/skills/bohay/SKILL.md`, loaded by relevance.
-- **Codex** and **opencode** read an always-on `AGENTS.md`, so they get a short managed pointer block added to their global `AGENTS.md` (`~/.codex/AGENTS.md`, `~/.config/opencode/AGENTS.md`). Your own content in those files is left untouched.
+- **Codex** and **opencode** read an always-on `AGENTS.md`, so they get a short managed pointer block added to their global `AGENTS.md` (`~/.codex/AGENTS.md`, `~/.config/opencode/AGENTS.md`). Your own content in those files is left untouched. Installing the Bohay Codex plugin adds the full unified `bohay` skill for delegation and session control.
 
 The messaging **commands themselves work with every agent bohay detects**
 (claude, codex, gemini, opencode, kimi, grok, aider, and more), whether or not
@@ -136,6 +140,21 @@ bohay skill                          # print the skill
 bohay skill install --dir <path>     # write it to a specific dir
 ```
 
+Starting with Bohay 0.10.2, you can refresh the primary skill between Bohay
+releases:
+
+```sh
+bohay skill update
+```
+
+The downloaded `SKILL.md` is self-contained, so the 0.10.2 single-file updater
+receives the complete current routing and safety behavior. Newer releases also
+install an optional advanced command index. Bohay 0.10.1 and earlier must
+upgrade the Bohay binary before this command is available.
+
+The Codex marketplace plugin has its own versioned copy. Refresh that copy with
+`codex plugin marketplace upgrade bohay`, then start a new Codex thread.
+
 To turn the auto-install off, run `bohay skill off` (removes the managed blocks
 and stops reinstalling), or set `"install_agent_skill": false` in
 `~/.bohay/config.json`. `bohay skill on` re-enables it.
@@ -146,15 +165,16 @@ ask in plain language:
 > Have codex implement the parser in the other pane and tell me when it is done.
 
 The agent recognizes the request, runs the `agent send`/`wait`/`read` loop
-itself, and reports back. The skill only triggers when you ask to delegate or to
-control another pane, so it stays out of the way the rest of the time.
+itself, and reports back. The unified skill also controls workspaces, tabs,
+panes, and other Bohay surfaces when asked. It stays out of the way when the
+request is unrelated to Bohay.
 
 ## Naming renames the pane
 
 `bohay pane name <name>` (and its synonym `bohay agent name`) does two things: it
 sets a **live address** for the CLI and API, and it **renames the pane's title
 strip** to that name in place of its cwd path, so a named pane is easy to spot.
-It shows the same mention token in the AGENTS sidebar (`@name`).
+It shows the same delegation token in the AGENTS sidebar (`=name`).
 
 A name is keyed to the pane, so it survives the agent restarting inside it and is
 dropped only when the pane closes. It does not change the pane's **tab** label,

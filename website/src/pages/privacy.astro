@@ -1,0 +1,69 @@
+---
+import LegalPage from '../components/LegalPage.astro';
+---
+
+<LegalPage
+  title="Privacy Policy"
+  description="How Bohay handles data in the local app, the Codex plugin, and the Bohay website."
+  path="/privacy/"
+  updated="August 14, 2026"
+>
+  <h2>Overview</h2>
+  <p>
+    Bohay is local software for controlling terminal panes and coding agents. The Bohay project
+    does not operate a hosted agent service and does not receive your prompts, terminal output,
+    repository files, or messages sent between local agents.
+  </p>
+
+  <h2>Local app and Codex plugin</h2>
+  <p>
+    Bohay stores the configuration and session state needed to run the app on your computer. The
+    default data directory is <code>~/.bohay</code>. You can select another location with Bohay's
+    supported environment variables.
+  </p>
+  <p>
+    The Codex plugin is a skills-only plugin. It starts no separate network service and stores no
+    separate account data. It calls the installed <code>bohay</code> command and communicates with
+    your configured local Bohay server through its Unix socket.
+  </p>
+  <p>
+    Commands you ask Bohay or a coding agent to run can read or change files and can contact
+    external services. That access is determined by your request, local permissions, sandbox
+    settings, and the tools you have installed.
+  </p>
+
+  <h2>Website and documentation</h2>
+  <p>
+    Bohay does not use a first-party account system on bohay.dev. The hosting provider may process
+    ordinary request information such as an IP address, browser details, requested URL, and time of
+    access to deliver and protect the site. Its handling of that information is governed by the
+    provider's own terms and policies.
+  </p>
+
+  <h2>Third-party services</h2>
+  <p>
+    Bohay can launch or control third-party tools including Codex, other coding agents, Git, GitHub,
+    and your shell. Those products may process data under their own privacy policies. Installing the
+    Bohay plugin does not change the policies or permissions of those products.
+  </p>
+
+  <h2>Sale and sharing of personal data</h2>
+  <p>
+    The Bohay project does not sell personal data. It does not receive local project data merely
+    because you use the Bohay app or plugin.
+  </p>
+
+  <h2>Your choices</h2>
+  <p>
+    You control local Bohay data through the app, its CLI, and its configured data directory. You
+    can remove the Codex plugin without stopping Bohay or changing a Bohay session.
+  </p>
+
+  <h2>Changes and contact</h2>
+  <p>
+    This policy may change as Bohay develops. Material updates will be published on this page with
+    a new date. For privacy questions, open a
+    <a href="https://github.com/RizRiyz/bohay/issues">GitHub issue</a>. For a sensitive security
+    report, use <a href="https://github.com/RizRiyz/bohay/security/advisories/new">GitHub's private security advisory form</a>.
+  </p>
+</LegalPage>

@@ -74,7 +74,7 @@
           '';
 
           meta = with pkgs.lib; {
-            description = "Terminal workspace manager for AI coding agents";
+            description = "Mission control for your AI coding agents";
             homepage = "https://bohay.dev";
             license = licenses.agpl3Plus;
             mainProgram = "bohay";

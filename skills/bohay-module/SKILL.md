@@ -1,7 +1,7 @@
 ---
 name: bohay-module
 description: >-
-  Write a bohay module (an extension for the bohay terminal multiplexer). Use when
+  Write a bohay module (an extension for bohay, mission control for your AI coding agents). Use when
   the user is building or debugging a bohay module: authoring bohay-module.toml,
   adding a sidebar dock, a right-click action, an event hook, a module pane, or
   module settings, or calling bohay back over its socket API.
@@ -9,7 +9,7 @@ description: >-
 
 # Writing a bohay module
 
-A **bohay module** is a plugin for bohay (a terminal multiplexer for AI coding agents). There is **no SDK and no scripting engine**: a module is a directory with a `bohay-module.toml` manifest that declares **argv commands** (any executable: `sh`, `python`, `node`, a compiled binary). bohay runs those commands as subprocesses with `BOHAY_*` context in the environment, and the command calls bohay back through the same socket API the `bohay` CLI uses. So a module in bash/python/node can do what a built-in feature does.
+A **bohay module** is a plugin for bohay, mission control for your AI coding agents. There is **no SDK and no scripting engine**: a module is a directory with a `bohay-module.toml` manifest that declares **argv commands** (any executable: `sh`, `python`, `node`, a compiled binary). bohay runs those commands as subprocesses with `BOHAY_*` context in the environment, and the command calls bohay back through the same socket API the `bohay` CLI uses. So a module in bash/python/node can do what a built-in feature does.
 
 Reference material in this repo (read for depth): `MODULE-GUIDE.md`, `docs/13-modules.md`, and the worked modules in `examples/modules/` (`branch-dock` = a sidebar dock, `agent-ping` = an event hook, `scratch-pane` = a pane).
 
