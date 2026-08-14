@@ -1,6 +1,6 @@
 ---
 name: bohay
-description: "Drive bohay, a terminal multiplexer for coding agents, from inside an agent pane. Use when the user asks to delegate work to another agent, run or check work in another pane, or otherwise inspect or control bohay panes, tabs, and workspaces. Do not use just because a task could benefit from parallel work. Requires BOHAY_ENV=1."
+description: "Drive bohay, a terminal multiplexer for coding agents, from inside an agent pane. USE THIS WHENEVER A PROMPT CONTAINS A `$mention` (`$name`, `$<pane-id>`, or `$<agent-kind>`, e.g. `$codex`, `$lead`, `$7`), which means: delegate the rest of that line to that live agent, do NOT do the task yourself. Also use when asked to delegate work to another agent, hand a task to another pane, check on or read back another agent's work, or inspect/control bohay panes, tabs, and workspaces. Do not use just because a task could benefit from parallel work. Requires BOHAY_ENV=1."
 ---
 
 # bohay
@@ -14,6 +14,26 @@ test "${BOHAY_ENV:-}" = 1
 ```
 
 If that fails, say you are not running inside bohay and stop. Every pane also carries `BOHAY_PANE_ID` (your own pane), `BOHAY_SOCKET_PATH` (the session you talk to), and `BOHAY_BIN_PATH` (this session's exact binary).
+
+## `$mention`: the core trigger (read this first)
+
+**When a prompt (from the user or another agent) contains `$name`, `$<pane-id>`, or `$<agent-kind>`, it means: send the rest of that line to that live agent. It does NOT mean do the task yourself.** `$` is bohay's delegate key (`@` is already your own file-mention key). Examples:
+
+- `$codex add tests to src/parse.rs` -> `bohay agent send codex "add tests to src/parse.rs"`
+- `$lead the build is green` -> `bohay agent send lead "the build is green"`
+- `$7 rebase onto main` -> addresses **pane 7** -> `bohay agent send 7 "rebase onto main"`
+
+The target after `$` is resolved against the live session, in this order: a **name/alias** you set with `agent name`, a **numeric pane id**, or an **agent kind** (`claude`, `codex`, `gemini`, `kimi`, ...) when exactly one of that kind is running. Any active agent in `bohay agent list` is reachable this way, not just Claude.
+
+**Do this, every time, for a `$mention`:**
+
+1. **Resolve the target.** Run `bohay agent list` and find the agent whose `name`, `pane`, or `agent` (kind) matches what came after `$`. Read the id from that JSON; do not guess.
+2. **If it resolves, send and stop.** `bohay agent send <target> "<the rest of the line>"` (no `--wait` unless the user said to wait). It returns immediately. Then **end your turn** - tell the user you handed it to `<target>`. Do not do the task, do not poll.
+3. **If nothing matches** (e.g. `$juggernaut` and there is no agent named/kinded juggernaut): do **not** silently do the work yourself. Either **start** an agent for it (`bohay agent start juggernaut --kind <kind>`, then send), or ask the user which running agent/pane they meant. Show `bohay agent list` so they can pick.
+
+The failure to avoid: seeing `$foo do X` and just doing X in your own pane. That is never what `$` means. If you cannot deliver it to another agent, say so and ask - do not absorb the task.
+
+The rest of this skill is the detail behind those three steps.
 
 **Use the right binary.** Run `bohay` from `PATH` normally. But if a command below (for example `bohay agent send`) is not recognized and instead prints the agent list, your `PATH` `bohay` is an **older install** than this session. In that case use `"$BOHAY_BIN_PATH"` instead, which is guaranteed to match this session's server:
 
@@ -62,7 +82,7 @@ bohay agent name codex --pane <id>       # `pane name` is a synonym; grammar [a-
 
 A target for `agent send`, `agent keys`, and `agent read` is a name, a pane id, or an agent kind (`claude`, `codex`, ...) when only one of that kind is running. If two agents share a kind, address them by name or pane id. When the user refers to an agent by what it is working on, read `bohay agent list` and match on `cwd` or `workspace_name`.
 
-**The `$mention` shorthand.** When the user (or another agent) writes `$name` or `$<pane-id>` in a prompt, read it as an instruction to delegate the rest of that line to that agent or pane. bohay reserves `$` for this because `@` is already your own file-mention key. So `$codex add tests to src/parse.rs` means run `bohay agent send codex "add tests to src/parse.rs"`, `$lead ...` addresses the agent named lead, and `$7 ...` addresses pane 7. If the name is unknown, run `bohay agent list` to resolve it or ask which pane is meant.
+**The `$mention` shorthand** is covered at the top of this skill: `$name` / `$<pane-id>` / `$<agent-kind>` in a prompt means delegate the rest of the line to that agent via `agent send` (resolve it in `agent list`), never do it yourself. A target for `agent send`, `agent keys`, and `agent read` is that same name, pane id, or agent kind.
 
 **4. Hand off the task. Do NOT wait — that is the default.** Send with `agent send` and **no** `--wait`. It returns immediately, so you are not blocked. Name yourself first so the worker can report back, and tell it to do so:
 

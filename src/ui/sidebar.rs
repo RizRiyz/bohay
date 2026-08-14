@@ -553,8 +553,12 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         }
     }
     // Pinned agents (right-click → Pin) float to the top; a stable sort keeps the
-    // rest in workspace/tab order.
-    live.sort_by_key(|(id, _)| !app.pinned_agents.contains(id));
+    // rest in workspace/tab order. Skipped entirely when nothing is pinned, which
+    // is the common case: the sort itself is cheap, but it does a hash lookup per
+    // comparison and this runs on every frame the dock is drawn.
+    if !app.pinned_agents.is_empty() {
+        live.sort_by_key(|(id, _)| !app.pinned_agents.contains(id));
+    }
     // In "Active" mode, hide the on-disk resumable session history.
     let atotal = if active_only {
         live.len()

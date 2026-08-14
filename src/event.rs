@@ -87,4 +87,7 @@ pub enum AppEvent {
     /// The background update check found a newer release than this build (the
     /// version string, e.g. `"0.9.3"`). Shows the indicator by the version number.
     UpdateAvailable(String),
+    /// An *asked-for* check finished (the changelog's "Check for updates"
+    /// button). Carries the outcome so the answer can be shown either way.
+    UpdateChecked(crate::update::CheckOutcome),
 }

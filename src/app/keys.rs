@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
 
@@ -16,6 +16,7 @@ pub enum Cmd {
     FocusDown,
     FocusUp,
     FocusRight,
+    NextPane,
     NextAttention,
     SplitRight,
     SplitDown,
@@ -26,6 +27,7 @@ pub enum Cmd {
     NewTab,
     NextTab,
     PrevTab,
+    RenameTab,
     NewWorkspace,
     CloseWorkspace,
     NextWorkspace,
@@ -50,6 +52,7 @@ impl Cmd {
         Cmd::FocusDown,
         Cmd::FocusUp,
         Cmd::FocusRight,
+        Cmd::NextPane,
         Cmd::NextAttention,
         Cmd::SplitRight,
         Cmd::SplitDown,
@@ -60,6 +63,7 @@ impl Cmd {
         Cmd::NewTab,
         Cmd::NextTab,
         Cmd::PrevTab,
+        Cmd::RenameTab,
         Cmd::NewWorkspace,
         Cmd::CloseWorkspace,
         Cmd::NextWorkspace,
@@ -84,6 +88,7 @@ impl Cmd {
             Cmd::FocusDown => "focus_down",
             Cmd::FocusUp => "focus_up",
             Cmd::FocusRight => "focus_right",
+            Cmd::NextPane => "next_pane",
             Cmd::NextAttention => "next_attention",
             Cmd::SplitRight => "split_right",
             Cmd::SplitDown => "split_down",
@@ -94,6 +99,7 @@ impl Cmd {
             Cmd::NewTab => "new_tab",
             Cmd::NextTab => "next_tab",
             Cmd::PrevTab => "prev_tab",
+            Cmd::RenameTab => "rename_tab",
             Cmd::NewWorkspace => "new_node",
             Cmd::CloseWorkspace => "close_node",
             Cmd::NextWorkspace => "next_node",
@@ -121,6 +127,7 @@ impl Cmd {
             Cmd::FocusDown => cat.cmd_focus_down,
             Cmd::FocusUp => cat.cmd_focus_up,
             Cmd::FocusRight => cat.cmd_focus_right,
+            Cmd::NextPane => cat.cmd_next_pane,
             Cmd::NextAttention => cat.cmd_next_attention,
             Cmd::SplitRight => cat.cmd_split_right,
             Cmd::SplitDown => cat.cmd_split_down,
@@ -131,6 +138,7 @@ impl Cmd {
             Cmd::NewTab => cat.cmd_new_tab,
             Cmd::NextTab => cat.cmd_next_tab,
             Cmd::PrevTab => cat.cmd_prev_tab,
+            Cmd::RenameTab => cat.cmd_rename_tab,
             Cmd::NewWorkspace => cat.cmd_new_workspace,
             Cmd::CloseWorkspace => cat.cmd_close_workspace,
             Cmd::NextWorkspace => cat.cmd_next_workspace,
@@ -159,6 +167,7 @@ impl Cmd {
             | Cmd::FocusDown
             | Cmd::FocusUp
             | Cmd::FocusRight
+            | Cmd::NextPane
             | Cmd::NextAttention
             | Cmd::SplitRight
             | Cmd::SplitDown
@@ -166,7 +175,7 @@ impl Cmd {
             | Cmd::ClosePane
             | Cmd::ZoomPane
             | Cmd::ResizeMode => "Panes",
-            Cmd::NewTab | Cmd::NextTab | Cmd::PrevTab => "Tabs",
+            Cmd::NewTab | Cmd::NextTab | Cmd::PrevTab | Cmd::RenameTab => "Tabs",
             Cmd::NewWorkspace
             | Cmd::CloseWorkspace
             | Cmd::NextWorkspace
@@ -191,6 +200,7 @@ impl Cmd {
             Cmd::FocusDown => "↓",
             Cmd::FocusUp => "↑",
             Cmd::FocusRight => "→",
+            Cmd::NextPane => ";",
             Cmd::NextAttention => ".",
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
@@ -201,6 +211,8 @@ impl Cmd {
             Cmd::NewTab => "c",
             Cmd::NextTab => "n",
             Cmd::PrevTab => "p",
+            // `,` renames the tab on both bohay and tmux (tmux's rename-window).
+            Cmd::RenameTab => ",",
             Cmd::NewWorkspace => "N",
             Cmd::CloseWorkspace => "D",
             Cmd::NextWorkspace => "w",
@@ -208,7 +220,9 @@ impl Cmd {
             Cmd::NewWorktree => "G",
             Cmd::OpenGit => "g",
             Cmd::OpenBoard => "o",
-            Cmd::OpenSettings => ",",
+            // `=` opens Settings (`,` now renames the tab, matching tmux). The
+            // Menu button is always available too, so this is just the shortcut.
+            Cmd::OpenSettings => "=",
             Cmd::ToggleSidebar => "b",
             Cmd::ToggleRightSidebar => "B",
             Cmd::ToggleAgents => "a",
@@ -217,6 +231,29 @@ impl Cmd {
             Cmd::GlobalSearch => "/",
             Cmd::Detach => "d",
         }
+    }
+
+    /// Every default key for this command: the primary [`default_key`] plus any
+    /// fixed aliases (vim `hjkl`, `Tab`/`⇧Tab`, `q`, `X`, `-`). Declaring the
+    /// aliases here (docs/64) is what removes the hidden hardcoded alias block
+    /// from `build_keymap` — every binding now flows through this list or a user
+    /// override, so nothing is bound behind the user's back.
+    pub fn default_keys(self) -> Vec<&'static str> {
+        let mut keys = vec![self.default_key()];
+        let aliases: &[&str] = match self {
+            Cmd::FocusLeft => &["h"],
+            Cmd::FocusDown => &["j"],
+            Cmd::FocusUp => &["k"],
+            Cmd::FocusRight => &["l"],
+            Cmd::Detach => &["q"],
+            Cmd::ClosePane => &["X"],
+            Cmd::SplitDown => &["-"],
+            Cmd::NextTab => &["⇥"],
+            Cmd::PrevTab => &["⇧⇥"],
+            _ => &[],
+        };
+        keys.extend_from_slice(aliases);
+        keys
     }
 }
 
@@ -340,33 +377,188 @@ pub fn key_string(key: &KeyEvent) -> Option<String> {
     })
 }
 
-/// Build the active `key → Cmd` map from the (id → key) config overrides, on top
-/// of the defaults, plus the always-on fixed aliases.
+/// The prefix chord that opens command mode (docs/64). Parsed from
+/// `config.prefix` (e.g. `"ctrl+space"`, `"ctrl+b"`). Always carries Ctrl so it
+/// can never be mistaken for a plain typed key; extra modifiers are optional.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrefixSpec {
+    alt: bool,
+    shift: bool,
+    /// The base key. `KeyCode::Char(' ')` is `Ctrl+Space`.
+    code: KeyCode,
+}
+
+impl Default for PrefixSpec {
+    fn default() -> Self {
+        // The historical default: Ctrl+Space.
+        PrefixSpec {
+            alt: false,
+            shift: false,
+            code: KeyCode::Char(' '),
+        }
+    }
+}
+
+impl PrefixSpec {
+    /// Parse a spec like `"ctrl+space"` / `"ctrl+b"` / `"ctrl+alt+a"`. Returns
+    /// `None` for anything that does not carry Ctrl or names an unknown key, so a
+    /// bad value is rejected and the caller keeps the previous prefix.
+    pub fn parse(s: &str) -> Option<PrefixSpec> {
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut shift = false;
+        let mut code: Option<KeyCode> = None;
+        for part in s.split('+') {
+            match part.trim().to_ascii_lowercase().as_str() {
+                "" => {}
+                "ctrl" | "control" => ctrl = true,
+                "alt" | "option" | "opt" | "meta" => alt = true,
+                "shift" => shift = true,
+                "space" | "spc" => code = Some(KeyCode::Char(' ')),
+                other if other.chars().count() == 1 => {
+                    code = Some(KeyCode::Char(other.chars().next().unwrap()))
+                }
+                _ => return None,
+            }
+        }
+        // Must carry Ctrl (so it can't swallow a plain key) and name a base key.
+        if !ctrl {
+            return None;
+        }
+        Some(PrefixSpec {
+            alt,
+            shift,
+            code: code?,
+        })
+    }
+
+    /// Does this key event match the prefix chord? Handles the terminal quirks of
+    /// `Ctrl+Space`: many emulators send `Ctrl+@` or a raw `NUL` for it.
+    pub fn matches(&self, key: &KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if self.alt != alt {
+            return false;
+        }
+        // Ctrl+Space: accept the three encodings terminals use for it.
+        if self.code == KeyCode::Char(' ') {
+            if matches!(key.code, KeyCode::Null) {
+                return true;
+            }
+            return ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('@'));
+        }
+        ctrl && key.code == self.code
+    }
+
+    /// The raw byte(s) a terminal sends for this chord, so pressing the prefix
+    /// twice can forward a literal prefix into the focused pane. `Ctrl+<letter>`
+    /// is `letter & 0x1f` (Space/`@` → `0x00`).
+    pub fn literal_bytes(&self) -> Vec<u8> {
+        match self.code {
+            KeyCode::Char(c) if c.is_ascii() => {
+                let upper = c.to_ascii_uppercase() as u8;
+                vec![upper & 0x1f]
+            }
+            _ => vec![0x00],
+        }
+    }
+
+    /// A human label for Settings (e.g. `"Ctrl+Space"`, `"Ctrl+B"`).
+    pub fn label(&self) -> String {
+        let mut s = String::from("Ctrl");
+        if self.alt {
+            s.push_str("+Alt");
+        }
+        if self.shift {
+            s.push_str("+Shift");
+        }
+        match self.code {
+            KeyCode::Char(' ') => s.push_str("+Space"),
+            KeyCode::Char(c) => {
+                s.push('+');
+                s.push(c.to_ascii_uppercase());
+            }
+            _ => {}
+        }
+        s
+    }
+}
+
+/// Build the active `key → Cmd` map from the (id → key) config overrides on top
+/// of every command's [`Cmd::default_keys`] (docs/64). There is no separate
+/// hardcoded alias block: aliases are just extra default keys, so a user who
+/// rebinds a command replaces its whole default set, and one who leaves it alone
+/// gets the vim/Tab aliases exactly as before.
 pub fn build_keymap(overrides: &HashMap<String, String>) -> HashMap<String, Cmd> {
     let mut m = HashMap::new();
+    // 1) Explicit overrides first — they always win over any default.
     for &cmd in Cmd::ALL {
-        let key = match overrides.get(cmd.id()) {
-            Some(k) if k.is_empty() => continue, // explicitly unbound
-            Some(k) => k.clone(),
-            None => cmd.default_key().to_string(),
-        };
-        m.insert(key, cmd);
+        if let Some(k) = overrides.get(cmd.id()) {
+            if !k.is_empty() {
+                m.insert(k.clone(), cmd);
+            }
+            // An empty override means "explicitly unbound": it claims nothing and
+            // (via the `contains_key` check below) suppresses this command's
+            // defaults too.
+        }
     }
-    // Fixed aliases — only if the slot isn't taken by a user binding.
-    for (k, cmd) in [
-        ("h", Cmd::FocusLeft),
-        ("j", Cmd::FocusDown),
-        ("k", Cmd::FocusUp),
-        ("l", Cmd::FocusRight),
-        ("q", Cmd::Detach),
-        ("X", Cmd::ClosePane),
-        ("-", Cmd::SplitDown),
-        ("⇥", Cmd::NextTab),
-        ("⇧⇥", Cmd::PrevTab),
-    ] {
-        m.entry(k.to_string()).or_insert(cmd);
+    // 2) Defaults fill any slot an override hasn't claimed, but only for commands
+    //    the user hasn't rebound or unbound.
+    for &cmd in Cmd::ALL {
+        if overrides.contains_key(cmd.id()) {
+            continue;
+        }
+        for k in cmd.default_keys() {
+            m.entry(k.to_string()).or_insert(cmd);
+        }
     }
     m
+}
+
+/// A named keybinding preset (docs/64): a prefix chord plus a set of command
+/// overrides. Applying one is a batch of the same edits Settings → Keys makes by
+/// hand, so a user can still tweak individual keys afterward.
+pub struct Preset {
+    /// Stable id used by config / the Settings chooser (`"default"`, `"tmux"`).
+    pub id: &'static str,
+    /// Human label for the Settings chooser.
+    pub label: &'static str,
+    /// The prefix spec this preset sets (`"ctrl+space"`, `"ctrl+b"`).
+    pub prefix: &'static str,
+    /// Command overrides (`cmd_id → key`). Anything absent keeps its default key.
+    pub binds: &'static [(&'static str, &'static str)],
+}
+
+/// The built-in presets. `default` restores bohay's own keys; `tmux` matches the
+/// muscle memory of a tmux user (`Ctrl+b` prefix, `%`/`"` splits) - most other
+/// tmux keys (`c`/`n`/`p`/`x`/`z`/`d`) already agree with bohay's defaults.
+pub fn presets() -> &'static [Preset] {
+    &[
+        Preset {
+            id: "default",
+            label: "bohay (default)",
+            prefix: "ctrl+space",
+            binds: &[],
+        },
+        Preset {
+            id: "tmux",
+            label: "tmux",
+            prefix: "ctrl+b",
+            binds: &[
+                // tmux splits: `%` = left/right, `"` = top/bottom.
+                ("split_right", "%"),
+                ("split_down", "\""),
+                // `o` cycles to the next pane (rename is `,` by default already).
+                ("next_pane", "o"),
+                // `(` / `)` step to the previous / next session (bohay workspace).
+                ("prev_node", "("),
+                ("next_node", ")"),
+                // `w` opens the jump palette (tmux's choose-window / -tree); the
+                // scope chips inside narrow it to tabs, workspaces, or agents.
+                ("switcher", "w"),
+            ],
+        },
+    ]
 }
 
 impl App {
@@ -382,16 +574,18 @@ impl App {
     /// Rebind `cmd` to `key`, persist, and rebuild the active keymap. If `key`
     /// was used by another command, that one is cleared (so it can be rebound).
     pub fn rebind(&mut self, cmd: Cmd, key: String) {
-        // Drop any other command that currently uses this key.
-        let others: Vec<Cmd> = Cmd::ALL
+        // Steal the key only from other commands that *explicitly* bound it, so we
+        // never leave two overrides fighting for one key. A command that merely
+        // has it as a default yields on its own in `build_keymap` (or_insert).
+        let others: Vec<String> = self
+            .config
+            .keybindings
             .iter()
-            .copied()
-            .filter(|c| *c != cmd && self.key_for(*c) == key)
+            .filter(|(id, k)| id.as_str() != cmd.id() && !k.is_empty() && **k == key)
+            .map(|(id, _)| id.clone())
             .collect();
-        for other in others {
-            self.config
-                .keybindings
-                .insert(other.id().to_string(), String::new());
+        for id in others {
+            self.config.keybindings.insert(id, String::new());
         }
         self.config.keybindings.insert(cmd.id().to_string(), key);
         self.keymap = build_keymap(&self.config.keybindings);
@@ -405,6 +599,42 @@ impl App {
         crate::config::save(&self.config);
     }
 
+    /// Set the command-mode prefix chord from a spec like `"ctrl+b"` (docs/64).
+    /// Rejects anything that does not carry Ctrl (so a plain key can never become
+    /// the prefix and swallow typing), keeping the current prefix and returning
+    /// `false`. On success it applies live, persists, and returns `true`.
+    pub fn set_prefix(&mut self, spec: &str) -> bool {
+        match PrefixSpec::parse(spec) {
+            Some(p) => {
+                self.prefix = p;
+                self.config.prefix = spec.trim().to_ascii_lowercase();
+                crate::config::save(&self.config);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply a named keybinding preset (docs/64): set the prefix and replace the
+    /// keybinding overrides with the preset's, then rebuild + persist. `"default"`
+    /// clears every override back to bohay's built-in keys. Returns `false` for an
+    /// unknown preset name.
+    pub fn apply_preset(&mut self, name: &str) -> bool {
+        let Some(preset) = presets().iter().find(|p| p.id == name) else {
+            return false;
+        };
+        self.config.keybindings.clear();
+        for (id, key) in preset.binds {
+            self.config
+                .keybindings
+                .insert((*id).to_string(), (*key).to_string());
+        }
+        self.set_prefix(preset.prefix); // also saves config
+        self.keymap = build_keymap(&self.config.keybindings);
+        crate::config::save(&self.config);
+        true
+    }
+
     /// Run a prefix command.
     pub fn run_cmd(&mut self, cmd: Cmd) {
         match cmd {
@@ -412,6 +642,7 @@ impl App {
             Cmd::FocusDown => self.focus_dir(Dir::Down),
             Cmd::FocusUp => self.focus_dir(Dir::Up),
             Cmd::FocusRight => self.focus_dir(Dir::Right),
+            Cmd::NextPane => self.focus_next_pane(),
             Cmd::NextAttention => self.focus_next_attention(),
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
@@ -438,6 +669,10 @@ impl App {
             Cmd::NewTab => self.new_tab(),
             Cmd::NextTab => self.cycle_tab(1),
             Cmd::PrevTab => self.cycle_tab(-1),
+            Cmd::RenameTab => {
+                let i = self.ws().active_tab;
+                self.open_tab_rename(i);
+            }
             Cmd::NewWorkspace => self.open_folder_picker(),
             Cmd::CloseWorkspace => {
                 let i = self.active_ws;
@@ -449,7 +684,7 @@ impl App {
             Cmd::OpenGit => self.open_git_tab_active(),
             Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
-            Cmd::ToggleSidebar => self.toggle_side(crate::app::Side::Left),
+            Cmd::ToggleSidebar => self.toggle_all_sides(),
             Cmd::ToggleRightSidebar => self.toggle_side(crate::app::Side::Right),
             Cmd::ToggleAgents => self.agents_active_only = !self.agents_active_only,
             Cmd::ToggleFiles => self.toggle_files_dock(),
@@ -506,6 +741,9 @@ mod tests {
         assert_eq!(m.get("h"), Some(&Cmd::FocusLeft)); // vim alias
         assert_eq!(m.get("⇥"), Some(&Cmd::NextTab));
         assert_eq!(m.get("N"), Some(&Cmd::NewWorkspace));
+        // `,` renames the tab (tmux-compatible); Settings moved to `=`.
+        assert_eq!(m.get(","), Some(&Cmd::RenameTab));
+        assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
         // every command is reachable by its default key
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} bound");
@@ -519,6 +757,90 @@ mod tests {
         let m = build_keymap(&o);
         assert_eq!(m.get("t"), Some(&Cmd::NewTab));
         assert_ne!(m.get("c"), Some(&Cmd::NewTab)); // old default freed
+    }
+
+    #[test]
+    fn rebinding_a_command_replaces_only_its_own_keys() {
+        // Overriding FocusLeft to `g` drops its default set (← and h) and binds g.
+        let mut o = HashMap::new();
+        o.insert(Cmd::FocusLeft.id().to_string(), "g".to_string());
+        let m = build_keymap(&o);
+        assert_eq!(m.get("g"), Some(&Cmd::FocusLeft));
+        assert_eq!(m.get("←"), None, "old primary freed");
+        assert_eq!(m.get("h"), None, "old alias freed too");
+        // Other commands' aliases are untouched.
+        assert_eq!(m.get("j"), Some(&Cmd::FocusDown));
+    }
+
+    #[test]
+    fn prefix_parse_requires_ctrl_and_accepts_letters() {
+        assert_eq!(PrefixSpec::parse("ctrl+space"), Some(PrefixSpec::default()));
+        assert_eq!(
+            PrefixSpec::parse("ctrl+b"),
+            Some(PrefixSpec {
+                alt: false,
+                shift: false,
+                code: KeyCode::Char('b'),
+            })
+        );
+        // A bare key (no Ctrl) is rejected so it can't swallow typing.
+        assert_eq!(PrefixSpec::parse("b"), None);
+        assert_eq!(PrefixSpec::parse("space"), None);
+        assert_eq!(PrefixSpec::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn prefix_matches_the_configured_chord() {
+        let ctrl = KeyModifiers::CONTROL;
+        // Ctrl+Space accepts all three terminal encodings.
+        let sp = PrefixSpec::default();
+        assert!(sp.matches(&KeyEvent::new(KeyCode::Char(' '), ctrl)));
+        assert!(sp.matches(&KeyEvent::new(KeyCode::Char('@'), ctrl)));
+        assert!(sp.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)));
+        assert!(!sp.matches(&KeyEvent::new(KeyCode::Char('b'), ctrl)));
+        // Ctrl+b matches only Ctrl+b.
+        let cb = PrefixSpec::parse("ctrl+b").unwrap();
+        assert!(cb.matches(&KeyEvent::new(KeyCode::Char('b'), ctrl)));
+        assert!(!cb.matches(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
+        assert!(!cb.matches(&KeyEvent::new(KeyCode::Char(' '), ctrl)));
+        // The literal byte a double-press forwards: Ctrl+b → 0x02, Space → NUL.
+        assert_eq!(cb.literal_bytes(), vec![0x02]);
+        assert_eq!(sp.literal_bytes(), vec![0x00]);
+    }
+
+    #[test]
+    fn apply_tmux_preset_sets_prefix_and_split_keys() {
+        let _env = crate::persist::test_env("tmux-preset");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.apply_preset("tmux"));
+        assert_eq!(app.prefix, PrefixSpec::parse("ctrl+b").unwrap());
+        assert_eq!(app.keymap.get("%"), Some(&Cmd::SplitRight));
+        assert_eq!(app.keymap.get("\""), Some(&Cmd::SplitDown));
+        // tmux pane/window/session keys map onto bohay's commands.
+        assert_eq!(app.keymap.get("o"), Some(&Cmd::NextPane));
+        assert_eq!(app.keymap.get(","), Some(&Cmd::RenameTab));
+        assert_eq!(app.keymap.get(")"), Some(&Cmd::NextWorkspace));
+        assert_eq!(app.keymap.get("("), Some(&Cmd::PrevWorkspace));
+        // The default split keys are gone under the preset.
+        assert_ne!(app.keymap.get("v"), Some(&Cmd::SplitRight));
+        // `default` restores bohay's own prefix and keys.
+        assert!(app.apply_preset("default"));
+        assert_eq!(app.prefix, PrefixSpec::default());
+        assert_eq!(app.keymap.get("v"), Some(&Cmd::SplitRight));
+        assert!(!app.apply_preset("bogus"));
+    }
+
+    #[test]
+    fn set_prefix_rejects_a_modifierless_chord() {
+        let _env = crate::persist::test_env("set-prefix");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.set_prefix("ctrl+a"));
+        assert_eq!(app.prefix, PrefixSpec::parse("ctrl+a").unwrap());
+        // A bad spec is refused and the previous prefix is kept.
+        assert!(!app.set_prefix("x"));
+        assert_eq!(app.prefix, PrefixSpec::parse("ctrl+a").unwrap());
     }
 
     #[test]
@@ -571,6 +893,109 @@ mod tests {
             panes + 1,
             "Ctrl+Space+v splits the pane"
         );
+    }
+
+    #[test]
+    fn status_bar_shows_search_and_the_live_prefix() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("status-prefix-hint");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+
+        let screen = |app: &mut App| -> String {
+            let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            term.draw(|f| crate::ui::render(f, app)).unwrap();
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<Vec<_>>()
+                .join("")
+        };
+
+        // Normal mode shows the live prefix chord (default Ctrl+Space).
+        assert!(
+            screen(&mut app).contains("Ctrl+Space"),
+            "default prefix shown"
+        );
+
+        // Enter prefix mode: the hint bar includes the search key `/`.
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        let bar = screen(&mut app);
+        assert!(
+            bar.contains('/'),
+            "prefix hint bar shows the `/` search key"
+        );
+
+        // Back in normal mode, after switching to Ctrl+b the readout reflects it.
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.set_prefix("ctrl+b"));
+        assert!(
+            screen(&mut app).contains("Ctrl+B"),
+            "status bar reflects the custom prefix"
+        );
+    }
+
+    #[test]
+    fn a_custom_prefix_drives_command_mode() {
+        let _env = crate::persist::test_env("custom-prefix");
+        use crate::event::AppEvent;
+        let key = |c, m| AppEvent::Key(KeyEvent::new(KeyCode::Char(c), m));
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // Switch the prefix to Ctrl+b (the tmux chord).
+        assert!(app.set_prefix("ctrl+b"));
+        let tabs = app.ws().tabs.len();
+
+        // Ctrl+b then `c` opens a tab through the configured prefix.
+        app.handle_event(key('b', KeyModifiers::CONTROL));
+        app.handle_event(key('c', KeyModifiers::NONE));
+        assert_eq!(app.ws().tabs.len(), tabs + 1, "Ctrl+b prefix works");
+
+        // The old Ctrl+Space is no longer the prefix: `c` after it does nothing.
+        app.handle_event(key(' ', KeyModifiers::CONTROL));
+        app.handle_event(key('c', KeyModifiers::NONE));
+        assert_eq!(
+            app.ws().tabs.len(),
+            tabs + 1,
+            "Ctrl+Space no longer opens command mode"
+        );
+    }
+
+    #[test]
+    fn next_pane_cycles_and_rename_tab_opens_the_modal() {
+        let _env = crate::persist::test_env("next-pane-rename");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // One pane: cycling is a no-op.
+        let only = app.layout().focus;
+        app.run_cmd(Cmd::NextPane);
+        assert_eq!(app.layout().focus, only, "single pane: no cycle");
+
+        // Split into two, then `o` cycles focus between them and wraps.
+        app.run_cmd(Cmd::SplitRight);
+        let leaves = app.layout().leaves();
+        assert_eq!(leaves.len(), 2);
+        let start = app.layout().focus;
+        app.run_cmd(Cmd::NextPane);
+        let second = app.layout().focus;
+        assert_ne!(second, start, "moved to the other pane");
+        app.run_cmd(Cmd::NextPane);
+        assert_eq!(app.layout().focus, start, "wrapped back");
+
+        // RenameTab opens the tab-rename modal for the active tab.
+        assert!(app.tab_rename.is_none());
+        app.run_cmd(Cmd::RenameTab);
+        assert!(app.tab_rename.is_some(), "rename tab opened the modal");
     }
 
     #[test]

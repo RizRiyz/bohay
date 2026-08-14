@@ -3,6 +3,8 @@
 //! per agent (cursor + scroll like the orch board). Data is precomputed into
 //! `MissionRowView`s by `App::build_mission_rows`, so drawing borrows no `App`.
 
+use std::borrow::Cow;
+
 use super::*;
 use crate::i18n::Catalog;
 use crate::mission::MissionRowView;
@@ -75,19 +77,32 @@ fn fmt_cost(c: f64) -> String {
     }
 }
 
+/// ASCII case-insensitive substring test that allocates nothing. `needle` must
+/// already be lowercase (every caller passes a literal).
+fn contains_ignore_case(hay: &str, needle: &str) -> bool {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    if n.is_empty() || h.len() < n.len() {
+        return n.is_empty();
+    }
+    h.windows(n.len())
+        .any(|w| w.iter().zip(n).all(|(a, b)| a.to_ascii_lowercase() == *b))
+}
+
 /// A short model tag for the model column (`opus`, `sonnet`, `gpt-4o`, …), else a
 /// truncated id.
-fn short_model(m: &str) -> String {
-    let l = m.to_lowercase();
+fn short_model(m: &str) -> Cow<'static, str> {
+    // Match without folding the whole string: this runs per row per frame while
+    // the tab is open, and a known model hits one of the borrowed arms below, so
+    // the common case allocates nothing at all.
     for k in ["opus", "sonnet", "haiku", "gpt-5", "gpt-4o", "o3", "o1"] {
-        if l.contains(k) {
-            return k.to_string();
+        if contains_ignore_case(m, k) {
+            return Cow::Borrowed(k);
         }
     }
     if m.is_empty() {
-        String::new()
+        Cow::Borrowed("")
     } else {
-        truncate(m, 8)
+        Cow::Owned(truncate(m, 8))
     }
 }
 
@@ -145,7 +160,7 @@ fn row_line(r: &MissionRowView, w: usize, t: &Theme) -> Line<'static> {
         (room.as_str(), warn),
         (tokens.as_str(), t.subtext0),
         (cost.as_str(), t.green),
-        (model.as_str(), t.mint),
+        (model.as_ref(), t.mint),
         (r.location.as_str(), t.overlay1),
     ];
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -187,7 +202,7 @@ fn row_line(r: &MissionRowView, w: usize, t: &Theme) -> Line<'static> {
 /// a glance where the spend goes (docs/54). Cheap — a small aggregate over the
 /// already-built rows, drawn only while the tab is open.
 fn draw_cost_chart(f: &mut RenderTarget, area: Rect, rows: &[MissionRowView], t: &Theme) {
-    let mut map: Vec<(String, f64)> = Vec::new();
+    let mut map: Vec<(Cow<'static, str>, f64)> = Vec::new();
     for r in rows {
         if let Some(c) = r.usage.as_ref().and_then(|u| u.cost) {
             let m = short_model(&r.usage.as_ref().unwrap().model);

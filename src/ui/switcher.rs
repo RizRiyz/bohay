@@ -1,5 +1,6 @@
-//! The touch **switcher** overlay (docs/18): a full-screen list of agents and
-//! nodes with big, finger-sized rows. Drawn last, over everything.
+//! The **switcher** / jump-palette overlay (docs/18 + docs/65): scope chips, a
+//! type-to-filter line, then big finger-sized rows for tabs, workspaces, and
+//! agents. Drawn last, over everything.
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -15,6 +16,7 @@ const ITEM_H: u16 = 2;
 
 pub(super) fn draw_switcher(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     app.switcher_rects.clear();
+    app.switcher_scope_rects.clear();
     // Dim the whole screen.
     {
         let buf = f.buffer_mut();
@@ -46,11 +48,54 @@ pub(super) fn draw_switcher(f: &mut RenderTarget, area: Rect, app: &mut App, t: 
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
+
+    // Scope chips (docs/65): All | Agents | Tabs | Workspaces. The active one is
+    // filled; each chip is a click target recorded for the mouse handler.
+    let mut cx = inner.x + 1;
+    let chip_y = inner.y + 1;
+    for scope in crate::app::SwitcherScope::ALL {
+        let label = format!(" {} ", scope.label(app.catalog));
+        let cw = super::display_width(&label) as u16;
+        if cx + cw > inner.right() {
+            break;
+        }
+        let active = scope == app.switcher_scope;
+        let style = if active {
+            Style::new().fg(t.crust).bg(t.accent).bold()
+        } else {
+            Style::new().fg(t.subtext0)
+        };
+        let rect = Rect::new(cx, chip_y, cw, 1);
+        f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        app.switcher_scope_rects.push((scope, rect));
+        cx += cw + 1;
+    }
+
+    // Filter line (docs/65): the live query, or a dim hint when empty.
+    let query_y = inner.y + 2;
+    let query_line = if app.switcher_query.is_empty() {
+        Line::from(Span::styled(
+            format!(" {}", app.catalog.switch_filter_hint),
+            Style::new().fg(t.overlay0),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" ", Style::new()),
+            Span::styled("/ ", Style::new().fg(t.overlay0)),
+            Span::styled(app.switcher_query.clone(), Style::new().fg(t.text).bold()),
+            Span::styled("▏", Style::new().fg(t.accent)),
+        ])
+    };
+    f.render_widget(
+        Paragraph::new(query_line),
+        Rect::new(inner.x, query_y, inner.width, 1),
+    );
+
     let list = Rect::new(
         inner.x + 1,
-        inner.y + 2,
+        inner.y + 4,
         inner.width.saturating_sub(2),
-        inner.height.saturating_sub(3),
+        inner.height.saturating_sub(5),
     );
 
     let rows = app.switcher_rows();
@@ -192,6 +237,20 @@ fn item_lines<'a>(
                 Span::styled(arrow, Style::new().fg(t.accent)),
                 Span::styled(format!("{} ", state.dot()), Style::new().fg(state.color(t))),
                 Span::styled(title.clone(), Style::new().fg(t.text).bold()),
+            ]);
+            let l2 = Line::from(Span::styled(location.clone(), Style::new().fg(t.subtext0)));
+            (Some(*target), l1, l2)
+        }
+        SwitcherRow::Tab {
+            target,
+            name,
+            location,
+            active,
+        } => {
+            let name_fg = if *active { t.accent } else { t.text };
+            let l1 = Line::from(vec![
+                Span::styled(arrow, Style::new().fg(t.accent)),
+                Span::styled(name.clone(), Style::new().fg(name_fg).bold()),
             ]);
             let l2 = Line::from(Span::styled(location.clone(), Style::new().fg(t.subtext0)));
             (Some(*target), l1, l2)

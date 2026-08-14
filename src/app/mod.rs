@@ -38,10 +38,13 @@ mod switcher;
 
 pub use search::{GlobalSearch, SearchFlash, SearchHit};
 
-pub use keys::{key_reference_rows, Cmd, KEY_REFERENCE};
+pub use keys::{key_reference_rows, presets, Cmd, KEY_REFERENCE};
 pub use modules::ModuleMenuAction;
 pub use picker::{FolderPicker, Row};
-pub use settings::{GeneralRow, LayoutRow, ModuleRow, SettingsTab, SettingsUi};
+pub use settings::{
+    GeneralRow, LayoutRow, ModuleRow, SettingsTab, SettingsUi, KEYS_HEADER_ROWS, KEYS_PREFIX_ROW,
+    KEYS_PRESET_ROW,
+};
 
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
@@ -417,6 +420,11 @@ pub const COMPACT_WIDTH: u16 = 50;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SwitcherTarget {
     Pane(PaneId),
+    /// A tab, addressed by its workspace + tab index (docs/65 — the window list).
+    Tab {
+        ws: usize,
+        tab: usize,
+    },
     Workspace(usize),
     NewWorkspace,
 }
@@ -430,6 +438,13 @@ pub enum SwitcherRow {
         title: String,
         location: String,
     },
+    /// A tab row (docs/65): a jump to a specific tab in a workspace.
+    Tab {
+        target: SwitcherTarget,
+        name: String,
+        location: String,
+        active: bool,
+    },
     Node {
         target: SwitcherTarget,
         name: String,
@@ -440,6 +455,48 @@ pub enum SwitcherRow {
         target: SwitcherTarget,
         label: String,
     },
+}
+
+/// Which sections the switcher shows (docs/65). `All` lists everything; the
+/// others narrow to one category so `w` (window list) and `s` (session tree) can
+/// open the switcher pre-scoped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SwitcherScope {
+    All,
+    Agents,
+    Tabs,
+    Workspaces,
+}
+
+impl SwitcherScope {
+    /// The chip order (also the `Tab`-to-cycle order).
+    pub const ALL: [SwitcherScope; 4] = [
+        SwitcherScope::All,
+        SwitcherScope::Agents,
+        SwitcherScope::Tabs,
+        SwitcherScope::Workspaces,
+    ];
+
+    /// True if this scope shows `section` (one of Agents/Tabs/Workspaces).
+    pub fn shows(self, section: SwitcherScope) -> bool {
+        self == SwitcherScope::All || self == section
+    }
+
+    /// The next scope in the chip order (wraps), for `Tab`.
+    pub fn next(self) -> SwitcherScope {
+        let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// Localized chip label.
+    pub fn label(self, cat: &crate::i18n::Catalog) -> &'static str {
+        match self {
+            SwitcherScope::All => cat.switch_scope_all,
+            SwitcherScope::Agents => cat.agents,
+            SwitcherScope::Tabs => cat.switch_scope_tabs,
+            SwitcherScope::Workspaces => cat.workspaces,
+        }
+    }
 }
 
 /// A right-click context menu on a FILES-dock row (docs/38 FILE-6): file/folder
@@ -923,6 +980,8 @@ pub struct App {
     pub config: crate::config::Config,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
+    /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
+    pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
     pub settings: Option<SettingsUi>,
     /// The open folder picker (workspace chooser), if any (captures input).
@@ -1155,8 +1214,14 @@ pub struct App {
     /// Scroll offset (in item rows) so the switcher works with more
     /// agents/nodes than fit on a phone screen.
     pub switcher_scroll: usize,
+    /// Type-to-filter query for the switcher palette (docs/65). Empty = no filter.
+    pub switcher_query: String,
+    /// Which section(s) the switcher lists (docs/65).
+    pub switcher_scope: SwitcherScope,
     /// Each switcher row's target + clickable rect, set by the renderer.
     pub switcher_rects: Vec<(SwitcherTarget, Rect)>,
+    /// The scope chips' rects (docs/65), set by the renderer for click-to-switch.
+    pub switcher_scope_rects: Vec<(SwitcherScope, Rect)>,
     /// The `≡` switcher button's rect (compact mode), for tap hit-testing.
     pub switcher_button_rect: Option<Rect>,
     /// The global scrollback-search overlay (docs/63). `Some` => it owns input.
@@ -1245,6 +1310,9 @@ pub struct App {
     pub version_rect: Option<Rect>,
     /// The changelog modal's close button, for mouse hit-testing.
     pub changelog_close_rect: Option<Rect>,
+    /// The changelog modal's "check for updates" button. `None` when the modal is
+    /// shut, and also when the title row is too narrow to hold it.
+    pub changelog_check_rect: Option<Rect>,
     /// Clickable links on the changelog modal's **visible** rows: commit and PR
     /// refs from the notes, plus the "read it all on bohay.dev" row at the end.
     /// Rebuilt each frame from the rows actually on screen, so scrolling a link
@@ -1298,6 +1366,7 @@ impl App {
         let sidebars = Sidebars::from_config(&config.sidebars());
         let shell = crate::platform::resolve_shell(&config.shell);
         let keymap = keys::build_keymap(&config.keybindings);
+        let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
 
         let id = PaneId::alloc();
         let pane = Pane::spawn(
@@ -1336,6 +1405,7 @@ impl App {
             catalog,
             config,
             keymap,
+            prefix,
             agent_names: HashMap::new(),
             settings: None,
             picker: None,
@@ -1454,7 +1524,10 @@ impl App {
             search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
+            switcher_query: String::new(),
+            switcher_scope: SwitcherScope::All,
             switcher_rects: Vec::new(),
+            switcher_scope_rects: Vec::new(),
             switcher_button_rect: None,
             last_active_ws_shown: 0,
             hover: None,
@@ -1487,6 +1560,7 @@ impl App {
             right_sidebar_toggle_rect: None,
             version_rect: None,
             changelog_close_rect: None,
+            changelog_check_rect: None,
             changelog_link_rects: Vec::new(),
             changelog_rows: None,
             settings_icon_rect: None,
@@ -1523,6 +1597,7 @@ impl App {
         let config = crate::config::load();
         let files_show_hidden = config.layout.files_show_hidden;
         let keymap = keys::build_keymap(&config.keybindings);
+        let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let shell = crate::platform::resolve_shell(&config.shell);
         let scrollback = config.scrollback();
         let modules = crate::module::registry::load();
@@ -1753,6 +1828,7 @@ impl App {
             catalog,
             config,
             keymap,
+            prefix,
             agent_names,
             settings: None,
             picker: None,
@@ -1871,7 +1947,10 @@ impl App {
             search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
+            switcher_query: String::new(),
+            switcher_scope: SwitcherScope::All,
             switcher_rects: Vec::new(),
+            switcher_scope_rects: Vec::new(),
             switcher_button_rect: None,
             last_active_ws_shown: 0,
             hover: None,
@@ -1904,6 +1983,7 @@ impl App {
             right_sidebar_toggle_rect: None,
             version_rect: None,
             changelog_close_rect: None,
+            changelog_check_rect: None,
             changelog_link_rects: Vec::new(),
             changelog_rows: None,
             settings_icon_rect: None,
@@ -1947,11 +2027,20 @@ impl App {
         self.save_sidebars();
     }
 
-    /// Show/hide a sidebar (runtime-only, like the original `Ctrl+Space b`; not
-    /// persisted, so a session always starts from the configured layout).
+    /// Show/hide a sidebar (runtime-only; not persisted, so a session always
+    /// starts from the configured layout). The `»`/`«` chevrons use this per side.
     pub fn toggle_side(&mut self, side: Side) {
         let s = self.sidebars.get_mut(side);
         s.visible = !s.visible;
+    }
+
+    /// Show/hide **both** sidebars at once (`Ctrl+Space b`): if either is showing,
+    /// collapse both for a full-width view; otherwise bring both back. Runtime-only
+    /// like [`toggle_side`](Self::toggle_side).
+    pub fn toggle_all_sides(&mut self) {
+        let target = !(self.sidebars.left.visible || self.sidebars.right.visible);
+        self.sidebars.left.visible = target;
+        self.sidebars.right.visible = target;
     }
 
     /// Write the current sidebar layout into `config` and persist it, mirroring
@@ -3359,6 +3448,19 @@ impl App {
     fn focus_dir(&mut self, dir: Dir) {
         let area = self.last_pane_area;
         self.layout_mut().focus_dir(area, dir);
+    }
+
+    /// Cycle focus to the next pane in the current tab, in leaf order, wrapping
+    /// at the end (tmux's `o`). A no-op with fewer than two panes.
+    fn focus_next_pane(&mut self) {
+        let leaves = self.layout().leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        let focus = self.layout().focus;
+        let idx = leaves.iter().position(|&id| id == focus).unwrap_or(0);
+        let next = leaves[(idx + 1) % leaves.len()];
+        self.layout_mut().focus = next;
     }
 
     // ── pane resize (docs/27) ───────────────────────────────────────────────
@@ -6569,6 +6671,35 @@ mod tests {
     }
 
     #[test]
+    fn codex_pane_menu_offers_and_runs_native_fork() {
+        let _env = crate::persist::test_env("fork-codex-pane-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let src = app.layout().focus;
+        let before = app.layout().len();
+        {
+            let st = app.status.get_mut(&src).unwrap();
+            st.agent = "codex".into();
+            st.agent_session = Some(AgentSession {
+                agent: "codex".into(),
+                session_id: "019c1234-abcd-7890-abcd-ef0123456789".into(),
+            });
+        }
+
+        app.open_pane_menu(src, 1, 1);
+        assert!(
+            app.pane_menu_items().contains(&PaneMenuItem::ForkPane),
+            "right-click menu exposes fork for Codex"
+        );
+        app.pane_menu_action(PaneMenuItem::ForkPane);
+
+        assert_eq!(app.layout().len(), before + 1, "Codex fork opens a pane");
+        let fork = app.layout().focus;
+        assert_ne!(fork, src);
+        assert_eq!(app.status.get(&fork).unwrap().agent, "codex");
+    }
+
+    #[test]
     fn sidebar_lists_scroll() {
         use ratatui::backend::TestBackend;
         use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
@@ -6979,7 +7110,7 @@ mod tests {
         assert_eq!(app.settings.as_ref().unwrap().tab, SettingsTab::Keys);
         let idx = Cmd::ALL.iter().position(|c| *c == Cmd::NewTab).unwrap();
         if let Some(ui) = app.settings.as_mut() {
-            ui.cursor = idx;
+            ui.cursor = idx + crate::app::KEYS_HEADER_ROWS;
         }
         app.handle_event(AppEvent::Key(KeyEvent::new(
             KeyCode::Enter,

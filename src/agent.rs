@@ -88,10 +88,12 @@ static SOURCES: &[SessionSource] = &[
             base: codex_base,
             recent: codex_recent,
             latest: codex_latest,
-            list: None,
+            list: Some(codex_list),
         }),
         resume: |q| format!("codex resume {q}\r"),
-        fork: None,
+        // `fork` creates a new conversation from the selected rollout while
+        // leaving the source session untouched.
+        fork: Some(|q| format!("codex fork {q}\r")),
     },
     SessionSource {
         name: "kimi",
@@ -288,9 +290,14 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     const STANDALONE: &[&str] = &["--continue", "--fork-session", "--print", "-p"];
 
     let mut i = 0;
-    // Codex selects a session with a positional `resume <id>` subcommand rather
-    // than a flag, so drop it when it leads the captured argv.
-    if agent == "codex" && launch.first().map(String::as_str) == Some("resume") {
+    // Codex selects a session with positional `resume <id>` / `fork <id>`
+    // subcommands rather than flags, so drop either when it leads the captured
+    // argv. A restored fork must resume its new id, not fork the parent again.
+    if agent == "codex"
+        && launch
+            .first()
+            .is_some_and(|s| matches!(s.as_str(), "resume" | "fork"))
+    {
         i = 1;
         if launch.get(1).is_some_and(|v| !v.starts_with('-')) {
             i = 2;
@@ -826,6 +833,20 @@ fn codex_latest(base: &Path, cwd: &Path) -> Option<String> {
     None
 }
 
+/// Every Codex session for `cwd`, newest first. Forked Codex panes share a
+/// working directory, so persistence needs the ranked list to keep the parent
+/// and fork attached to different rollouts after a server restart.
+fn codex_list(base: &Path, cwd: &Path) -> Vec<String> {
+    let mut files = codex_rollout_files(base);
+    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    files
+        .into_iter()
+        .filter_map(|(_, path)| read_codex_session(&path))
+        .filter(|(_, dir)| dir == cwd)
+        .map(|(id, _)| id)
+        .collect()
+}
+
 // ── Kimi Code CLI ───────────────────────────────────────────────────────────
 // Session data lives at `<base>/sessions/<workDirKey>/<sessionId>/`, and a
 // top-level `session_index.jsonl` records one JSON object per line carrying
@@ -1300,9 +1321,18 @@ mod tests {
         .unwrap();
         fs::write(day.join("notes.txt"), "ignored").unwrap(); // non-rollout skipped
 
+        // A second rollout in the same folder represents a fork. Discovery
+        // keeps both so persistence can assign one to each pane.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(
+            day2.join("rollout-2025-01-23T10-00-00-ccc.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"ccc\",\"cwd\":\"/work/app\"}}\n",
+        )
+        .unwrap();
+
         assert_eq!(
             codex_latest(&base, Path::new("/work/app")).as_deref(),
-            Some("aaa")
+            Some("ccc")
         );
         assert_eq!(
             codex_latest(&base, Path::new("/work/api")).as_deref(),
@@ -1312,6 +1342,11 @@ mod tests {
         let recent = codex_recent(&base, 10);
         assert_eq!(recent.len(), 2);
         assert!(recent.iter().all(|s| s.agent == "codex"));
+        assert_eq!(
+            codex_list(&base, Path::new("/work/app")),
+            vec!["ccc", "aaa"],
+            "fork and parent are both available, newest first"
+        );
     }
 
     #[test]
@@ -1433,9 +1468,13 @@ mod tests {
             ),
             vec!["--verbose"]
         );
-        // Codex selects a session with a positional `resume <id>` subcommand.
+        // Codex selects a session with positional resume/fork subcommands.
         assert_eq!(
             f("codex", &["resume", "sess_9", "--model", "o3"]),
+            vec!["--model", "o3"]
+        );
+        assert_eq!(
+            f("codex", &["fork", "sess_9", "--model", "o3"]),
             vec!["--model", "o3"]
         );
         // A kept flag keeps its value.
@@ -1513,14 +1552,17 @@ mod tests {
         // shell-quoted like resume, and unsafe ids are refused.
         let claude = fork_command("claude", "abc").unwrap();
         assert!(claude.contains("claude --resume") && claude.contains("--fork-session"));
+        assert_eq!(
+            fork_command("codex", "c1").as_deref(),
+            Some("codex fork 'c1'\r")
+        );
         assert!(fork_command("pi", "0198abcd-uuid")
             .unwrap()
             .contains("pi --fork"));
-        assert!(can_fork("claude") && can_fork("pi"));
+        assert!(can_fork("claude") && can_fork("codex") && can_fork("pi"));
         // Resume-capable, but no native fork (the copy-then-resume tier is future).
-        assert!(fork_command("codex", "c1").is_none());
         assert!(fork_command("grok", "g1").is_none());
-        assert!(!can_fork("codex") && !can_fork("copilot") && !can_fork("grok"));
+        assert!(!can_fork("copilot") && !can_fork("grok"));
         assert!(!can_fork("cursor"));
         // Unknown agent / unsafe / empty id all refuse.
         assert!(fork_command("unknown", "x").is_none());

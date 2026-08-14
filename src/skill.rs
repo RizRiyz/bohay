@@ -16,9 +16,39 @@
 
 use std::path::{Path, PathBuf};
 
-/// The full skill text: the single source shared by `bohay skill`,
-/// `skill install`, and the Claude Code auto-install.
+/// The full skill text compiled into this binary: the release default, and the
+/// fallback when no OTA update has been fetched.
 pub const SKILL: &str = include_str!("../skills/bohay/SKILL.md");
+
+/// The skill text actually in use: the OTA-updated copy in the managed cache
+/// (`~/.bohay/skill/SKILL.md`, written by `bohay skill update`) when present and
+/// valid, else the compiled-in [`SKILL`]. This is what lets a skill fix reach
+/// users between releases; a missing, empty, or garbled cache falls back safely.
+pub fn effective_skill() -> std::borrow::Cow<'static, str> {
+    let cached = crate::persist::skill_dir().join("SKILL.md");
+    match std::fs::read_to_string(&cached) {
+        Ok(s) if skill_valid(&s) => std::borrow::Cow::Owned(s),
+        _ => std::borrow::Cow::Borrowed(SKILL),
+    }
+}
+
+/// Cheap sanity check for a skill download: the bohay skill's YAML frontmatter
+/// (`name: bohay`) plus a sensible size, so a 404 page or a truncated fetch is
+/// rejected before it can replace the working skill.
+pub fn skill_valid(s: &str) -> bool {
+    let t = s.trim_start();
+    t.starts_with("---") && t.contains("name: bohay") && (400..200_000).contains(&s.len())
+}
+
+/// Save an OTA-fetched skill into the managed cache (`~/.bohay/skill/SKILL.md`),
+/// creating the dir. Returns the cache path. `effective_skill` reads it back.
+pub fn save_managed(text: &str) -> std::io::Result<PathBuf> {
+    let dir = crate::persist::skill_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
 
 // ── full skill (Claude Code) ────────────────────────────────────────────────
 
@@ -26,7 +56,7 @@ pub const SKILL: &str = include_str!("../skills/bohay/SKILL.md");
 pub fn install_to(dir: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join("SKILL.md");
-    std::fs::write(&path, SKILL)?;
+    std::fs::write(&path, effective_skill().as_bytes())?;
     Ok(path)
 }
 
@@ -155,7 +185,8 @@ pub fn install_default() -> Vec<PathBuf> {
     let mut done = Vec::new();
     if let Some(dir) = claude_skill_dir() {
         let path = dir.join("SKILL.md");
-        let current = std::fs::read_to_string(&path).ok().as_deref() == Some(SKILL);
+        let eff = effective_skill();
+        let current = std::fs::read_to_string(&path).ok().as_deref() == Some(eff.as_ref());
         if current {
             done.push(path);
         } else if let Ok(p) = install_to(&dir) {
@@ -199,6 +230,9 @@ mod tests {
 
     #[test]
     fn install_to_writes_the_bundled_skill() {
+        // Isolate the home so no real OTA cache is picked up: with none present,
+        // the effective skill is the compiled-in default.
+        let _env = crate::persist::test_env("skill-install");
         let dir = std::env::temp_dir().join("bohay-skill-install-test");
         let _ = std::fs::remove_dir_all(&dir);
         let path = install_to(&dir).expect("install");
@@ -206,6 +240,49 @@ mod tests {
         // Sanity: it really is the delegation skill, not an empty file.
         assert!(SKILL.contains("agent send") && SKILL.contains("name: bohay"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_valid_accepts_a_real_skill_and_rejects_junk() {
+        assert!(skill_valid(SKILL), "the bundled skill validates");
+        assert!(!skill_valid(""), "empty is rejected");
+        assert!(
+            !skill_valid("<html>404 Not Found</html>"),
+            "a 404 page is rejected"
+        );
+        assert!(
+            !skill_valid("---\nname: something-else\n---\nbody"),
+            "wrong frontmatter is rejected"
+        );
+    }
+
+    #[test]
+    fn effective_skill_prefers_the_managed_cache() {
+        let _env = crate::persist::test_env("skill-ota");
+        let _ = std::fs::remove_dir_all(crate::persist::skill_dir()); // fresh: no leftover cache
+                                                                      // No cache yet -> the compiled-in default.
+        assert_eq!(effective_skill(), SKILL);
+
+        // An OTA'd (valid) skill in the managed cache wins, and install_to writes
+        // it instead of the default.
+        let ota = format!(
+            "---\nname: bohay\ndescription: updated\n---\n\n# bohay\n\nagent send is here.\n{}",
+            "Body long enough to clear the size floor. ".repeat(12)
+        );
+        let ota = ota.as_str();
+        let cache = save_managed(ota).expect("save managed");
+        assert!(cache.ends_with("SKILL.md"));
+        assert_eq!(effective_skill(), ota);
+
+        let dir = std::env::temp_dir().join("bohay-skill-ota-install");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = install_to(&dir).expect("install");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ota);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A garbled cache is ignored -> fall back to the default (never break).
+        save_managed("not a skill").unwrap();
+        assert_eq!(effective_skill(), SKILL);
     }
 
     #[test]

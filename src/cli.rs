@@ -84,6 +84,7 @@ panes / agents:
   skill                      print the agent skill (teaches an agent to delegate)
   skill install [--dir <p>]  install the skill where a coding agent auto-loads it
   skill uninstall [--dir <p>]   remove the installed skill
+  skill update               fetch the latest skill from the bohay repo (no reinstall)
   skill on | off             enable / disable auto-install (installs / removes now)
   wait output <id> --match <text> [--timeout <s>]    block until output appears
   wait agent-status <id> --status done|blocked|working|idle [--timeout <s>]
@@ -677,8 +678,30 @@ fn skill_cmd(rest: &[String]) -> Result<i32> {
             println!("(restart the server to stop reinstalling)");
             Ok(0)
         }
+        // OTA: fetch the latest skill from the repo (or `$BOHAY_SKILL_URL`) and
+        // cache it so it wins over the compiled-in default, then apply it now —
+        // a skill fix without waiting for a new bohay release. No server needed.
+        Some("update") => {
+            let url = flag(rest, "--url")
+                .or_else(|| std::env::var("BOHAY_SKILL_URL").ok())
+                .unwrap_or_else(|| {
+                    "https://raw.githubusercontent.com/RizRiyz/bohay/main/skills/bohay/SKILL.md"
+                        .to_string()
+                });
+            let body = crate::module::discovery::http_get(&url)
+                .map_err(|e| anyhow!("could not fetch the skill ({url}): {e}"))?;
+            if !crate::skill::skill_valid(&body) {
+                return Err(anyhow!(
+                    "the download from {url} is not a valid bohay skill; nothing changed"
+                ));
+            }
+            let cache = crate::skill::save_managed(&body)?;
+            println!("updated the bohay skill -> {}", cache.display());
+            print_touched("refreshed", crate::skill::install_default());
+            Ok(0)
+        }
         _ => {
-            print!("{}", crate::skill::SKILL);
+            print!("{}", crate::skill::effective_skill());
             Ok(0)
         }
     }

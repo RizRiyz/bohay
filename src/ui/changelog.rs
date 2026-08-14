@@ -57,6 +57,31 @@ pub(super) fn draw_changelog(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         close,
     );
     app.changelog_close_rect = Some(close);
+
+    // ── "check for updates", to the left of the close button ──
+    // The periodic check runs every few hours, so someone who just heard about a
+    // release wants to ask *now* rather than wait for the next tick. Only drawn
+    // when it fits beside the title: a truncated button is worse than no button,
+    // and the modal can be as narrow as 50 columns. Reuses the Settings toggle's
+    // label so the two can never drift apart.
+    let label = cat.set_check_updates;
+    let btn_w = display_width(label) as u16 + 2; // one space either side
+    let title_w = display_width(cat.changelog) as u16 + 4 + env!("CARGO_PKG_VERSION").len() as u16;
+    app.changelog_check_rect = None;
+    if close.x > inner.x + title_w + btn_w {
+        let btn = Rect::new(close.x.saturating_sub(btn_w), inner.y, btn_w, 1);
+        let hot = app
+            .hover
+            .is_some_and(|(hx, hy)| hy == btn.y && hx >= btn.x && hx < btn.right());
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {label} "),
+                Style::new().fg(if hot { t.accent } else { t.subtext0 }),
+            )),
+            btn,
+        );
+        app.changelog_check_rect = Some(btn);
+    }
     hline(f, inner.x, inner.y + 1, inner.width, t);
 
     // ── "how to update" header, always shown above the notes ──
@@ -627,5 +652,75 @@ mod tests {
                 "each row keeps the link: {row:?}"
             );
         }
+    }
+
+    /// The button is on the title row, left of the close ✕, and never overlaps it.
+    #[test]
+    fn check_for_updates_button_sits_beside_the_close_box() {
+        let _env = crate::persist::test_env("cl-check-btn");
+        let (app, _term) = open();
+        let btn = app.changelog_check_rect.expect("button drawn at 110 cols");
+        let close = app.changelog_close_rect.expect("close drawn");
+        assert_eq!(btn.y, close.y, "same row as the close box");
+        assert_eq!(btn.right(), close.x, "sits immediately left of it");
+    }
+
+    /// On a phone-width terminal there is no room beside the title, and a button
+    /// truncated into the version number is worse than no button. It hides, and
+    /// leaves no stale rect behind for a click to land on.
+    #[test]
+    fn the_button_hides_rather_than_collide_on_a_narrow_terminal() {
+        let _env = crate::persist::test_env("cl-check-narrow");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 20, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        app.open_changelog();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            app.changelog_check_rect.is_none(),
+            "no button, and nothing to click"
+        );
+        assert!(app.changelog_close_rect.is_some(), "close box still there");
+    }
+
+    /// A click on it must not fall through to the dismiss-on-any-click path: the
+    /// answer is shown in the modal, so closing it would throw the answer away.
+    #[test]
+    fn clicking_check_for_updates_keeps_the_modal_open() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let _env = crate::persist::test_env("cl-check-click");
+        let (mut app, _term) = open();
+        let btn = app.changelog_check_rect.expect("button drawn");
+        app.handle_event(crate::event::AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: btn.x + 1,
+            row: btn.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.changelog_open, "the modal stayed up");
+    }
+
+    /// Every outcome of an asked-for check says something. A button that can
+    /// silently do nothing reads as broken.
+    #[test]
+    fn every_check_outcome_reports_back() {
+        use crate::update::CheckOutcome;
+        let _env = crate::persist::test_env("cl-check-outcome");
+        let (mut app, _term) = open();
+
+        for (outcome, what) in [
+            (CheckOutcome::Current, "up to date"),
+            (CheckOutcome::Failed, "check failed"),
+            (CheckOutcome::Newer("99.0.0".into()), "newer release"),
+        ] {
+            app.toast = None;
+            app.handle_event(crate::event::AppEvent::UpdateChecked(outcome));
+            assert!(app.toast.is_some(), "{what} produced a toast");
+        }
+        assert_eq!(
+            app.update_available.as_deref(),
+            Some("99.0.0"),
+            "a newer release also lights the indicator"
+        );
     }
 }

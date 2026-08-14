@@ -133,6 +133,24 @@ impl App {
                 self.update_available = Some(version);
                 changed // repaint to show the dot only if it's news
             }
+            // The asked-for check always answers, including "nothing new", since a
+            // button that can silently do nothing reads as broken.
+            AppEvent::UpdateChecked(outcome) => {
+                match outcome {
+                    crate::update::CheckOutcome::Newer(v) => {
+                        let msg = format!("{} v{v}", self.catalog.update_available);
+                        self.update_available = Some(v);
+                        self.show_toast(msg);
+                    }
+                    crate::update::CheckOutcome::Current => {
+                        self.show_toast(self.catalog.update_current)
+                    }
+                    crate::update::CheckOutcome::Failed => {
+                        self.show_toast(self.catalog.update_failed)
+                    }
+                }
+                true
+            }
             // Handled by the server loop; never reaches here at runtime.
             AppEvent::ClientConnected { .. } | AppEvent::ClientDetach { .. } => false,
         }
@@ -216,6 +234,17 @@ impl App {
                     self.changelog_scroll = self.changelog_scroll.saturating_add(2)
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
+                    // "Check for updates" asks now and leaves the modal up, so the
+                    // answer lands where it was asked for. Tested before the
+                    // dismiss-on-any-click fallback below, which would otherwise
+                    // swallow it.
+                    if self
+                        .changelog_check_rect
+                        .is_some_and(|r| m.row == r.y && m.column >= r.x && m.column < r.right())
+                    {
+                        crate::update::check_now_reporting(self.app_tx.clone());
+                        return;
+                    }
                     // A click on a commit/PR reference (or the website row at the
                     // end) opens it and **leaves the modal up**, so several can be
                     // followed in a row. Anything else dismisses, as before.
@@ -1562,7 +1591,7 @@ impl App {
         if self.mode == Mode::Normal
             && (self.active_is_git() || self.active_is_orch() || self.active_is_mission())
         {
-            if is_prefix(&key) {
+            if self.prefix.matches(&key) {
                 self.mode = Mode::Prefix;
             } else if self.active_is_orch() {
                 self.handle_orch_key(key);
@@ -1576,10 +1605,12 @@ impl App {
         match self.mode {
             Mode::Prefix => {
                 self.mode = Mode::Normal;
-                // Pressing the prefix twice sends a literal Ctrl-Space (NUL).
-                if is_prefix(&key) {
+                // Pressing the prefix twice sends a literal prefix chord into the
+                // pane (Ctrl+Space → NUL; Ctrl+b → 0x02; etc).
+                if self.prefix.matches(&key) {
+                    let bytes = self.prefix.literal_bytes();
                     if let Some(p) = self.focused() {
-                        p.send(&[0x00]);
+                        p.send(&bytes);
                     }
                     return true; // left prefix mode → the status bar updates
                 }
@@ -1623,7 +1654,7 @@ impl App {
                 true // a prefix command (and leaving prefix mode) changes the UI
             }
             Mode::Normal => {
-                if is_prefix(&key) {
+                if self.prefix.matches(&key) {
                     self.mode = Mode::Prefix;
                     return true; // entered prefix mode → the status bar updates
                 }
@@ -1662,17 +1693,6 @@ impl App {
             Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
-}
-
-/// True if `key` is the prefix chord (Ctrl+Space). Terminals and OSes report
-/// this chord inconsistently — modern Unix terminals send `Char(' ')` + Ctrl,
-/// while the Windows console / some VT terminals send `Char('@')` + Ctrl or a
-/// bare `Null` (the NUL byte Ctrl+Space produces). Accept them all so the prefix
-/// works the same everywhere.
-fn is_prefix(key: &KeyEvent) -> bool {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    matches!(key.code, KeyCode::Null)
-        || (ctrl && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('@')))
 }
 
 /// Encode one mouse-wheel notch as the bytes a mouse-tracking app expects.

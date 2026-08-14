@@ -396,6 +396,7 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
         changelog::draw_changelog(f, area, app, &t);
     } else {
         app.changelog_close_rect = None;
+        app.changelog_check_rect = None;
     }
     // The running-command overlay (click a pane title) draws above that.
     if let Some(c) = app.cmd_inspect.as_ref() {

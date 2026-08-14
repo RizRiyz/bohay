@@ -35,7 +35,7 @@ fn manifest_url() -> String {
 /// published *while the process is already running*, not before it started. At a
 /// 24-hour interval a release cut twenty minutes after a server start stayed
 /// invisible until the following day.
-const CHECK_EVERY: Duration = Duration::from_secs(3 * 60 * 60);
+const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Spawn the background checker: one check shortly after startup, then every
 /// [`CHECK_EVERY`]. Sends [`AppEvent::UpdateAvailable`] only when the manifest
@@ -61,13 +61,40 @@ pub fn check_now(tx: Sender<AppEvent>) {
     thread::spawn(move || check_once(&tx, &manifest_url()));
 }
 
-/// One fetch-compare-report. Takes the URL so tests can point it at a file
-/// without mutating process-wide environment.
+/// What one check found. Only the *asked-for* check reports this.
+///
+/// The periodic check stays silent unless there is news, because a toast every
+/// [`CHECK_EVERY`] saying "nothing changed" is noise nobody asked for. A press of
+/// the changelog's **Check for updates** button is a question, and a question
+/// that gets no answer reads as a broken button, so that path reports all three
+/// outcomes. `Failed` is kept distinct from `Current` on purpose: telling someone
+/// they are up to date when the network call actually failed is a lie.
+pub enum CheckOutcome {
+    Newer(String),
+    Current,
+    Failed,
+}
+
+/// One fetch-compare, with the answer handed back rather than swallowed.
+fn fetch_outcome(url: &str) -> CheckOutcome {
+    match http_get(url).as_deref().and_then(parse_version) {
+        Some(latest) if is_newer(&latest, CURRENT) => CheckOutcome::Newer(latest),
+        Some(_) => CheckOutcome::Current,
+        None => CheckOutcome::Failed,
+    }
+}
+
+/// Check now and report the outcome, whatever it is (the explicit button).
+pub fn check_now_reporting(tx: Sender<AppEvent>) {
+    thread::spawn(move || {
+        let _ = tx.send(AppEvent::UpdateChecked(fetch_outcome(&manifest_url())));
+    });
+}
+
+/// One fetch-compare-report, silent unless there is news. Takes the URL so tests
+/// can point it at a file without mutating process-wide environment.
 fn check_once(tx: &Sender<AppEvent>, url: &str) {
-    let Some(latest) = http_get(url).as_deref().and_then(parse_version) else {
-        return;
-    };
-    if is_newer(&latest, CURRENT) {
+    if let CheckOutcome::Newer(latest) = fetch_outcome(url) {
         let _ = tx.send(AppEvent::UpdateAvailable(latest));
     }
 }

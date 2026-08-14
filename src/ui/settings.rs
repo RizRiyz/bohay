@@ -100,15 +100,27 @@ pub(super) fn draw_settings(
     let footer_y = inner.bottom().saturating_sub(1);
     hline(f, inner.x, footer_y.saturating_sub(1), inner.width, t);
     let c = app.catalog;
-    // On the Keys tab the rebind/reset hints only apply while the cursor is on a
-    // rebindable command; a reference row (past the command list) just scrolls.
-    let on_command = cursor < crate::app::Cmd::ALL.len();
-    let hints: &[(&str, &str)] = if tab == SettingsTab::Keys && on_command {
+    // On the Keys tab the hints depend on which row the cursor is on: the prefix
+    // row and the rebindable commands capture (⏎) and reset (⌫); the preset row
+    // cycles (←→); a reference row (past the command list) just scrolls.
+    let hdr = crate::app::KEYS_HEADER_ROWS;
+    let on_prefix = tab == SettingsTab::Keys && cursor == crate::app::KEYS_PREFIX_ROW;
+    let on_preset = tab == SettingsTab::Keys && cursor == crate::app::KEYS_PRESET_ROW;
+    let on_command =
+        tab == SettingsTab::Keys && cursor >= hdr && cursor < hdr + crate::app::Cmd::ALL.len();
+    let hints: &[(&str, &str)] = if on_prefix || on_command {
         &[
             ("↑↓", c.act_move),
             ("⇥", c.act_section),
             ("⏎", c.act_rebind),
             ("⌫", c.act_reset),
+            ("esc", c.act_close),
+        ]
+    } else if on_preset {
+        &[
+            ("↑↓", c.act_move),
+            ("←→", c.act_adjust),
+            ("⏎", c.act_apply),
             ("esc", c.act_close),
         ]
     } else if tab == SettingsTab::Keys {
@@ -596,12 +608,27 @@ fn draw_content(
             let all = crate::app::Cmd::ALL;
             let dim = |s: &'static str| Span::styled(s, Style::new().fg(t.overlay0));
             let acc = |s: &'static str| Span::styled(s, Style::new().fg(t.accent).bold());
+            let prefix_label = app.prefix.label();
+            // The preset row's value: the matched preset's label, or "Custom".
+            let preset_label = app
+                .current_preset()
+                .map(|i| crate::app::presets()[i].label.to_string())
+                .unwrap_or_else(|| "Custom".to_string());
 
             enum KV {
                 Note(Vec<Span<'static>>),
                 Heading(&'static str),
                 Blank,
                 // Selectable rows carry their cursor index (`sel`).
+                // A labelled value row (the prefix chord / the preset chooser): a
+                // fixed label on the left, a live value on the right.
+                Value {
+                    sel: usize,
+                    label: &'static str,
+                    value: String,
+                    /// Show `‹ value ›` (a chooser) rather than a plain value.
+                    chooser: bool,
+                },
                 Command {
                     sel: usize,
                     cmd: crate::app::Cmd,
@@ -615,9 +642,9 @@ fn draw_content(
             // How to use the prefix (the intro block).
             let mut vis: Vec<KV> = vec![
                 KV::Note(vec![
-                    dim("Press "),
-                    acc("Ctrl+Space"),
-                    dim(", then a key below. Hold or release Ctrl, both work."),
+                    dim("Press the prefix ("),
+                    Span::styled(prefix_label.clone(), Style::new().fg(t.accent).bold()),
+                    dim("), then a key below. Hold or release Ctrl, both work."),
                 ]),
                 KV::Note(vec![
                     dim("Move with arrows or "),
@@ -637,7 +664,24 @@ fn draw_content(
                 ]),
                 KV::Blank,
             ];
-            // The rebindable commands, grouped by section — selectable 0..ALL.len().
+            // The two command-mode rows: the prefix chord and the preset chooser
+            // (docs/64), selectable at rows 0 and 1 (before the commands).
+            vis.push(KV::Heading("Command mode"));
+            vis.push(KV::Value {
+                sel: crate::app::KEYS_PREFIX_ROW,
+                label: "Prefix",
+                value: prefix_label.clone(),
+                chooser: false,
+            });
+            vis.push(KV::Value {
+                sel: crate::app::KEYS_PRESET_ROW,
+                label: "Preset",
+                value: preset_label,
+                chooser: true,
+            });
+            vis.push(KV::Blank);
+            // The rebindable commands, grouped by section — selectable rows start
+            // after the two header rows.
             let mut section = "";
             for (i, cmd) in all.iter().enumerate() {
                 let s = cmd.section();
@@ -648,11 +692,14 @@ fn draw_content(
                     vis.push(KV::Heading(s));
                     section = s;
                 }
-                vis.push(KV::Command { sel: i, cmd: *cmd });
+                vis.push(KV::Command {
+                    sel: crate::app::KEYS_HEADER_ROWS + i,
+                    cmd: *cmd,
+                });
             }
             // The read-only reference blocks — selectable indices continue past the
             // commands, so the cursor flows straight from the last command into them.
-            let mut sel = all.len();
+            let mut sel = crate::app::KEYS_HEADER_ROWS + all.len();
             for (heading, rows) in crate::app::KEY_REFERENCE {
                 vis.push(KV::Blank);
                 vis.push(KV::Heading(heading));
@@ -668,7 +715,7 @@ fn draw_content(
             let cur_vis = vis
                 .iter()
                 .position(|v| {
-                    matches!(v, KV::Command { sel, .. } | KV::Reference { sel, .. } if *sel == cursor)
+                    matches!(v, KV::Command { sel, .. } | KV::Reference { sel, .. } | KV::Value { sel, .. } if *sel == cursor)
                 })
                 .unwrap_or(0);
             let scroll = cur_vis
@@ -678,6 +725,53 @@ fn draw_content(
                 let row = Rect::new(area.x, area.y + (row_i - scroll) as u16, area.width, 1);
                 match v {
                     KV::Blank => {}
+                    KV::Value {
+                        sel,
+                        label,
+                        value,
+                        chooser,
+                    } => {
+                        let is_sel = *sel == cursor;
+                        if is_sel {
+                            fill_bg(f, row, t.sel_bg);
+                        }
+                        f.render_widget(
+                            Paragraph::new(Line::from(vec![
+                                Span::styled(
+                                    if is_sel { " ▸ " } else { "   " },
+                                    Style::new().fg(t.accent),
+                                ),
+                                Span::styled(
+                                    *label,
+                                    Style::new().fg(if is_sel { t.text } else { t.subtext1 }),
+                                ),
+                            ])),
+                            row,
+                        );
+                        // The prefix row shows a capture prompt while capturing;
+                        // the preset row shows `‹ value ›`.
+                        let txt = if is_sel && capturing {
+                            "press a chord…".to_string()
+                        } else if *chooser {
+                            format!("‹ {value} ›")
+                        } else {
+                            value.clone()
+                        };
+                        let color = if is_sel && capturing {
+                            t.coral
+                        } else {
+                            t.accent
+                        };
+                        f.render_widget(
+                            Paragraph::new(Span::styled(
+                                format!("{txt}  "),
+                                Style::new().fg(color).bold(),
+                            ))
+                            .alignment(Alignment::Right),
+                            row,
+                        );
+                        ctls.push((*sel, row));
+                    }
                     KV::Note(spans) => {
                         let mut line = vec![Span::raw("   ")];
                         line.extend(spans.iter().cloned());

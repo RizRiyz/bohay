@@ -1,26 +1,65 @@
 ---
 title: Keybindings
-description: Default bindings, vim aliases, and how remapping works.
+description: Default bindings, the configurable prefix, the tmux preset, and how remapping works.
 ---
 
-Press **`Ctrl+Space`**, then a key. `Ctrl+Space ?` shows the live cheat-sheet.
-Remap anything in **Settings → Keys** (click a command, press its new key).
+Press the **prefix** (`Ctrl+Space` by default), then a key. `Ctrl+Space ?` shows
+the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
+**Settings → Keys**.
 
 | Key | Command | Key | Command |
 |-----|---------|-----|---------|
 | `←↓↑→` / `hjkl` | focus pane | `c` | new tab |
-| `v` / `s` | split right / down | `n` / `p` / `⇥` | cycle tabs |
-| `x` | close pane | `N` | new workspace (folder picker) |
-| `z` | zoom pane | `D` | close workspace |
-| `r` | resize mode (then arrows) | `w` / `W` | next / previous workspace |
-| `b` | toggle left sidebar | `g` | git tab |
-| `B` | toggle right sidebar | `G` | new worktree |
-| `a` | agents All/Active | `o` | orchestration board |
-| `,` | Settings | `q` / `d` | detach |
-| `e` | toggle FILES dock | `1`–`9` | jump to tab |
+| `;` | next pane (cycle) | `n` / `p` / `⇥` | cycle tabs |
+| `.` | next blocked agent | `,` | rename tab |
+| `v` / `s` | split right / down | `N` | new workspace (folder picker) |
+| `x` | close pane | `D` | close workspace |
+| `z` | zoom pane | `w` / `W` | next / previous workspace |
+| `r` | resize mode (then arrows) | `G` | new worktree |
+| `f` | fork agent session | `g` | git tab |
+| `b` / `B` | toggle left / right sidebar | `o` | orchestration board |
+| `a` | agents All/Active | `m` | jump palette (tabs / workspaces / agents) |
+| `e` | toggle FILES dock | `/` | global search |
+| `=` | Settings | `q` / `d` | detach |
+| `1`–`9` | jump to tab | | |
 
-**No-prefix keys:** `Shift+↑` enters
-[scroll mode](/docs/guides/scrollback/), and the mouse does everything else.
+## The prefix and presets
+
+The prefix is **configurable**. From the **Prefix** row at the top of
+Settings → Keys, press a new chord to set it (it must include `Ctrl`, so it can
+never swallow a typed key). Pressing the prefix twice sends the literal chord to
+the focused pane.
+
+The **Preset** row below it applies a whole bundle at once. The **tmux** preset
+switches the prefix to `Ctrl+b` and maps the tmux keys onto bohay:
+
+| tmux | bohay command |
+|------|---------------|
+| `%` / `"` | split right / down |
+| `o` | next pane |
+| `,` | rename tab (window) |
+| `(` / `)` | previous / next workspace (session) |
+| `w` | jump palette (choose-window / choose-tree) |
+
+The rest of tmux's keys (`c`, `n`, `p`, `x`, `z`, `d`, digits) already match
+bohay's defaults. A preset is a starting point, so you can still rebind
+individual keys afterward. Choose **bohay (default)** to revert.
+
+Note: `,` renames the tab on both the bohay defaults and the tmux preset (the
+same as tmux's rename-window), and Settings lives on `=`. The **Menu** button
+(top-right) always opens Settings too.
+
+## The jump palette
+
+`m` (or `w` under the tmux preset) opens the palette: every **tab**, every
+**workspace**, and every **agent** in one overlay. Type to filter, and use the
+scope chips (or `Tab`) to narrow it to one category. Arrows move, `Enter` jumps,
+`Esc` clears the filter then closes.
+
+## No-prefix keys and menus
+
+`Shift+↑` enters [scroll mode](/docs/guides/scrollback/), and the mouse does
+everything else.
 
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
 for its menu (rename / close / worktrees / git / board), a **pane** to split or
@@ -29,6 +68,10 @@ read-only or in an editor (plus new / rename / delete). See
 [Panes, Tabs & Workspaces](/docs/guides/layout/) and
 [Browsing & Opening Files](/docs/guides/files/).
 
-Custom bindings persist in `config.json` under `keybindings` (command id →
-key). An empty value unbinds a command. `Ctrl+Space ?` shows the current map,
-and every command is editable in **Settings → Keys**.
+## Remapping
+
+Custom bindings persist in `config.json`: `prefix` holds the prefix chord, and
+`keybindings` maps each command id to a key (an empty value unbinds it).
+`Ctrl+Space ?` shows the current map, and every command is editable in
+**Settings → Keys** (the vim `hjkl` and `Tab` aliases included, since nothing is
+bound behind your back).

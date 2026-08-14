@@ -168,6 +168,13 @@ pub fn manifests_dir() -> PathBuf {
     config_dir().join("manifests")
 }
 
+/// The bohay-managed skill cache: the OTA-updated `SKILL.md` written by
+/// `bohay skill update`, kept apart from the compiled-in default so a skill fix
+/// can reach users between releases. `~/.bohay/skill/`.
+pub fn skill_dir() -> PathBuf {
+    config_dir().join("skill")
+}
+
 /// Create the manifests dir if it doesn't exist and drop an annotated example
 /// the first time, so the feature is discoverable. Best-effort; never fatal.
 pub fn ensure_manifests_dir() -> PathBuf {
