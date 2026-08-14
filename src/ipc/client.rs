@@ -402,20 +402,16 @@ mod tests {
     /// A real scratch server must negotiate a client-owned terminal palette and
     /// return a frame. The byte-transparent bridge is covered separately by
     /// `relay_pumps_both_directions`.
-    /// Ignored: spawns processes and needs the built binary.
+    /// This remains Unix-only because the surrounding relay tests use
+    /// `UnixStream`. A filtered copy of the current test executable runs the
+    /// real server, so this works in a clean target directory without requiring
+    /// a separate `cargo build` first.
     #[test]
-    #[ignore]
     fn real_server_accepts_a_terminal_palette() {
         use crate::ipc::protocol::{self, ClientMessage, ServerMessage, PROTOCOL_VERSION};
         use std::process::{Command, Stdio};
 
-        let bin = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .and_then(std::path::Path::parent)
-            .unwrap()
-            .join("bohay");
-        assert!(bin.exists(), "build the binary first: {}", bin.display());
+        let bin = std::env::current_exe().unwrap();
         let home = std::env::temp_dir().join(format!("bohay-remote-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -430,8 +426,14 @@ mod tests {
         .unwrap();
 
         // A real server on a scratch home.
-        let mut server = Command::new(&bin)
-            .arg("server")
+        let server = Command::new(&bin)
+            .args([
+                "--exact",
+                "ipc::client::tests::terminal_palette_server_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("BOHAY_TEST_PALETTE_SERVER", "1")
             .env("BOHAY_HOME", &home)
             // An agent pane inherits the live session's socket. The scratch
             // server and its cleanup must never escape this test home.
@@ -441,6 +443,21 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        struct ScratchServer {
+            child: std::process::Child,
+            home: std::path::PathBuf,
+        }
+        impl Drop for ScratchServer {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                let _ = std::fs::remove_dir_all(&self.home);
+            }
+        }
+        let _server = ScratchServer {
+            child: server,
+            home: home.clone(),
+        };
         let sock = home.join("bohay-client.sock");
         for _ in 0..50 {
             if sock.exists() {
@@ -512,11 +529,18 @@ mod tests {
             "the server returned a real frame after palette negotiation"
         );
 
-        // Kill only the child handle this test spawned. Never address a server
-        // by an inherited environment socket during cleanup.
-        let _ = server.kill();
-        let _ = server.wait();
-        let _ = std::fs::remove_dir_all(&home);
+        // `_server` kills only the child handle spawned above, even if an
+        // assertion panics. It never addresses an inherited production socket.
+    }
+
+    /// Subprocess entry point for `real_server_accepts_a_terminal_palette`.
+    /// The ordinary test-suite invocation returns immediately; only the
+    /// explicitly marked child process enters the blocking server loop.
+    #[test]
+    fn terminal_palette_server_helper() {
+        if std::env::var_os("BOHAY_TEST_PALETTE_SERVER").is_some() {
+            crate::ipc::server::run().expect("scratch server failed");
+        }
     }
 }
 

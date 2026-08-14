@@ -927,16 +927,15 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dev-tools"))]
 mod theme_css {
     /// Dev tool (not a CI check), mirroring `generate_preview`: emit every
     /// palette in [`super::THEMES`] as CSS custom properties for the website's
     /// theme picker, so bohay.dev shows the *real* palettes rather than
     /// hand-copied approximations that drift.
     ///
-    /// `cargo test emit_theme_css -- --ignored --nocapture > /tmp/themes.css`
+    /// `cargo test --features dev-tools emit_theme_css -- --nocapture`
     #[test]
-    #[ignore]
     fn emit_theme_css() {
         fn hex(c: ratatui::style::Color) -> String {
             match c {

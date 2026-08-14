@@ -43,6 +43,12 @@ exclude = [
 name = "bohay"
 path = "src/main.rs"
 
+[features]
+default = []
+# Opt-in benchmark and artifact generators. Keeping these out of the default
+# test registry avoids reporting deliberate developer commands as ignored tests.
+dev-tools = []
+
 [dependencies]
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["serde"] }

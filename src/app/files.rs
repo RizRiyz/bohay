@@ -1029,7 +1029,7 @@ mod tests {
         // `FileRead`, then `FileChanges` once `git diff` returns — so simply
         // taking the next event races: whichever the worker happens to have
         // queued first wins. Pump until the one we need arrives.
-        pump_until_read(&rx, &mut app);
+        pump_until_file_read(&rx, &mut app, vid);
         assert_eq!(
             app.views.get(&vid).map(|ViewKind::File(v)| v.line_count()),
             Some(1),
@@ -1042,7 +1042,7 @@ mod tests {
         app.ensure_file_views();
         // A re-read was scheduled; apply events until its text arrives — the
         // first read's trailing `FileChanges` may still be queued ahead of it.
-        pump_until_read(&rx, &mut app);
+        pump_until_file_read(&rx, &mut app, vid);
         if let Some(ViewKind::File(v)) = app.views.get(&vid) {
             assert_eq!(v.line_count(), 2, "the view reloaded the edited file");
         } else {
@@ -1051,7 +1051,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Apply events until a `FileRead` has been handled, or the deadline passes.
+    /// Apply events until the requested view's `FileRead` has been handled, or
+    /// the deadline passes.
     ///
     /// A scheduled read emits `FileRead` **and** `FileChanges`; the two arrive in
     /// whatever order the worker gets to them, and a previous read's
@@ -1059,19 +1060,48 @@ mod tests {
     /// makes the test independent of that timing (it was a CI-only flake: on a
     /// faster `git diff` the stale `FileChanges` was consumed instead of the
     /// re-read, so the view kept its old contents).
-    fn pump_until_read(rx: &std::sync::mpsc::Receiver<AppEvent>, app: &mut App) {
+    fn pump_until_file_read(
+        rx: &std::sync::mpsc::Receiver<AppEvent>,
+        app: &mut App,
+        expected: PaneId,
+    ) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(250)) else {
                 continue;
             };
-            let was_read = matches!(ev, AppEvent::FileRead { .. });
+            let was_read = matches!(&ev, AppEvent::FileRead { id, .. } if *id == expected);
             app.handle_event(ev);
             if was_read {
                 return;
             }
         }
-        panic!("no FileRead arrived within the deadline");
+        panic!("no FileRead for {expected:?} arrived within the deadline");
+    }
+
+    /// Apply events until the requested directory's listing has been handled.
+    /// A newly-created app also produces PTY and background-scan events, so
+    /// consuming only the next event makes directory tests race those workers.
+    fn pump_until_dir_read(
+        rx: &std::sync::mpsc::Receiver<AppEvent>,
+        app: &mut App,
+        expected: &std::path::Path,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let Ok(ev) = rx.recv_timeout(std::time::Duration::from_millis(250)) else {
+                continue;
+            };
+            let was_read = matches!(&ev, AppEvent::DirRead { path, .. } if path == expected);
+            app.handle_event(ev);
+            if was_read {
+                return;
+            }
+        }
+        panic!(
+            "no DirRead for {} arrived within the deadline",
+            expected.display()
+        );
     }
 
     /// Set a file's mtime, portable enough for the test (via a fresh write's
@@ -1105,8 +1135,7 @@ mod tests {
         app.open_file_view(file.clone(), OpenTarget::Tab);
         let first = app.layout().focus;
         // Drain the read so content is present.
-        let ev = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        app.handle_event(ev);
+        pump_until_file_read(&rx, &mut app, first);
         let tabs_before = app.workspaces[app.active_ws].tabs.len();
         let views_before = app.views.len();
 
@@ -1150,8 +1179,7 @@ mod tests {
         let mut app = App::new(120, 40, tx).unwrap();
         app.open_file_view(file.clone(), OpenTarget::Tab);
         let vid = app.layout().focus;
-        let ev = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        app.handle_event(ev);
+        pump_until_file_read(&rx, &mut app, vid);
 
         // Render so `pane_content_rects` (needed for hit-testing the drag) is set.
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
@@ -1316,8 +1344,7 @@ mod tests {
         app.sidebars.left.docks.push(DockKind::Files);
         app.ensure_file_tree();
         // Apply the root read so `sub` is a visible row.
-        let ev = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        app.handle_event(ev);
+        pump_until_dir_read(&rx, &mut app, &root);
 
         // Click `sub` to expand it — WITHOUT calling ensure_file_tree again.
         let idx = app
@@ -1329,10 +1356,7 @@ mod tests {
         app.file_row_activate(idx, OpenTarget::Tab);
 
         // A read for `sub` must already be in flight — arrives without any tick.
-        let ev = rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("expand scheduled a read immediately");
-        app.handle_event(ev);
+        pump_until_dir_read(&rx, &mut app, &root.join("sub"));
         assert!(
             app.file_tree
                 .visible_rows()
@@ -1460,8 +1484,7 @@ mod tests {
         let mut app = App::new(40, 20, tx).unwrap();
         app.open_file_view(file.clone(), OpenTarget::Tab);
         let vid = app.layout().focus;
-        let ev = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        app.handle_event(ev);
+        pump_until_file_read(&rx, &mut app, vid);
         assert!(
             matches!(
                 app.views.get(&vid),

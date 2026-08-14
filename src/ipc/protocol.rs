@@ -629,7 +629,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dev-tools"))]
 mod size_probe {
     use super::*;
     use ratatui::style::Color;
@@ -660,8 +660,8 @@ mod size_probe {
         b.len()
     }
 
+    /// Run with `cargo test --features dev-tools measure_wire_sizes -- --nocapture`.
     #[test]
-    #[ignore]
     fn measure_wire_sizes() {
         let f0 = full_frame(120, 32);
         let full = ser(&ServerMessage::Frame(f0.clone()));

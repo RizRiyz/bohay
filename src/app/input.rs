@@ -19,10 +19,7 @@ impl App {
         }
         match ev {
             AppEvent::Key(k) => self.handle_key(k),
-            AppEvent::Mouse(m) => {
-                self.handle_mouse(m);
-                true // conservative: hover/selection/clicks can change the UI
-            }
+            AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
                 // A paste while a text-input modal is open (a Settings field, a
                 // rename prompt, …) fills that field, not the pane underneath.
@@ -211,7 +208,121 @@ impl App {
         true
     }
 
-    fn handle_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
+    /// Apply a mouse event and report whether it changed anything Bohay draws.
+    ///
+    /// Button, drag, release, and wheel events stay conservative because they
+    /// are low-frequency interactions and can change state through many modal
+    /// handlers. Motion is the hot path: compare only the hover state the
+    /// renderer consumes, so moving across ordinary pane cells does not request
+    /// frames while links, menus, FILES rows, and resize seams still repaint.
+    fn handle_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) -> bool {
+        use ratatui::crossterm::event::MouseEventKind;
+
+        let kind = m.kind;
+        let hover_before = self.rendered_hover_rect(self.hover);
+        let divider_before = self
+            .hover_divider
+            .as_ref()
+            .map(|d| (d.path.clone(), d.axis, d.line, d.span));
+        let sidebar_before = self.hover_sidebar;
+        let link_before = self.hover_link.clone();
+
+        self.apply_mouse(m);
+
+        if !matches!(kind, MouseEventKind::Moved) {
+            return true;
+        }
+
+        let divider_after = self
+            .hover_divider
+            .as_ref()
+            .map(|d| (d.path.clone(), d.axis, d.line, d.span));
+        hover_before != self.rendered_hover_rect(self.hover)
+            || divider_before != divider_after
+            || sidebar_before != self.hover_sidebar
+            || link_before != self.hover_link
+    }
+
+    /// The hover-highlighted rectangle containing `at`, if any. Moving within
+    /// one rectangle does not alter the rendered frame; entering, leaving, or
+    /// crossing into another one does. Keep this list aligned with renderers
+    /// that consume `App.hover`.
+    fn rendered_hover_rect(&self, at: Option<(u16, u16)>) -> Option<Rect> {
+        let (c, r) = at?;
+        let hit = |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
+        let first = |rects: &[Rect]| rects.iter().copied().find(|rect| hit(*rect));
+
+        if self.changelog_open {
+            return self.changelog_check_rect.filter(|rect| hit(*rect));
+        }
+        if let Some(menu) = &self.pane_menu {
+            return menu
+                .items
+                .iter()
+                .map(|(_, rect)| *rect)
+                .chain(menu.tab_rects.iter().map(|(_, rect)| *rect))
+                .find(|rect| hit(*rect));
+        }
+        if let Some(menu) = &self.agent_menu {
+            return menu
+                .items
+                .iter()
+                .map(|(_, rect)| *rect)
+                .find(|rect| hit(*rect));
+        }
+        if let Some(menu) = &self.ws_menu {
+            return menu
+                .items
+                .iter()
+                .map(|(_, rect)| *rect)
+                .find(|rect| hit(*rect));
+        }
+        if let Some(menu) = &self.file_menu {
+            return menu
+                .items
+                .iter()
+                .map(|(_, rect)| *rect)
+                .find(|rect| hit(*rect));
+        }
+        if let Some(menu) = &self.dock_menu {
+            return first(&menu.rects);
+        }
+
+        let modal = [self.modal_commit_rect, self.modal_cancel_rect]
+            .into_iter()
+            .flatten()
+            .find(|rect| hit(*rect));
+        if modal.is_some() {
+            return modal;
+        }
+
+        if self.switcher {
+            return self
+                .switcher_rects
+                .iter()
+                .map(|(_, rect)| *rect)
+                .chain(self.switcher_scope_rects.iter().map(|(_, rect)| *rect))
+                .find(|rect| hit(*rect));
+        }
+
+        self.file_tree_rects
+            .iter()
+            .map(|(_, rect)| *rect)
+            .chain(
+                [
+                    self.switcher_button_rect,
+                    self.sidebar_toggle_rect,
+                    self.right_sidebar_toggle_rect,
+                    self.version_rect,
+                    self.settings_icon_rect,
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .find(|rect| hit(*rect))
+    }
+
+    fn apply_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
@@ -649,18 +760,8 @@ impl App {
                 if self.mouse_grab.is_none() {
                     if let Some((id, content)) = self.pane_content_at(m.column, m.row) {
                         if let Some(pane) = self.panes.get(&id) {
-                            let mm = pane.mouse_mode();
-                            if mm.motion {
-                                let col = m.column - content.x + 1;
-                                let row = m.row - content.y + 1;
-                                // No button held = code 3, with the motion flag.
-                                pane.send(&mouse_button_seq(
-                                    3 + mouse_mod_bits(m.modifiers),
-                                    MouseSeq::Drag,
-                                    col,
-                                    row,
-                                    mm.sgr,
-                                ));
+                            if let Some(seq) = hover_motion_seq(&m, content, pane.mouse_mode()) {
+                                pane.send(&seq);
                             }
                         }
                     }
@@ -1744,6 +1845,28 @@ fn mouse_button_seq(btn: u16, kind: MouseSeq, col: u16, row: u16, sgr: bool) -> 
     }
 }
 
+/// Encode an any-motion (DECSET 1003) hover report for a pane. The caller owns
+/// hit-testing and delivery; keeping the encoding pure pins the exact bytes in
+/// a unit test while the dirty-result path remains independent of forwarding.
+fn hover_motion_seq(
+    m: &ratatui::crossterm::event::MouseEvent,
+    content: Rect,
+    mode: crate::terminal::pty::MouseModes,
+) -> Option<Vec<u8>> {
+    if !mode.motion {
+        return None;
+    }
+    let col = m.column.saturating_sub(content.x) + 1;
+    let row = m.row.saturating_sub(content.y) + 1;
+    Some(mouse_button_seq(
+        3 + mouse_mod_bits(m.modifiers),
+        MouseSeq::Drag,
+        col,
+        row,
+        mode.sgr,
+    ))
+}
+
 fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
     let btn: u16 = if up { 64 } else { 65 };
     if sgr {
@@ -1939,6 +2062,44 @@ mod tests {
         assert_eq!(
             mouse_button_seq(3, MouseSeq::Drag, 2, 2, true),
             b"\x1b[<35;2;2M".to_vec()
+        );
+    }
+
+    #[test]
+    fn any_motion_hover_keeps_its_exact_forwarded_bytes() {
+        use crate::terminal::pty::MouseModes;
+        use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 14,
+            row: 9,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        let content = Rect::new(10, 5, 40, 20);
+        let mode = MouseModes {
+            report: true,
+            drag: true,
+            motion: true,
+            sgr: true,
+        };
+
+        assert_eq!(
+            hover_motion_seq(&event, content, mode),
+            Some(b"\x1b[<51;5;5M".to_vec()),
+            "1003 hover keeps code 3, Ctrl +16, motion +32, and pane-local coordinates"
+        );
+        assert_eq!(
+            hover_motion_seq(
+                &event,
+                content,
+                MouseModes {
+                    motion: false,
+                    ..mode
+                }
+            ),
+            None,
+            "1002 drag tracking alone does not receive buttonless hover"
         );
     }
 
@@ -2145,12 +2306,29 @@ mod link_click_tests {
             ..
         } = fixture();
 
-        app.handle_event(mouse(MouseEventKind::Moved, on_link, KeyModifiers::NONE));
+        for i in 0..10_000 {
+            let at = if i % 2 == 0 {
+                off_link
+            } else {
+                (off_link.0 + 1, off_link.1 + 1)
+            };
+            assert!(
+                !app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE)),
+                "ordinary pane motion {i} stays clean"
+            );
+        }
         assert!(app.hover_link.is_none(), "plain hover scans nothing");
 
-        app.handle_event(mouse(MouseEventKind::Moved, on_link, KeyModifiers::CONTROL));
+        assert!(
+            app.handle_event(mouse(MouseEventKind::Moved, on_link, KeyModifiers::CONTROL)),
+            "entering a link changes its underline"
+        );
         let hl = app.hover_link.as_ref().expect("ctrl hover found the link");
         assert_eq!(hl.target, LinkTarget::Url(URL.to_string()));
+        assert!(
+            !app.handle_event(mouse(MouseEventKind::Moved, on_link, KeyModifiers::CONTROL)),
+            "resting inside the same link does not repaint"
+        );
 
         // It is actually drawn underlined, not merely recorded.
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -2161,12 +2339,84 @@ mod link_click_tests {
         );
 
         // Moving off the link, still holding Ctrl, drops it.
-        app.handle_event(mouse(
-            MouseEventKind::Moved,
-            off_link,
-            KeyModifiers::CONTROL,
-        ));
+        assert!(
+            app.handle_event(mouse(
+                MouseEventKind::Moved,
+                off_link,
+                KeyModifiers::CONTROL,
+            )),
+            "leaving a link removes its underline"
+        );
         assert!(app.hover_link.is_none());
+    }
+
+    #[test]
+    fn any_motion_forwarding_does_not_mark_bohay_dirty() {
+        let _env = crate::persist::test_env("mouse-any-motion-dirty");
+        let Fixture {
+            mut app,
+            pane,
+            off_link,
+            ..
+        } = fixture();
+
+        app.panes
+            .get(&pane)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?1003h\x1b[?1006h");
+        let mode = app.panes.get(&pane).unwrap().mouse_mode();
+        assert!(mode.motion && mode.sgr, "the pane requested 1003 + 1006");
+
+        assert!(
+            !app.handle_event(mouse(MouseEventKind::Moved, off_link, KeyModifiers::NONE,)),
+            "forwarding hover waits for the child's PtyData instead of rendering early"
+        );
+    }
+
+    #[test]
+    fn context_menu_hover_dirties_only_when_the_highlight_changes() {
+        let _env = crate::persist::test_env("menu-hover-dirty");
+        let Fixture {
+            mut app,
+            mut term,
+            off_link,
+            ..
+        } = fixture();
+
+        assert!(app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            off_link,
+            KeyModifiers::NONE,
+        )));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let rows: Vec<Rect> = app
+            .pane_menu
+            .as_ref()
+            .expect("pane menu opened")
+            .items
+            .iter()
+            .map(|(_, rect)| *rect)
+            .take(2)
+            .collect();
+        assert_eq!(rows.len(), 2, "the menu has multiple hoverable rows");
+        let first = (rows[0].x + 1, rows[0].y);
+        let second = (rows[1].x + 1, rows[1].y);
+
+        assert!(
+            app.handle_event(mouse(MouseEventKind::Moved, first, KeyModifiers::NONE)),
+            "entering a menu row paints its highlight"
+        );
+        assert!(
+            !app.handle_event(mouse(MouseEventKind::Moved, first, KeyModifiers::NONE)),
+            "motion inside the same row leaves the frame unchanged"
+        );
+        assert!(
+            app.handle_event(mouse(MouseEventKind::Moved, second, KeyModifiers::NONE)),
+            "crossing rows moves the highlight"
+        );
     }
 
     /// A fixture whose pane grid holds `text`, plus the screen cell sitting on

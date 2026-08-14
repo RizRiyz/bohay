@@ -882,9 +882,9 @@ mod tests {
 
     /// Manual benchmark of the server render hot path (full UI render + in-place
     /// `diff_buffer`) — the per-frame cost during typing. Run with:
-    ///   cargo test --release bench_render_hotpath -- --ignored --nocapture
+    ///   cargo test --release --features dev-tools bench_render_hotpath -- --nocapture
+    #[cfg(feature = "dev-tools")]
     #[test]
-    #[ignore]
     fn bench_render_hotpath() {
         use crate::ipc::protocol::{diff_buffer, frame_from_buffer};
         let (tx, _rx) = mpsc::channel::<AppEvent>();
@@ -1094,6 +1094,7 @@ mod tests {
     /// path after the name; off (default) it shows just the name.
     #[test]
     fn pane_title_path_setting_appends_the_path() {
+        let _env = crate::persist::test_env("pane-title-path");
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
         thread::sleep(Duration::from_millis(120));
@@ -1113,7 +1114,9 @@ mod tests {
                 .collect()
         };
 
-        // Default: name only, no double-space-then-path run.
+        // Keep the rendering assertion independent of config written by other
+        // tests. The default itself belongs to Config's unit contract.
+        app.config.layout.pane_title_path = false;
         let off = render(&mut app);
         assert!(off.contains("svcx"), "named pane shows its name");
         assert!(
@@ -1622,9 +1625,19 @@ mod tests {
     fn wide_emoji_marks_its_continuation_cell() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
+        use std::sync::{Arc, Mutex};
+
+        let _env = crate::persist::test_env("wide-emoji-frame");
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(80, 24, tx).expect("spawn pane");
         let id = app.layout().focus;
+        // Detach this assertion from the live shell reader. It may write its
+        // prompt between injection and rendering, which made the glyph vanish
+        // nondeterministically even though the renderer was correct.
+        let (response_tx, _response_rx) = mpsc::channel();
+        app.panes.get_mut(&id).unwrap().engine = Arc::new(Mutex::new(
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(80, 24, response_tx, 2_000),
+        ));
         app.panes
             .get(&id)
             .unwrap()
@@ -1796,9 +1809,9 @@ mod tests {
 
     /// Render a representative frame (a simulated agent session in the pane) and
     /// dump it to `preview.html` so the UI can be viewed in a browser with real
-    /// colors. A dev tool, not a CI check: `cargo test generate_preview -- --ignored`.
+    /// colors. Run with `cargo test --features dev-tools generate_preview`.
+    #[cfg(feature = "dev-tools")]
     #[test]
-    #[ignore]
     fn generate_preview() {
         use crate::ui::theme::State;
         use ratatui::style::Modifier;
@@ -1937,6 +1950,7 @@ span{{white-space:pre}}</style><pre>{body}</pre>"
         eprintln!("wrote {apath}");
     }
 
+    #[cfg(feature = "dev-tools")]
     fn resolve(c: ratatui::style::Color, reset: (u8, u8, u8)) -> (u8, u8, u8) {
         use ratatui::style::Color::*;
         match c {
@@ -1962,11 +1976,13 @@ span{{white-space:pre}}</style><pre>{body}</pre>"
         }
     }
 
+    #[cfg(feature = "dev-tools")]
     fn dim(c: (u8, u8, u8)) -> (u8, u8, u8) {
         let f = |v: u8| (v as f32 * 0.6) as u8;
         (f(c.0), f(c.1), f(c.2))
     }
 
+    #[cfg(feature = "dev-tools")]
     fn xterm(i: u8) -> (u8, u8, u8) {
         // 0–15: catppuccin mocha ANSI; 16–231: 6×6×6 cube; 232–255: grayscale.
         const ANSI: [(u8, u8, u8); 16] = [
@@ -1999,8 +2015,9 @@ span{{white-space:pre}}</style><pre>{body}</pre>"
         }
     }
 
+    /// Run with `cargo test --release --features dev-tools bench_file_viewer_render -- --nocapture`.
+    #[cfg(feature = "dev-tools")]
     #[test]
-    #[ignore]
     fn bench_file_viewer_render() {
         use ratatui::{backend::TestBackend, Terminal};
         use std::time::Instant;
