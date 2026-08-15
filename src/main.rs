@@ -850,13 +850,11 @@ fn app_event(event: Event) -> Option<AppEvent> {
     match event {
         Event::Key(k) => Some(AppEvent::Key(k)),
         Event::Mouse(m) => Some(AppEvent::Mouse(m)),
-        Event::Resize(w, h) => Some(AppEvent::Resize(w, h)),
+        Event::Resize(_, _) => Some(AppEvent::Resize),
         Event::Paste(s) => Some(AppEvent::Paste(s)),
         // Regained focus: treat like a resize to the current size, which forces
         // a full repaint and clears any stale cells from a move/expose.
-        Event::FocusGained => crossterm::terminal::size()
-            .ok()
-            .map(|(w, h)| AppEvent::Resize(w, h)),
+        Event::FocusGained => crossterm::terminal::size().ok().map(|_| AppEvent::Resize),
         _ => None,
     }
 }

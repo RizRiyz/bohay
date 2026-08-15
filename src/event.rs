@@ -11,11 +11,21 @@ use crate::ids::PaneId;
 use crate::ipc::protocol::ServerMessage;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub enum AppEvent {
+/// Input originating from one attached display client. Keeping the source id at
+/// the server boundary lets the server select that client's geometry before it
+/// performs hit-testing or forwards bytes to a pane.
+pub enum ClientInput {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
     Resize(u16, u16),
+}
+
+pub enum AppEvent {
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+    Paste(String),
+    Resize,
     /// The given pane produced output; the screen changed.
     PtyData(PaneId),
     /// The given pane's child process exited.
@@ -36,6 +46,12 @@ pub enum AppEvent {
     /// A binary client detached.
     ClientDetach {
         id: u64,
+    },
+    /// Input from a binary display client. The server unwraps this only after
+    /// activating the correct per-client viewport; it never reaches `App`.
+    ClientInput {
+        id: u64,
+        input: ClientInput,
     },
     /// A module subprocess finished; fill in its log entry.
     ModuleCommandFinished {

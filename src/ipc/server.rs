@@ -3,7 +3,7 @@
 //! Input arrives from clients; the JSON API also runs here. See docs/03, docs/08.
 
 use crate::ipc::transport::{self, Conn};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +17,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use crate::app::App;
-use crate::event::AppEvent;
+use crate::event::{AppEvent, ClientInput};
 use crate::ipc::api;
 use crate::ipc::protocol::{self, ClientMessage, ServerMessage};
 use crate::persist;
@@ -30,7 +30,6 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// than the frame cap so an idle session doesn't spin the CPU.
 const IDLE_INTERVAL: Duration = Duration::from_millis(33);
 
-#[derive(Clone)]
 struct ClientSender {
     messages: Sender<ServerMessage>,
     frame_pending: Arc<AtomicBool>,
@@ -66,7 +65,44 @@ impl ClientSender {
     }
 }
 
-type Clients = HashMap<u64, ClientSender>;
+struct ClientState {
+    sender: ClientSender,
+    size: (u16, u16),
+    terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    render_buf: Buffer,
+    last_frame: Option<protocol::FrameData>,
+    behind: bool,
+    force_full: bool,
+    last_activity: u64,
+}
+
+impl ClientState {
+    fn new(
+        sender: ClientSender,
+        cols: u16,
+        rows: u16,
+        terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+        last_activity: u64,
+    ) -> Self {
+        let size = (cols.max(1), rows.max(1));
+        Self {
+            sender,
+            size,
+            terminal_colors,
+            render_buf: Buffer::empty(Rect::new(0, 0, size.0, size.1)),
+            last_frame: None,
+            behind: false,
+            force_full: true,
+            last_activity,
+        }
+    }
+
+    fn send_control(&self, msg: ServerMessage) -> Result<(), ()> {
+        self.sender.send_control(msg)
+    }
+}
+
+type Clients = HashMap<u64, ClientState>;
 
 pub fn run() -> Result<()> {
     let (tx, rx) = mpsc::channel::<AppEvent>();
@@ -104,23 +140,12 @@ pub fn run() -> Result<()> {
 
     let mut clients: Clients = HashMap::new();
     let mut foreground: Option<u64> = None;
-    let mut size = DEFAULT_SIZE;
-    let mut backend_size = size;
-    // We render straight into a buffer we own (no ratatui `Terminal`), so a frame is
-    // one render + one `diff_buffer` — not render + Terminal's reset/diff/flush + our
-    // diff. Saved ~28% of the per-frame cost (see `bench_render_hotpath`).
-    let mut render_buf = Buffer::empty(Rect::new(0, 0, size.0, size.1));
+    // Geometry last committed to the shared PTYs and interactive hit-test state.
+    // Secondary-client projections never change it.
+    let mut interactive_size = DEFAULT_SIZE;
+    let mut next_activity = 1u64;
     let mut last_draw = Instant::now();
     let mut last_save = Instant::now();
-    // The last frame broadcast. We send only the *diff* against it (or skip an
-    // identical frame), so an idle session sends nothing and a busy one sends
-    // just the changed cells — cheap over a Unix socket, and crucial over SSH.
-    // Reset to `None` when a client attaches so the fresh client gets a full frame.
-    let mut last_frame: Option<protocol::FrameData> = None;
-    // Clients whose bounded frame channel was full when a diff went out — they
-    // dropped it, so they're resynced with a full frame next round (a dropped
-    // diff would otherwise desync them; a dropped *full* frame is self-healing).
-    let mut behind: HashSet<u64> = HashSet::new();
     // Un-rendered activity waiting for the frame cap to expire — drives a trailing
     // render so a change that lands mid-interval isn't stuck until the next event.
     let mut dirty = false;
@@ -150,8 +175,8 @@ pub fn run() -> Result<()> {
                 &mut app,
                 &mut clients,
                 &mut foreground,
-                &mut size,
-                &mut last_frame,
+                &mut interactive_size,
+                &mut next_activity,
             ),
             Err(RecvTimeoutError::Timeout) => false,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -162,8 +187,8 @@ pub fn run() -> Result<()> {
                 &mut app,
                 &mut clients,
                 &mut foreground,
-                &mut size,
-                &mut last_frame,
+                &mut interactive_size,
+                &mut next_activity,
             );
         }
         while let Ok(req) = api_rx.try_recv() {
@@ -225,7 +250,9 @@ pub fn run() -> Result<()> {
                 if let Some(c) = clients.remove(&id) {
                     let _ = c.send_control(ServerMessage::Detach);
                 }
-                foreground = clients.keys().next().copied();
+                foreground = latest_client(&clients);
+                apply_foreground_theme(&mut app, &clients, foreground);
+                activity = true;
             }
         }
 
@@ -280,58 +307,20 @@ pub fn run() -> Result<()> {
         // A forced redraw (resize / focus-regained / external damage) must render
         // even if nothing else changed this tick — and so must a client that is
         // waiting on its full-frame resync (see `needs_render`).
-        dirty = needs_render(dirty, app.force_redraw, !behind.is_empty());
+        dirty = needs_render(
+            dirty,
+            app.force_redraw,
+            clients.values().any(|client| client.behind),
+        );
 
         if dirty && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
-            let area = Rect::new(0, 0, size.0, size.1);
-            if size != backend_size {
-                render_buf = Buffer::empty(area);
-                backend_size = size;
-            }
-            render_buf.reset();
-            {
-                let mut target = ui::RenderTarget::new(&mut render_buf, area);
-                ui::render_into(&mut target, &mut app);
-            }
-            let buf = &render_buf;
-            let cursor = app.last_cursor;
-            // A full frame is needed on the first frame and on resize (a diff would
-            // be meaningless against different dims). Otherwise diff the live buffer
-            // straight against `last_frame` and update it in place — no per-frame
-            // clone or per-cell `String` (the old hot-path allocation that made
-            // panes lag under load).
-            // A forced redraw sends everyone a full frame (clears the terminal
-            // and repaints), the only way to fix damage bohay never saw.
             let forced = std::mem::take(&mut app.force_redraw);
-            let full_for_all = forced
-                || last_frame
-                    .as_ref()
-                    .is_none_or(|p| p.width != buf.area.width || p.height != buf.area.height);
-            let diff_msg = if full_for_all {
-                last_frame = Some(protocol::frame_from_buffer(buf, cursor));
-                None
-            } else {
-                let prev = last_frame.as_mut().unwrap();
-                let cursor_moved = prev.cursor != cursor;
-                let runs = protocol::diff_buffer(prev, buf);
-                prev.cursor = cursor;
-                if runs.is_empty() && !cursor_moved {
-                    None // screen unchanged — send nothing
-                } else {
-                    Some(ServerMessage::FrameDiff(protocol::FrameDiff {
-                        width: prev.width,
-                        height: prev.height,
-                        runs,
-                        cursor,
-                    }))
-                }
-            };
-            send_frame(
+            render_clients(
+                &mut app,
                 &mut clients,
-                &mut behind,
-                last_frame.as_ref().unwrap(),
-                diff_msg.as_ref(),
-                full_for_all,
+                &mut foreground,
+                &mut interactive_size,
+                forced,
             );
             last_draw = Instant::now();
             // Re-arm the PTY readers now that their output is on screen. A flag
@@ -351,8 +340,8 @@ fn apply(
     app: &mut App,
     clients: &mut Clients,
     foreground: &mut Option<u64>,
-    size: &mut (u16, u16),
-    last_frame: &mut Option<protocol::FrameData>,
+    interactive_size: &mut (u16, u16),
+    next_activity: &mut u64,
 ) -> bool {
     match ev {
         AppEvent::ClientConnected {
@@ -363,39 +352,80 @@ fn apply(
             rows,
             terminal_colors,
         } => {
-            if app.config.theme == "terminal" {
-                if let Some(colors) = terminal_colors.as_ref() {
-                    app.apply_terminal_colors(colors);
-                }
-            }
+            let activity = *next_activity;
+            *next_activity = next_activity.saturating_add(1);
             clients.insert(
                 id,
-                ClientSender {
-                    messages,
-                    frame_pending,
-                },
+                ClientState::new(
+                    ClientSender {
+                        messages,
+                        frame_pending,
+                    },
+                    cols,
+                    rows,
+                    terminal_colors,
+                    activity,
+                ),
             );
             *foreground = Some(id);
-            *size = (cols.max(1), rows.max(1));
-            // Force a full frame so the new client (which diffs from nothing)
-            // gets the complete screen.
-            *last_frame = None;
+            apply_foreground_theme(app, clients, *foreground);
             true
         }
         AppEvent::ClientDetach { id } => {
+            let was_foreground = *foreground == Some(id);
             clients.remove(&id);
-            if *foreground == Some(id) {
-                *foreground = clients.keys().next().copied();
+            if was_foreground {
+                *foreground = latest_client(clients);
+                apply_foreground_theme(app, clients, *foreground);
             }
-            false
+            was_foreground
         }
-        AppEvent::Resize(c, r) => {
-            *size = (c.max(1), r.max(1));
-            // A resize event (real size change, or a same-size event the terminal
-            // sends on a move/expose) means the screen may be damaged — force a
-            // full repaint, not a diff, even when the dimensions are unchanged.
-            app.force_redraw = true;
-            true
+        AppEvent::ClientInput { id, input } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            client.last_activity = *next_activity;
+            *next_activity = next_activity.saturating_add(1);
+
+            if let ClientInput::Resize(cols, rows) = input {
+                client.size = (cols.max(1), rows.max(1));
+                // Resize/focus repair is local to this terminal. Its next frame
+                // must be complete, but other clients keep their diff baselines.
+                client.force_full = true;
+                return true;
+            }
+
+            // Input ownership follows actual interaction, not background resize
+            // noise. Before hit-testing a newly active client, commit its view
+            // geometry and PTY dimensions synchronously.
+            let promoted = *foreground != Some(id);
+            if promoted {
+                *foreground = Some(id);
+                apply_foreground_theme(app, clients, *foreground);
+            }
+            let target_size = clients.get(&id).map(|client| client.size);
+            if promoted || target_size.is_some_and(|size| size != *interactive_size) {
+                let disconnected = clients
+                    .get_mut(&id)
+                    .is_some_and(|client| render_client(app, client, true, false));
+                if disconnected {
+                    clients.remove(&id);
+                    *foreground = latest_client(clients);
+                    apply_foreground_theme(app, clients, *foreground);
+                    return true;
+                }
+                if let Some(size) = target_size {
+                    *interactive_size = size;
+                }
+            }
+
+            let event = match input {
+                ClientInput::Key(key) => AppEvent::Key(key),
+                ClientInput::Mouse(mouse) => AppEvent::Mouse(mouse),
+                ClientInput::Paste(text) => AppEvent::Paste(text),
+                ClientInput::Resize(..) => unreachable!("handled above"),
+            };
+            app.handle_event(event)
         }
         // Redraw only if the event actually changed the UI — a plain keystroke
         // forwarded to a pane does not (its echo arrives as a separate `PtyData`).
@@ -405,6 +435,25 @@ fn apply(
 
 fn broadcast(clients: &mut Clients, msg: ServerMessage) {
     clients.retain(|_, client| client.send_control(msg.clone()).is_ok());
+}
+
+fn latest_client(clients: &Clients) -> Option<u64> {
+    clients
+        .iter()
+        .max_by_key(|(_, client)| client.last_activity)
+        .map(|(&id, _)| id)
+}
+
+fn apply_foreground_theme(app: &mut App, clients: &Clients, foreground: Option<u64>) {
+    if app.config.theme != "terminal" {
+        return;
+    }
+    if let Some(colors) = foreground
+        .and_then(|id| clients.get(&id))
+        .and_then(|client| client.terminal_colors.as_ref())
+    {
+        app.apply_terminal_colors(colors);
+    }
 }
 
 /// Whether this tick must render, even when nothing in the app changed.
@@ -421,42 +470,115 @@ fn needs_render(app_dirty: bool, force_redraw: bool, any_behind: bool) -> bool {
     app_dirty || force_redraw || any_behind
 }
 
-/// Send each client a `FrameDiff` (cheap) — or a full `Frame` if it's behind or
-/// everyone needs one (first frame / resize). A client whose bounded channel is
-/// full dropped its update and is marked `behind` for a full-frame resync.
-fn send_frame(
+/// Render the active client first so its geometry remains authoritative, then
+/// render every other client as a projection at that client's own dimensions.
+/// The common one-client case is still exactly one buffer reset, one UI render,
+/// and one in-place diff.
+fn render_clients(
+    app: &mut App,
     clients: &mut Clients,
-    behind: &mut HashSet<u64>,
-    frame: &protocol::FrameData,
-    diff_msg: Option<&ServerMessage>,
-    full_for_all: bool,
+    foreground: &mut Option<u64>,
+    interactive_size: &mut (u16, u16),
+    force_all: bool,
 ) {
+    if foreground.is_none_or(|id| !clients.contains_key(&id)) {
+        *foreground = latest_client(clients);
+        apply_foreground_theme(app, clients, *foreground);
+    }
+
+    let mut order: Vec<u64> = clients.keys().copied().collect();
+    order.sort_unstable_by_key(|id| (*foreground != Some(*id), *id));
     let mut dead = Vec::new();
-    for (id, tx) in clients.iter() {
-        let send_full = full_for_all || behind.contains(id);
-        let result = if send_full {
-            Some(tx.try_send_frame(ServerMessage::Frame(frame.clone())))
-        } else {
-            // Up-to-date client + nothing changed ⇒ send nothing.
-            diff_msg.map(|d| tx.try_send_frame(d.clone()))
-        };
-        match result {
-            None => {}
-            Some(Ok(())) => {
-                if send_full {
-                    behind.remove(id);
-                }
+    for id in order {
+        let interactive = *foreground == Some(id);
+        if let Some(client) = clients.get_mut(&id) {
+            if render_client(app, client, interactive, force_all) {
+                dead.push(id);
+            } else if interactive {
+                *interactive_size = client.size;
             }
-            Some(Err(FrameSendError::Full)) => {
-                behind.insert(*id);
-            }
-            Some(Err(FrameSendError::Disconnected)) => dead.push(*id),
         }
     }
     for id in dead {
         clients.remove(&id);
     }
-    behind.retain(|id| clients.contains_key(id));
+    if foreground.is_some_and(|id| !clients.contains_key(&id)) {
+        *foreground = latest_client(clients);
+        apply_foreground_theme(app, clients, *foreground);
+    }
+}
+
+/// Render and enqueue one client's next frame. Returns true when its writer is
+/// disconnected and the caller should remove it.
+fn render_client(
+    app: &mut App,
+    client: &mut ClientState,
+    interactive: bool,
+    force_all: bool,
+) -> bool {
+    let area = Rect::new(0, 0, client.size.0, client.size.1);
+    if client.render_buf.area != area {
+        client.render_buf = Buffer::empty(area);
+        client.last_frame = None;
+        client.force_full = true;
+    } else {
+        client.render_buf.reset();
+    }
+
+    let cursor = {
+        let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
+        if interactive {
+            ui::render_into(&mut target, app);
+        } else {
+            ui::render_projection(&mut target, app);
+        }
+        target.cursor()
+    };
+
+    let full = force_all
+        || client.force_full
+        || client.behind
+        || client.last_frame.as_ref().is_none_or(|previous| {
+            previous.width != client.render_buf.area.width
+                || previous.height != client.render_buf.area.height
+        });
+    let message = if full {
+        client.last_frame = Some(protocol::frame_from_buffer(&client.render_buf, cursor));
+        Some(ServerMessage::Frame(
+            client.last_frame.as_ref().expect("frame stored").clone(),
+        ))
+    } else {
+        let previous = client.last_frame.as_mut().expect("frame baseline exists");
+        let cursor_moved = previous.cursor != cursor;
+        let runs = protocol::diff_buffer(previous, &client.render_buf);
+        previous.cursor = cursor;
+        if runs.is_empty() && !cursor_moved {
+            None
+        } else {
+            Some(ServerMessage::FrameDiff(protocol::FrameDiff {
+                width: previous.width,
+                height: previous.height,
+                runs,
+                cursor,
+            }))
+        }
+    };
+
+    let Some(message) = message else {
+        return false;
+    };
+    match client.sender.try_send_frame(message) {
+        Ok(()) => {
+            client.behind = false;
+            client.force_full = false;
+            false
+        }
+        Err(FrameSendError::Full) => {
+            client.behind = true;
+            false
+        }
+        Err(FrameSendError::Disconnected) => true,
+    }
 }
 
 fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {
@@ -562,22 +684,46 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     loop {
         match protocol::read_message::<_, ClientMessage>(&mut reader) {
             Ok(ClientMessage::Key(k)) => {
-                if app_tx.send(AppEvent::Key(k)).is_err() {
+                if app_tx
+                    .send(AppEvent::ClientInput {
+                        id,
+                        input: ClientInput::Key(k),
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
             Ok(ClientMessage::Mouse(m)) => {
-                if app_tx.send(AppEvent::Mouse(m)).is_err() {
+                if app_tx
+                    .send(AppEvent::ClientInput {
+                        id,
+                        input: ClientInput::Mouse(m),
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
             Ok(ClientMessage::Paste(s)) => {
-                if app_tx.send(AppEvent::Paste(s)).is_err() {
+                if app_tx
+                    .send(AppEvent::ClientInput {
+                        id,
+                        input: ClientInput::Paste(s),
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
             Ok(ClientMessage::Resize { cols, rows }) => {
-                if app_tx.send(AppEvent::Resize(cols, rows)).is_err() {
+                if app_tx
+                    .send(AppEvent::ClientInput {
+                        id,
+                        input: ClientInput::Resize(cols, rows),
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -631,12 +777,47 @@ mod shutdown {
 #[cfg(test)]
 mod tests {
     use super::ServerMessage;
-    use super::{broadcast, needs_render, ClientSender, FrameSendError};
+    use super::{
+        apply, broadcast, needs_render, render_clients, ClientSender, ClientState, FrameSendError,
+    };
+    use crate::app::App;
+    use crate::event::{AppEvent, ClientInput};
     use crate::ipc::protocol::FrameDiff;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
     use std::sync::Arc;
+    use std::time::Duration;
+
+    fn display_client(
+        cols: u16,
+        rows: u16,
+        activity: u64,
+    ) -> (ClientState, mpsc::Receiver<ServerMessage>) {
+        let (messages, rx) = mpsc::channel();
+        (
+            ClientState::new(
+                ClientSender {
+                    messages,
+                    frame_pending: Arc::new(AtomicBool::new(false)),
+                },
+                cols,
+                rows,
+                None,
+                activity,
+            ),
+            rx,
+        )
+    }
+
+    fn received_frame_size(rx: &mpsc::Receiver<ServerMessage>) -> (u16, u16) {
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ServerMessage::Frame(frame) => (frame.width, frame.height),
+            ServerMessage::FrameDiff(frame) => (frame.width, frame.height),
+            _ => panic!("expected rendered frame"),
+        }
+    }
 
     /// A client that dropped a diff must get its full-frame resync even when the
     /// screen goes quiet. The resync only ships from inside a render, so a
@@ -666,10 +847,16 @@ mod tests {
     #[test]
     fn clipboard_is_reliable_when_a_tab_frame_is_already_queued() {
         let (messages, rx) = mpsc::channel();
-        let client = ClientSender {
-            messages,
-            frame_pending: Arc::new(AtomicBool::new(false)),
-        };
+        let client = ClientState::new(
+            ClientSender {
+                messages,
+                frame_pending: Arc::new(AtomicBool::new(false)),
+            },
+            120,
+            32,
+            None,
+            1,
+        );
         let frame = || {
             ServerMessage::FrameDiff(FrameDiff {
                 width: 120,
@@ -679,11 +866,14 @@ mod tests {
             })
         };
 
-        assert!(client.try_send_frame(frame()).is_ok());
+        assert!(client.sender.try_send_frame(frame()).is_ok());
         // Frame backpressure is still one deep, so output bursts cannot build an
         // unbounded queue while a client is slow.
         assert!(
-            matches!(client.try_send_frame(frame()), Err(FrameSendError::Full)),
+            matches!(
+                client.sender.try_send_frame(frame()),
+                Err(FrameSendError::Full)
+            ),
             "a second frame remains coalesced into the resync path"
         );
 
@@ -728,5 +918,91 @@ mod tests {
 
         assert!(matches!(rx.recv().unwrap(), ServerMessage::FrameDiff(_)));
         assert!(matches!(rx.recv().unwrap(), ServerMessage::Detach));
+    }
+
+    #[test]
+    fn different_client_sizes_receive_independent_frames_and_active_geometry() {
+        let _env = crate::persist::test_env("multi-client-resolution");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(120, 40, app_tx).expect("app starts");
+        app.server_mode = true;
+
+        let (large, large_rx) = display_client(120, 40, 2);
+        let (small, small_rx) = display_client(40, 18, 1);
+        let mut clients = HashMap::from([(1, large), (2, small)]);
+        let mut foreground = Some(1);
+        let mut interactive_size = (120, 40);
+
+        render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+        );
+
+        assert_eq!(received_frame_size(&large_rx), (120, 40));
+        assert_eq!(received_frame_size(&small_rx), (40, 18));
+        assert_eq!(clients[&1].last_frame.as_ref().unwrap().width, 120);
+        assert_eq!(clients[&2].last_frame.as_ref().unwrap().width, 40);
+        assert_eq!(interactive_size, (120, 40));
+        assert!(!app.compact, "secondary compact projection must not leak");
+
+        let focus = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find_map(|(id, rect)| (*id == focus).then_some(*rect))
+            .expect("active pane content");
+        assert_eq!(
+            app.panes[&focus].size(),
+            (content.width, content.height),
+            "secondary projection must not resize the shared PTY"
+        );
+    }
+
+    #[test]
+    fn background_resize_is_local_and_interaction_promotes_its_view() {
+        let _env = crate::persist::test_env("multi-client-promotion");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(120, 40, app_tx).expect("app starts");
+        app.server_mode = true;
+        let (large, _large_rx) = display_client(120, 40, 2);
+        let (small, small_rx) = display_client(50, 20, 1);
+        let mut clients = HashMap::from([(1, large), (2, small)]);
+        let mut foreground = Some(1);
+        let mut interactive_size = (120, 40);
+        let mut next_activity = 3;
+
+        assert!(apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Resize(46, 16),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert_eq!(foreground, Some(1), "background resize cannot steal input");
+        assert_eq!(clients[&2].size, (46, 16));
+        assert_eq!(interactive_size, (120, 40));
+
+        assert!(!apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE,)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert_eq!(foreground, Some(2));
+        assert_eq!(interactive_size, (46, 16));
+        assert!(app.compact, "the newly active narrow client owns its view");
+        assert_eq!(received_frame_size(&small_rx), (46, 16));
     }
 }

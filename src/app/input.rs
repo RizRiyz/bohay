@@ -37,7 +37,7 @@ impl App {
                 self.mark_user_input(); // so the echo isn't misread as agent work
                 false // goes to the pane; its echo (PtyData) renders it
             }
-            AppEvent::Resize(_, _) => {
+            AppEvent::Resize => {
                 // A resize (or a same-size resize event a terminal emits on a
                 // move/expose) may have damaged the screen — force a full repaint.
                 self.force_redraw = true;
@@ -149,7 +149,9 @@ impl App {
                 true
             }
             // Handled by the server loop; never reaches here at runtime.
-            AppEvent::ClientConnected { .. } | AppEvent::ClientDetach { .. } => false,
+            AppEvent::ClientConnected { .. }
+            | AppEvent::ClientDetach { .. }
+            | AppEvent::ClientInput { .. } => false,
         }
     }
 
@@ -1980,7 +1982,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
         assert!(!app.force_redraw, "starts off");
-        let dirty = app.handle_event(AppEvent::Resize(100, 30));
+        let dirty = app.handle_event(AppEvent::Resize);
         assert!(dirty, "a resize warrants a redraw");
         assert!(
             app.force_redraw,

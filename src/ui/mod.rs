@@ -50,6 +50,9 @@ impl<'a> RenderTarget<'a> {
         let p = position.into();
         self.cursor = Some((p.x, p.y));
     }
+    pub fn cursor(&self) -> Option<(u16, u16)> {
+        self.cursor
+    }
 }
 
 mod board;
@@ -91,6 +94,211 @@ pub fn render(f: &mut Frame, app: &mut App) {
 /// The actual UI render, over a buffer we own (`RenderTarget`). The server calls
 /// this directly with its frame buffer; `render` above adapts a `Frame` to it.
 pub fn render_into(f: &mut RenderTarget, app: &mut App) {
+    render_into_mode(f, app, true);
+}
+
+/// Render a secondary client's viewport without letting that projection become
+/// the interactive view or resize the shared PTYs.
+///
+/// Bohay deliberately keeps one server-owned application state. Multi-client
+/// displays may have different dimensions, though, so the server renders each
+/// secondary viewport independently. The renderer records hit-test geometry and
+/// clamps a handful of scroll offsets as part of an ordinary interactive draw;
+/// preserve those values here so a passive projection cannot move the active
+/// client's cursor, scroll position, compact mode, or click targets.
+pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
+    let compact = app.compact;
+    let last_main_area = app.last_main_area;
+    let last_pane_area = app.last_pane_area;
+    let left_seam = app.left_seam;
+    let right_seam = app.right_seam;
+    let last_cursor = app.last_cursor;
+    let workspaces_scroll = app.workspaces_scroll;
+    let agents_scroll = app.agents_scroll;
+    let last_active_ws_shown = app.last_active_ws_shown;
+    let switcher_scroll = app.switcher_scroll;
+    let orch_scroll = app.orch_scroll;
+    let orch_detail_scroll = app.orch_detail_scroll;
+    let orch_area = app.orch_area;
+    let mission_scroll = app.mission_scroll;
+    let mission_area = app.mission_area;
+    let changelog_scroll = app.changelog_scroll;
+    let file_tree_scroll = app.file_tree.scroll;
+
+    // Geometry collections are write-only outputs of a render. Move the active
+    // client's values aside instead of cloning them on every secondary frame.
+    let pane_rects = std::mem::take(&mut app.pane_rects);
+    let pane_content_rects = std::mem::take(&mut app.pane_content_rects);
+    let pane_title_rects = std::mem::take(&mut app.pane_title_rects);
+    let tab_rects = std::mem::take(&mut app.tab_rects);
+    let tab_close_rects = std::mem::take(&mut app.tab_close_rects);
+    let ws_rects = std::mem::take(&mut app.ws_rects);
+    let workspace_branch_rects = std::mem::take(&mut app.workspace_branch_rects);
+    let git_section_rects = std::mem::take(&mut app.git_section_rects);
+    let agents_filter_rects = std::mem::take(&mut app.agents_filter_rects);
+    let agent_rects = std::mem::take(&mut app.agent_rects);
+    let session_rects = std::mem::take(&mut app.session_rects);
+    let file_tree_rects = std::mem::take(&mut app.file_tree_rects);
+    let module_dock_rects = std::mem::take(&mut app.module_dock_rects);
+    let picker_rects = std::mem::take(&mut app.picker_rects);
+    let settings_tab_rects = std::mem::take(&mut app.settings_tab_rects);
+    let settings_ctl_rects = std::mem::take(&mut app.settings_ctl_rects);
+    let settings_arrow_rects = std::mem::take(&mut app.settings_arrow_rects);
+    let changelog_link_rects = std::mem::take(&mut app.changelog_link_rects);
+    let switcher_rects = std::mem::take(&mut app.switcher_rects);
+    let switcher_scope_rects = std::mem::take(&mut app.switcher_scope_rects);
+    let mission_rows = std::mem::take(&mut app.mission_rows);
+    let search_rects = app
+        .search
+        .as_mut()
+        .map(|search| std::mem::take(&mut search.rects));
+    let ws_menu_items = app
+        .ws_menu
+        .as_mut()
+        .map(|menu| std::mem::take(&mut menu.items));
+    let pane_menu_state = app.pane_menu.as_mut().map(|menu| {
+        (
+            std::mem::take(&mut menu.items),
+            std::mem::take(&mut menu.tab_rects),
+            menu.move_open,
+        )
+    });
+    let agent_menu_items = app
+        .agent_menu
+        .as_mut()
+        .map(|menu| std::mem::take(&mut menu.items));
+    let file_menu_items = app
+        .file_menu
+        .as_mut()
+        .map(|menu| std::mem::take(&mut menu.items));
+    let dock_menu_rects = app
+        .dock_menu
+        .as_mut()
+        .map(|menu| std::mem::take(&mut menu.rects));
+
+    let settings_icon_rect = app.settings_icon_rect;
+    let sidebar_toggle_rect = app.sidebar_toggle_rect;
+    let right_sidebar_toggle_rect = app.right_sidebar_toggle_rect;
+    let version_rect = app.version_rect;
+    let files_area = app.files_area;
+    let workspaces_area = app.workspaces_area;
+    let agents_area = app.agents_area;
+    let pane_close_rect = app.pane_close_rect;
+    let pane_zoom_rect = app.pane_zoom_rect;
+    let tab_prev_rect = app.tab_prev_rect;
+    let tab_next_rect = app.tab_next_rect;
+    let new_ws_rect = app.new_ws_rect;
+    let switcher_button_rect = app.switcher_button_rect;
+    let settings_modal_rect = app.settings_modal_rect;
+    let settings_close_rect = app.settings_close_rect;
+    let changelog_modal_rect = app.changelog_modal_rect;
+    let changelog_close_rect = app.changelog_close_rect;
+    let changelog_check_rect = app.changelog_check_rect;
+    let modal_commit_rect = app.modal_commit_rect;
+    let modal_cancel_rect = app.modal_cancel_rect;
+
+    // Git rendering also stores its list viewport and clamps detail scroll.
+    let git_view = app.active_git_mut().map(|git| {
+        (
+            git.id,
+            git.scroll,
+            git.list_area,
+            git.contributors_more_rect,
+        )
+    });
+
+    render_into_mode(f, app, false);
+
+    app.compact = compact;
+    app.last_main_area = last_main_area;
+    app.last_pane_area = last_pane_area;
+    app.left_seam = left_seam;
+    app.right_seam = right_seam;
+    app.last_cursor = last_cursor;
+    app.workspaces_scroll = workspaces_scroll;
+    app.agents_scroll = agents_scroll;
+    app.last_active_ws_shown = last_active_ws_shown;
+    app.switcher_scroll = switcher_scroll;
+    app.orch_scroll = orch_scroll;
+    app.orch_detail_scroll = orch_detail_scroll;
+    app.orch_area = orch_area;
+    app.mission_scroll = mission_scroll;
+    app.mission_area = mission_area;
+    app.changelog_scroll = changelog_scroll;
+    app.file_tree.scroll = file_tree_scroll;
+    app.pane_rects = pane_rects;
+    app.pane_content_rects = pane_content_rects;
+    app.pane_title_rects = pane_title_rects;
+    app.tab_rects = tab_rects;
+    app.tab_close_rects = tab_close_rects;
+    app.ws_rects = ws_rects;
+    app.workspace_branch_rects = workspace_branch_rects;
+    app.git_section_rects = git_section_rects;
+    app.agents_filter_rects = agents_filter_rects;
+    app.agent_rects = agent_rects;
+    app.session_rects = session_rects;
+    app.file_tree_rects = file_tree_rects;
+    app.module_dock_rects = module_dock_rects;
+    app.picker_rects = picker_rects;
+    app.settings_tab_rects = settings_tab_rects;
+    app.settings_ctl_rects = settings_ctl_rects;
+    app.settings_arrow_rects = settings_arrow_rects;
+    app.changelog_link_rects = changelog_link_rects;
+    app.switcher_rects = switcher_rects;
+    app.switcher_scope_rects = switcher_scope_rects;
+    app.mission_rows = mission_rows;
+    if let (Some(rects), Some(search)) = (search_rects, app.search.as_mut()) {
+        search.rects = rects;
+    }
+    if let (Some(items), Some(menu)) = (ws_menu_items, app.ws_menu.as_mut()) {
+        menu.items = items;
+    }
+    if let (Some((items, tab_rects, move_open)), Some(menu)) =
+        (pane_menu_state, app.pane_menu.as_mut())
+    {
+        menu.items = items;
+        menu.tab_rects = tab_rects;
+        menu.move_open = move_open;
+    }
+    if let (Some(items), Some(menu)) = (agent_menu_items, app.agent_menu.as_mut()) {
+        menu.items = items;
+    }
+    if let (Some(items), Some(menu)) = (file_menu_items, app.file_menu.as_mut()) {
+        menu.items = items;
+    }
+    if let (Some(rects), Some(menu)) = (dock_menu_rects, app.dock_menu.as_mut()) {
+        menu.rects = rects;
+    }
+    app.settings_icon_rect = settings_icon_rect;
+    app.sidebar_toggle_rect = sidebar_toggle_rect;
+    app.right_sidebar_toggle_rect = right_sidebar_toggle_rect;
+    app.version_rect = version_rect;
+    app.files_area = files_area;
+    app.workspaces_area = workspaces_area;
+    app.agents_area = agents_area;
+    app.pane_close_rect = pane_close_rect;
+    app.pane_zoom_rect = pane_zoom_rect;
+    app.tab_prev_rect = tab_prev_rect;
+    app.tab_next_rect = tab_next_rect;
+    app.new_ws_rect = new_ws_rect;
+    app.switcher_button_rect = switcher_button_rect;
+    app.settings_modal_rect = settings_modal_rect;
+    app.settings_close_rect = settings_close_rect;
+    app.changelog_modal_rect = changelog_modal_rect;
+    app.changelog_close_rect = changelog_close_rect;
+    app.changelog_check_rect = changelog_check_rect;
+    app.modal_commit_rect = modal_commit_rect;
+    app.modal_cancel_rect = modal_cancel_rect;
+    if let Some((id, scroll, list_area, contributors_more_rect)) = git_view {
+        if let Some(git) = app.active_git_mut().filter(|git| git.id == id) {
+            git.scroll = scroll;
+            git.list_area = list_area;
+            git.contributors_more_rect = contributors_more_rect;
+        }
+    }
+}
+
+fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let t = app.theme.clone();
     // The active i18n catalog (Copy `&'static`), passed to draw fns that don't
     // get the whole `App` (picker, git tab) so all chrome is localized (docs/21).
@@ -200,8 +408,11 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
     };
     // Only frame panes when the tab is split; a lone pane needs no border.
     let bordered = rects.len() > 1;
-    for (id, rect) in &rects {
-        if let Some(content) = pane_content(*rect, bordered) {
+    if resize_panes {
+        for (id, rect) in &rects {
+            let Some(content) = pane_content(*rect, bordered) else {
+                continue;
+            };
             let resized = app
                 .panes
                 .get_mut(id)

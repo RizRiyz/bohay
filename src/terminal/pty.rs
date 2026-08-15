@@ -429,6 +429,11 @@ impl Pane {
         self.size = (cols, rows);
         true
     }
+
+    #[cfg(test)]
+    pub(crate) fn size(&self) -> (u16, u16) {
+        self.size
+    }
 }
 
 /// Pasted text as the bytes to write to the child: wrapped in the
