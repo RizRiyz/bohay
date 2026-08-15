@@ -1951,16 +1951,20 @@ fn encode_key(key: &KeyEvent, newline: &[u8]) -> Option<Vec<u8>> {
         KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Esc => vec![0x1b],
-        KeyCode::Left => csi(b'D'),
-        KeyCode::Right => csi(b'C'),
-        KeyCode::Up => csi(b'A'),
-        KeyCode::Down => csi(b'B'),
-        KeyCode::Home => csi(b'H'),
-        KeyCode::End => csi(b'F'),
-        KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
-        KeyCode::Insert => vec![0x1b, b'[', b'2', b'~'],
-        KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
-        KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
+        // Keep navigation modifiers intact. Crossterm reports these directly
+        // from Windows console records, while terminals on Unix report them via
+        // xterm/Kitty escape sequences. Dropping the modifiers here turned
+        // Alt+arrow and Ctrl+arrow into plain arrows in nested prompt editors.
+        KeyCode::Left => csi_key(b'D', key.modifiers),
+        KeyCode::Right => csi_key(b'C', key.modifiers),
+        KeyCode::Up => csi_key(b'A', key.modifiers),
+        KeyCode::Down => csi_key(b'B', key.modifiers),
+        KeyCode::Home => csi_key(b'H', key.modifiers),
+        KeyCode::End => csi_key(b'F', key.modifiers),
+        KeyCode::Delete => csi_tilde_key(3, key.modifiers),
+        KeyCode::Insert => csi_tilde_key(2, key.modifiers),
+        KeyCode::PageUp => csi_tilde_key(5, key.modifiers),
+        KeyCode::PageDown => csi_tilde_key(6, key.modifiers),
         _ => return None,
     };
     Some(bytes)
@@ -1968,6 +1972,37 @@ fn encode_key(key: &KeyEvent, newline: &[u8]) -> Option<Vec<u8>> {
 
 fn csi(final_byte: u8) -> Vec<u8> {
     vec![0x1b, b'[', final_byte]
+}
+
+/// Xterm's modifier parameter: 1 + Shift + 2*Alt + 4*Ctrl + 8*Super +
+/// 16*Hyper + 32*Meta. The extended bits match the Kitty keyboard protocol
+/// values parsed by crossterm, so Command/Super survives when a terminal reports
+/// it instead of translating the shortcut itself.
+fn key_modifier_param(modifiers: KeyModifiers) -> u8 {
+    1 + u8::from(modifiers.contains(KeyModifiers::SHIFT))
+        + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
+        + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL))
+        + 8 * u8::from(modifiers.contains(KeyModifiers::SUPER))
+        + 16 * u8::from(modifiers.contains(KeyModifiers::HYPER))
+        + 32 * u8::from(modifiers.contains(KeyModifiers::META))
+}
+
+fn csi_key(final_byte: u8, modifiers: KeyModifiers) -> Vec<u8> {
+    let modifier = key_modifier_param(modifiers);
+    if modifier == 1 {
+        csi(final_byte)
+    } else {
+        format!("\x1b[1;{modifier}{}", final_byte as char).into_bytes()
+    }
+}
+
+fn csi_tilde_key(code: u8, modifiers: KeyModifiers) -> Vec<u8> {
+    let modifier = key_modifier_param(modifiers);
+    if modifier == 1 {
+        format!("\x1b[{code}~").into_bytes()
+    } else {
+        format!("\x1b[{code};{modifier}~").into_bytes()
+    }
 }
 
 #[cfg(test)]
@@ -2034,6 +2069,68 @@ mod tests {
         // Plain Enter ignores the newline sequence and always submits.
         let plain = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(encode_key(&plain, b"\n"), Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn navigation_keys_preserve_modifiers_for_nested_prompt_editors() {
+        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r");
+
+        // The existing unmodified sequences stay byte-for-byte compatible.
+        assert_eq!(
+            key(KeyCode::Left, KeyModifiers::NONE),
+            Some(b"\x1b[D".to_vec())
+        );
+        assert_eq!(
+            key(KeyCode::Home, KeyModifiers::NONE),
+            Some(b"\x1b[H".to_vec())
+        );
+        assert_eq!(
+            key(KeyCode::End, KeyModifiers::NONE),
+            Some(b"\x1b[F".to_vec())
+        );
+
+        // Windows reports these modifiers on native arrow-key records. Xterm
+        // parameters let ConPTY and nested TUIs reconstruct the original chord.
+        assert_eq!(
+            key(KeyCode::Left, KeyModifiers::ALT),
+            Some(b"\x1b[1;3D".to_vec())
+        );
+        assert_eq!(
+            key(KeyCode::Right, KeyModifiers::CONTROL),
+            Some(b"\x1b[1;5C".to_vec())
+        );
+        assert_eq!(
+            key(KeyCode::Home, KeyModifiers::SHIFT),
+            Some(b"\x1b[1;2H".to_vec())
+        );
+        assert_eq!(
+            key(KeyCode::End, KeyModifiers::ALT | KeyModifiers::CONTROL),
+            Some(b"\x1b[1;7F".to_vec())
+        );
+
+        // Command/Super is available through terminals that speak the Kitty
+        // keyboard protocol and must not silently degrade into a plain arrow.
+        assert_eq!(
+            key(KeyCode::Left, KeyModifiers::SUPER),
+            Some(b"\x1b[1;9D".to_vec())
+        );
+    }
+
+    #[test]
+    fn tilde_navigation_keys_preserve_modifiers() {
+        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r");
+        assert_eq!(
+            key(KeyCode::Delete, KeyModifiers::NONE),
+            Some(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(
+            key(KeyCode::PageUp, KeyModifiers::CONTROL),
+            Some(b"\x1b[5;5~".to_vec())
+        );
+        assert_eq!(
+            key(KeyCode::Insert, KeyModifiers::SHIFT | KeyModifiers::ALT),
+            Some(b"\x1b[2;4~".to_vec())
+        );
     }
 
     #[test]
