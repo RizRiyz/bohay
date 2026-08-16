@@ -585,7 +585,7 @@ selected=$(printf '%s' "$BOHAY_MODULE_CONTEXT_JSON" | jq -r .selection)
 "$BOHAY_BIN_PATH" ui dock push --id you:ci --rows '[...]'   # feed your sidebar dock
 ```
 
-Anything in `bohay help` is available: panes, tabs, workspaces, worktrees, the
+Anything in `bohay help all` is available: panes, tabs, workspaces, worktrees, the
 git tab, the orchestration board, agents, and the UI chrome. Your command reads
 context from the environment and effects change through the CLI. There is no
 separate module API and no restricted command set.

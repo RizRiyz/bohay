@@ -18,7 +18,8 @@ release or the Codex plugin. If it conflicts with `SKILL.md`, follow `SKILL.md`.
 - UI: `bohay ui dock list`
 - Layout: `bohay workspace list`, `bohay tab list`, `bohay pane list`
 
-Run `bohay help` only when the requested command grammar is uncertain.
+Run `bohay help all` only when the requested command grammar is uncertain. This
+remains compatible with older Bohay releases.
 
 ## Mutation checklist
 

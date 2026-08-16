@@ -1,13 +1,17 @@
 ---
 title: CLI Commands
-description: Every bohay command, generated from `bohay help` and drift-checked in CI.
+description: Every bohay command, generated from `bohay help all` and drift-checked in CI.
 ---
 
 :::note[Source of truth]
-The binary is authoritative: **`bohay help`** always matches your installed
+The binary is authoritative: **`bohay help all`** always matches your installed
 version. This page carries the same text **verbatim**. A test in bohay's CI
 fails if they ever drift apart.
 :::
+
+Use `bohay help <topic>` for one command area or append `--help` to a
+specific command, such as `bohay pane split --help`. Explicit help writes to
+stdout, while invalid usage writes to stderr.
 
 ```txt
 bohay: Mission control for your AI coding agents
@@ -16,7 +20,9 @@ usage: bohay <command> [args]
 
   (no args)            launch / attach the TUI
   --session <name>     target one named server session
-  help                 show this help
+  --version, -V        print the version
+  --help, -h           show compact help
+  help [all|<topic>]   show compact, complete, or focused help
   doctor               check optional external tools (git, gh, …)
   ping                 check the server
 

@@ -151,9 +151,9 @@ From an external terminal, select a live anchor first:
 bohay agent start reviewer --kind codex --anchor <pane-id> --timeout 30
 ```
 
-Before the first anchored start in a thread, check whether `bohay help` lists
-`--anchor`. If it does not, use the compatible two-command path and pass the
-new pane id returned by `pane split`:
+Try the anchored start directly. Only when it returns a syntax or usage error
+showing that `--anchor` is unsupported, use the compatible two-command path and
+pass the new pane id returned by `pane split`. Do not run a help preflight:
 
 ```sh
 bohay pane split <anchor-pane-id> --no-focus
@@ -285,8 +285,9 @@ Use these read routes to resolve state and exact targets:
   `bohay module log <id>`
 - UI: `bohay ui dock list`
 
-Run `bohay help` only when the requested mutation grammar is uncertain. Before
-changing an advanced surface:
+Run `bohay help all` only when the requested mutation grammar is uncertain.
+This remains compatible with older Bohay releases. Before changing an advanced
+surface:
 
 - Inspect files and Git before opening a file, revealing a path, refreshing
   the tree, or opening a Git view.

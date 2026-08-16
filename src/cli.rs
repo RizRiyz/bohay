@@ -40,11 +40,65 @@ pub fn is_cli(args: &[String]) -> bool {
 const USAGE: &str = "\
 bohay: Mission control for your AI coding agents
 
+Usage:
+  bohay [--session <name>]               Launch or attach to the TUI
+  bohay [--session <name>] <command>     Control a local session
+  bohay --remote <host> [ssh args]       Attach to a remote session
+  bohay help all                         Show every command and option
+
+Commands:
+  workspace    Open, organize, and switch projects
+  tab          Create, reorder, rename, and close tabs
+  pane         Split, move, focus, run, inspect, and close panes
+  agent        Start, fork, message, inspect, and resume coding agents
+  files        Browse and open workspace files
+  git          Inspect repository state and open the Git UI
+  worktree     Create, open, list, and remove Git worktrees
+  task         Coordinate work across multiple coding agents
+  lease        Reserve file paths for active tasks
+  module       Find, install, configure, and run extensions
+  ui           Configure sidebars, docks, and notifications
+  session      List, attach, stop, and delete server sessions
+  server       Inspect and manage the selected background server
+  integration  Manage agent session-resume integrations
+  skill        Print, install, update, enable, or remove the Bohay skill
+  wait         Wait for pane output or an agent state
+  search       Search across pane scrollback
+  events       Stream live status changes
+  attach       Open the TUI focused on one pane
+  doctor       Check optional external tools
+  ping         Check whether the selected server responds
+
+Examples:
+  bohay agent list                       See every active coding agent
+  bohay pane split --down                Add a pane below the focused pane
+  bohay workspace open .                 Open the current project
+  bohay session attach docs              Start or open a named session
+  bohay --session docs agent list        Control a session from another terminal
+
+Options:
+  --session <name>                       Target a named server session
+  --remote <host> [ssh args]             Attach through SSH
+  --version, -V                          Print the version
+  --help, -h                             Show this help
+
+Help:
+  bohay help all                         Complete CLI reference
+  bohay help <topic>                     Focus on one command area
+  bohay <topic> <command> --help         Parameters and flags for a command
+  https://bohay.dev/docs/reference/cli/  Online reference
+";
+
+const DETAILED_USAGE: &str = "\
+bohay: Mission control for your AI coding agents
+
 usage: bohay <command> [args]
 
   (no args)            launch / attach the TUI
   --session <name>     target one named server session
-  help                 show this help
+  --version, -V        print the version
+  --help, -h           show compact help
+  help [all|<topic>]   show compact, complete, or focused help
   doctor               check optional external tools (git, gh, …)
   ping                 check the server
 
@@ -194,7 +248,31 @@ server:
 
 pub fn run(args: &[String]) -> Result<i32> {
     if args.get(1).map(String::as_str) == Some("help") {
-        print!("{USAGE}");
+        return match args.get(2).map(String::as_str) {
+            None => {
+                print!("{USAGE}");
+                Ok(0)
+            }
+            Some("all") if args.len() == 3 => {
+                print!("{DETAILED_USAGE}");
+                Ok(0)
+            }
+            Some(topic) if args.len() == 3 => {
+                if write_topic_help(std::io::stdout().lock(), topic, None)? {
+                    Ok(0)
+                } else {
+                    eprintln!("unknown help topic `{topic}`. Run `bohay --help` for the list.");
+                    Ok(2)
+                }
+            }
+            _ => {
+                eprintln!("usage: bohay help [all|<topic>]");
+                Ok(2)
+            }
+        };
+    }
+    if let Some((topic, command)) = command_help_request(args) {
+        write_topic_help(std::io::stdout().lock(), topic, command)?;
         return Ok(0);
     }
     if args.get(1).map(String::as_str) == Some("skill") {
@@ -276,6 +354,253 @@ pub fn run(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// True when an explicit command help request must be handled before `main`
+/// dispatches commands such as `server` and `integration` to local handlers.
+pub fn is_help_request(args: &[String]) -> bool {
+    args.get(1).map(String::as_str) == Some("help") || command_help_request(args).is_some()
+}
+
+fn command_help_request(args: &[String]) -> Option<(&str, Option<&str>)> {
+    let topic = args.get(1)?.as_str();
+    let normalized = normalize_help_topic(topic)?;
+    let group_help = args.len() == 3
+        && matches!(
+            args.get(2).map(String::as_str),
+            Some("help" | "--help" | "-h")
+        );
+    let command_help =
+        args.len() > 3 && matches!(args.last().map(String::as_str), Some("--help" | "-h"));
+    if group_help {
+        return Some((topic, None));
+    }
+    if command_help {
+        let command = help_topic_has_subcommands(normalized).then(|| args[2].as_str());
+        return Some((topic, command));
+    }
+    None
+}
+
+fn help_topic_has_subcommands(topic: &str) -> bool {
+    matches!(
+        topic,
+        "workspace"
+            | "tab"
+            | "pane"
+            | "agent"
+            | "files"
+            | "git"
+            | "worktree"
+            | "task"
+            | "lease"
+            | "module"
+            | "ui"
+            | "session"
+            | "server"
+            | "integration"
+            | "skill"
+            | "wait"
+    )
+}
+
+fn normalize_help_topic(topic: &str) -> Option<&str> {
+    match topic {
+        "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
+        | "lease" | "module" | "ui" | "session" | "server" | "integration" | "skill" | "wait"
+        | "search" | "events" | "ping" | "doctor" | "attach" => Some(topic),
+        "node" => Some("pane"),
+        "remote" | "--remote" => Some("remote"),
+        _ => None,
+    }
+}
+
+fn write_topic_help(
+    mut output: impl Write,
+    requested: &str,
+    command: Option<&str>,
+) -> std::io::Result<bool> {
+    let Some(topic) = normalize_help_topic(requested) else {
+        return Ok(false);
+    };
+    if topic == "session" {
+        if let Some(command) = command {
+            writeln!(output, "Usage: bohay session <command>\n")?;
+            if !write_command_rows(&mut output, SESSION_USAGE, topic, command)? {
+                output.write_all(SESSION_USAGE.as_bytes())?;
+            }
+        } else {
+            output.write_all(SESSION_USAGE.as_bytes())?;
+        }
+        return Ok(true);
+    }
+
+    let (usage, section) = match topic {
+        "workspace" => (
+            "bohay workspace <command> [args]",
+            detailed_section("workspaces:\n", "\ntabs:\n"),
+        ),
+        "tab" => (
+            "bohay tab <command> [args]",
+            detailed_section("tabs:\n", "\npanes / agents:\n"),
+        ),
+        "pane" => (
+            "bohay pane <command> [args]",
+            detailed_section("panes / agents:\n", "\nsearch:\n"),
+        ),
+        "agent" => (
+            "bohay agent <command> [args]",
+            detailed_section("panes / agents:\n", "\nsearch:\n"),
+        ),
+        "skill" => (
+            "bohay skill [install|uninstall|update|on|off] [options]",
+            detailed_section("panes / agents:\n", "\nsearch:\n"),
+        ),
+        "wait" => (
+            "bohay wait <output|agent-status> [args]",
+            detailed_section("panes / agents:\n", "\nsearch:\n"),
+        ),
+        "attach" => (
+            "bohay attach <pane-id>",
+            detailed_section("panes / agents:\n", "\nsearch:\n"),
+        ),
+        "search" => (
+            "bohay search <text...> [--case]",
+            detailed_section("search:\n", "\nappearance:\n"),
+        ),
+        "ui" => (
+            "bohay ui <sidebar|dock|toast> [args]",
+            detailed_section("appearance:\n", "\nmodules (extensions):\n"),
+        ),
+        "module" => (
+            "bohay module <command> [args]",
+            detailed_section("modules (extensions):\n", "\ngit:\n"),
+        ),
+        "git" => (
+            "bohay git <status|branches|log|open> [args]",
+            detailed_section("git:\n", "\nworktrees:\n"),
+        ),
+        "files" => (
+            "bohay files <tree|open|reveal|refresh> [args]",
+            detailed_section("git:\n", "\nworktrees:\n"),
+        ),
+        "worktree" => (
+            "bohay worktree <command> [args]",
+            detailed_section(
+                "worktrees:\n",
+                "\norchestration (multiple agents on one project, docs/22):\n",
+            ),
+        ),
+        "task" => (
+            "bohay task <command> [args]",
+            detailed_section(
+                "orchestration (multiple agents on one project, docs/22):\n",
+                "\nevents:\n",
+            ),
+        ),
+        "lease" => (
+            "bohay lease <acquire|release|list> [args]",
+            detailed_section(
+                "orchestration (multiple agents on one project, docs/22):\n",
+                "\nevents:\n",
+            ),
+        ),
+        "events" => (
+            "bohay events",
+            detailed_section("events:\n", "\nsessions:\n"),
+        ),
+        "remote" => (
+            "bohay [--session <name>] --remote <host> [ssh args]",
+            detailed_section("remote:\n", "\nserver:\n"),
+        ),
+        "server" => (
+            "bohay [--session <name>] server <command>",
+            detailed_section_to_end("server:\n"),
+        ),
+        "integration" => (
+            "bohay integration <install|uninstall> <agent>",
+            detailed_section_to_end("server:\n"),
+        ),
+        "ping" => (
+            "bohay [--session <name>] ping",
+            "Check whether the selected server responds.\n",
+        ),
+        "doctor" => (
+            "bohay doctor",
+            "Check optional external tools used by Bohay.\n",
+        ),
+        _ => unreachable!("normalized help topic"),
+    };
+
+    writeln!(output, "Usage: {usage}\n")?;
+    if let Some(command) = command {
+        if !write_command_rows(&mut output, section, topic, command)? {
+            output.write_all(section.as_bytes())?;
+        }
+    } else {
+        output.write_all(section.as_bytes())?;
+    }
+    Ok(true)
+}
+
+fn write_command_rows(
+    output: &mut impl Write,
+    section: &str,
+    topic: &str,
+    command: &str,
+) -> std::io::Result<bool> {
+    let noun = if topic == "session" { "" } else { topic };
+    let mut matched = false;
+    let mut include_continuation = false;
+
+    for line in section.lines() {
+        let is_command_row = line.starts_with("  ")
+            && line
+                .as_bytes()
+                .get(2)
+                .is_some_and(|character| *character != b' ');
+        if is_command_row {
+            let row = line.trim_start();
+            let rest = if noun.is_empty() {
+                row
+            } else if let Some(rest) = row
+                .strip_prefix(noun)
+                .and_then(|rest| rest.strip_prefix(' '))
+            {
+                rest
+            } else {
+                include_continuation = false;
+                continue;
+            };
+            let syntax = rest.split("  ").next().unwrap_or(rest);
+            include_continuation = syntax
+                .split(|character: char| character.is_whitespace() || character == '|')
+                .any(|token| token == command);
+            if include_continuation {
+                matched = true;
+                writeln!(output, "{line}")?;
+            }
+        } else if include_continuation && !line.trim().is_empty() {
+            writeln!(output, "{line}")?;
+        }
+    }
+    Ok(matched)
+}
+
+fn detailed_section(start: &str, end: &str) -> &'static str {
+    let start = DETAILED_USAGE
+        .find(start)
+        .expect("help section start must exist");
+    let tail = &DETAILED_USAGE[start..];
+    let end = tail.find(end).expect("help section end must exist");
+    &tail[..end]
+}
+
+fn detailed_section_to_end(start: &str) -> &'static str {
+    let start = DETAILED_USAGE
+        .find(start)
+        .expect("help section start must exist");
+    &DETAILED_USAGE[start..]
+}
+
 fn session_cmd(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         Some("list") => session_list(&args[1..]),
@@ -287,7 +612,7 @@ fn session_cmd(args: &[String]) -> Result<i32> {
                 Some("help" | "--help" | "-h")
             ) =>
         {
-            print_session_help();
+            write_session_help(std::io::stdout().lock())?;
             Ok(0)
         }
         Some("attach") => {
@@ -295,22 +620,28 @@ fn session_cmd(args: &[String]) -> Result<i32> {
             Ok(2)
         }
         Some("help" | "--help" | "-h") => {
-            print_session_help();
+            write_session_help(std::io::stdout().lock())?;
             Ok(0)
         }
         _ => {
-            print_session_help();
+            write_session_help(std::io::stderr().lock())?;
             Ok(2)
         }
     }
 }
 
-fn print_session_help() {
-    eprintln!("bohay session commands:");
-    eprintln!("  bohay session list [--json]");
-    eprintln!("  bohay session attach <name>");
-    eprintln!("  bohay session stop <name> [--json]");
-    eprintln!("  bohay session delete <name> [--json]");
+const SESSION_USAGE: &str = "\
+Usage: bohay session <command>
+
+Commands:
+  list [--json]         List default and named sessions
+  attach <name>        Start or attach to a named session
+  stop <name> [--json] Stop a named session and its panes
+  delete <name> [--json] Delete a stopped named session
+";
+
+fn write_session_help(mut output: impl Write) -> std::io::Result<()> {
+    output.write_all(SESSION_USAGE.as_bytes())
 }
 
 fn session_list(args: &[String]) -> Result<i32> {
@@ -1366,7 +1697,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("workspace" | "node", "" | "list") => ("workspace.list".into(), json!({})),
         ("workspace" | "node", other) => {
             return Err(anyhow!(
-                "unknown workspace command `{other}`. Try `bohay help`."
+                "unknown workspace command `{other}`. Try `bohay help workspace`."
             ))
         }
 
@@ -1398,7 +1729,11 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             ("tab.rename".into(), Value::Object(obj))
         }
         ("tab", "" | "list") => ("tab.list".into(), json!({})),
-        ("tab", other) => return Err(anyhow!("unknown tab command `{other}`. Try `bohay help`.")),
+        ("tab", other) => {
+            return Err(anyhow!(
+                "unknown tab command `{other}`. Try `bohay help tab`."
+            ))
+        }
 
         ("pane", "split") => {
             let mut obj = serde_json::Map::new();
@@ -1534,7 +1869,9 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
         ("pane", "" | "list") => ("pane.list".into(), json!({})),
         ("pane", other) => {
-            return Err(anyhow!("unknown pane command `{other}`. Try `bohay help`."))
+            return Err(anyhow!(
+                "unknown pane command `{other}`. Try `bohay help pane`."
+            ))
         }
 
         ("module", "link") => {
@@ -1763,7 +2100,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         ("lease", "release") => ("lease.release".into(), one("id", arg0())),
         ("lease", _) => ("lease.list".into(), json!({})),
 
-        _ => return Err(anyhow!("unknown command. Try `bohay help`.")),
+        _ => return Err(anyhow!("unknown command. Try `bohay --help`.")),
     })
 }
 
@@ -2175,9 +2512,9 @@ mod tests {
     }
 
     // The docs site's CLI reference (website/…/reference/cli.mdx) carries the
-    // `bohay help` text VERBATIM — this guard fails CI if a command changes
+    // `bohay help all` text VERBATIM — this guard fails CI if a command changes
     // without the docs page being regenerated, so the two can never drift.
-    // Regenerate with:  bohay help  →  the page's ```txt block.
+    // Regenerate with:  bohay help all  →  the page's ```txt block.
     #[test]
     fn docs_cli_reference_matches_help() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2190,12 +2527,12 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n```").next())
             .expect("cli.mdx must contain a ```txt block");
-        // USAGE ends with a newline the split consumes; compare trimmed.
+        // DETAILED_USAGE ends with a newline the split consumes; compare trimmed.
         assert_eq!(
             block.trim_end(),
-            USAGE.trim_end(),
-            "website/…/reference/cli.mdx has drifted from `bohay help` — \
-             regenerate the page's txt block from the USAGE text"
+            DETAILED_USAGE.trim_end(),
+            "website/…/reference/cli.mdx has drifted from `bohay help all` — \
+             regenerate the page's txt block from the DETAILED_USAGE text"
         );
     }
 }

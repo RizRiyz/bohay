@@ -52,7 +52,7 @@ bohay module log                 # status + captured output
 ```
 
 A module can reach docks, panes, tabs, right-click menus, settings, lifecycle
-events, and a startup hook. Anything in `bohay help` is available to it.
+events, and a startup hook. Anything in `bohay help all` is available to it.
 
 ## Worked examples
 

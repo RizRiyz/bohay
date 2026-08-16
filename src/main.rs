@@ -64,6 +64,7 @@ fn main() -> Result<()> {
             let help = [args[0].clone(), "help".to_string()];
             std::process::exit(cli::run(&help)?);
         }
+        Some(_) if cli::is_help_request(&args) => std::process::exit(cli::run(&args)?),
         Some("server") => return server_cmd(&args),
         Some("client") => return ipc::client::run(&persist::client_socket_path()),
         // Remote attach (docs/18 RA): the bridge runs on the remote host (via
