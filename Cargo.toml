@@ -77,6 +77,12 @@ libc = "0.2"
 lto = "thin"
 strip = true
 
+# `vte`'s synchronized-update buffer is allocated lazily in our pinned local
+# patch. The upstream 0.15.0 release reserves 2 MiB for every terminal parser,
+# even when the terminal never uses synchronized updates.
+[patch.crates-io]
+vte = { path = "vendor/vte" }
+
 # ── Linux packaging (docs/16) ────────────────────────────────────────────────
 # bohay is a single static (musl) binary with no shared-library dependencies, so
 # a .deb/.rpm just drops the binary in /usr/bin and declares nothing hard. The
