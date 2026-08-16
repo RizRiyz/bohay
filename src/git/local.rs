@@ -2,6 +2,7 @@
 //! No new dependency (same spirit as `module/discovery.rs`). Every function
 //! returns owned data or a short error string; the caller renders it.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -243,12 +244,28 @@ pub fn commits(cwd: &Path, n: usize, all: bool) -> Result<Vec<Commit>, String> {
     let fmt = format!("%h{F}%s{F}%an{F}%ar{F}%d", F = FIELD);
     let count = format!("-n{n}");
     let pretty = format!("--pretty=format:{fmt}");
-    let mut args: Vec<&str> = vec!["log", "--graph", &count, &pretty];
+    let args = commit_log_args(&count, &pretty, all);
+    let raw = run(cwd, &args)?;
+    Ok(parse_commits(&raw))
+}
+
+/// Arguments for the native commit-flow view. `--no-color` is mandatory: this
+/// output is rendered by Bohay, not replayed into a terminal. Git configuration
+/// such as `color.ui=always` must never leak ANSI control sequences into cells.
+fn commit_log_args<'a>(count: &'a str, pretty: &'a str, all: bool) -> Vec<&'a str> {
+    let mut args = vec!["log", "--no-color", "--graph", count, pretty];
     if all {
         args.push("--all");
     }
-    let raw = run(cwd, &args)?;
-    Ok(raw
+    args
+}
+
+fn parse_commits(raw: &str) -> Vec<Commit> {
+    // `--no-color` handles normal Git configuration. Sanitizing is a cheap
+    // defence in depth for a wrapper or malformed external output: no allocation
+    // occurs for the normal no-escape case.
+    let clean = strip_ansi(raw);
+    clean
         .lines()
         .filter_map(|line| {
             // `--graph` prefixes each line with rail glyphs before the format.
@@ -273,7 +290,59 @@ pub fn commits(cwd: &Path, n: usize, all: bool) -> Result<Vec<Commit>, String> {
                 None => None,
             }
         })
-        .collect())
+        .collect()
+}
+
+/// Remove CSI/OSC escape sequences from external text without touching normal
+/// UTF-8. This keeps native text widgets safe even if an external Git wrapper
+/// ignores `--no-color`.
+fn strip_ansi(input: &str) -> Cow<'_, str> {
+    let bytes = input.as_bytes();
+    if !bytes.contains(&0x1b) {
+        return Cow::Borrowed(input);
+    }
+
+    let mut out = String::with_capacity(input.len());
+    let (mut start, mut i) = (0, 0);
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        out.push_str(&input[start..i]);
+        i += 1;
+        match bytes.get(i) {
+            Some(b'[') => {
+                i += 1;
+                while i < bytes.len() {
+                    let byte = bytes[i];
+                    i += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            Some(b']') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            Some(_) => i += 1,
+            None => {}
+        }
+        start = i;
+    }
+    out.push_str(&input[start..]);
+    Cow::Owned(out)
 }
 
 /// Checkout a branch (mutating). Used by the Branches view's `enter`.
@@ -547,6 +616,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
     use super::*;
+
+    #[test]
+    fn commit_log_always_requests_plain_output() {
+        let args = commit_log_args("-n100", "--pretty=format:%h", true);
+        assert!(args.contains(&"--no-color"));
+        assert!(args.contains(&"--graph"));
+        assert!(args.contains(&"--all"));
+    }
+
+    #[test]
+    fn colored_git_graph_is_sanitized_before_rendering() {
+        let raw = "\x1b[31m* \x1b[0mabc1234\x1fsubject\x1fauthor\x1f2 days ago\x1f\x1b[32m(HEAD -> main)\x1b[0m\n";
+        let commits = parse_commits(raw);
+        assert_eq!(commits.len(), 1);
+        let commit = &commits[0];
+        assert_eq!(commit.graph, "* ");
+        assert_eq!(commit.sha, "abc1234");
+        assert_eq!(commit.subject, "subject");
+        assert_eq!(commit.refs, "(HEAD -> main)");
+        assert!(
+            [
+                commit.graph.as_str(),
+                commit.sha.as_str(),
+                commit.subject.as_str(),
+                commit.author.as_str(),
+                commit.when.as_str(),
+                commit.refs.as_str(),
+            ]
+            .iter()
+            .all(|field| !field.contains('\x1b')),
+            "native Git UI fields must never receive ANSI escapes"
+        );
+    }
 
     #[test]
     fn parses_remote_forms() {

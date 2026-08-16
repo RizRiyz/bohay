@@ -1820,51 +1820,68 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<AppEvent>();
         let mut app = App::new(78, 30, tx).expect("spawn pane");
 
-        // Split into two panes: left runs a "claude" session, right is a shell.
+        // Split into two panes: Codex is the active working pane and Claude is
+        // a second, independent agent. This is a mission-control scene.
         let left = app.layout().focus;
         app.handle_event(key(' ', KeyModifiers::CONTROL)); // prefix (Ctrl+Space)
         app.handle_event(key('v', KeyModifiers::NONE)); // split → side by side
         if let Some(p) = app.panes.get_mut(&left) {
-            p.command = "claude".to_string();
+            p.command = "codex".to_string();
         }
 
-        // A scripted "Claude Code" session so the left pane shows rich content.
-        let payload: &[u8] = b"\x1b[2J\x1b[H\r\n\
-\x1b[38;5;213m  \xe2\x9c\xbb Claude Code\x1b[0m  \x1b[38;5;245mopus-4.8\x1b[0m\r\n\r\n\
-\x1b[38;5;245m  \xe2\x94\x82\x1b[0m \x1b[38;5;252mrefactor the auth module to use the new token store\x1b[0m\r\n\r\n\
-\x1b[38;5;114m  \xe2\x97\x8f\x1b[0m \x1b[38;5;252mRead\x1b[0m  \x1b[38;5;111msrc/auth/mod.rs\x1b[0m \x1b[38;5;245m(214 lines)\x1b[0m\r\n\
-\x1b[38;5;114m  \xe2\x97\x8f\x1b[0m \x1b[38;5;252mEdit\x1b[0m  \x1b[38;5;111msrc/auth/token.rs\x1b[0m   \x1b[38;5;114m+42\x1b[0m \x1b[38;5;210m-17\x1b[0m\r\n\
-\x1b[38;5;114m  \xe2\x97\x8f\x1b[0m \x1b[38;5;252mEdit\x1b[0m  \x1b[38;5;111msrc/auth/session.rs\x1b[0m \x1b[38;5;114m+8\x1b[0m  \x1b[38;5;210m-3\x1b[0m\r\n\r\n\
-\x1b[38;5;221m  \xe2\x97\x8f\x1b[0m \x1b[38;5;252mRunning\x1b[0m \x1b[38;5;245mcargo test auth\x1b[0m\r\n\
-\x1b[38;5;245m    test auth::token::roundtrip ... \x1b[0m\x1b[38;5;114mok\x1b[0m\r\n\
-\x1b[38;5;245m    test auth::session::expiry  ... \x1b[0m\x1b[38;5;114mok\x1b[0m\r\n\r\n\
-\x1b[38;5;245m  \xe2\x94\x94\xe2\x94\x80\x1b[0m \x1b[38;5;252mAll tests passing. Ready for review.\x1b[0m\r\n\r\n\
-\x1b[38;5;240m  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\r\n\
-\x1b[38;5;245m  >\x1b[0m \x1b[7m \x1b[0m\r\n";
+        // The blank row immediately above and below the Codex prompt matches
+        // its live composer geometry, exercising Bohay's theme-aware composer
+        // surface in both generated previews.
+        let codex_payload = "\x1b[2J\x1b[H\r\n\
+\x1b[1m  OpenAI Codex\x1b[0m  \x1b[38;5;245mv0.147.0\x1b[0m\r\n\
+\x1b[38;5;245m  Codex · gpt-5.6-sol\x1b[0m\r\n\r\n\
+\x1b[38;5;252m  Mapping workspace changes.\x1b[0m\r\n\r\n\
+\x1b[38;5;114m  •\x1b[0m \x1b[38;5;252mExplored\x1b[0m  \x1b[38;5;111msrc/app\x1b[0m\r\n\
+\x1b[38;5;114m  •\x1b[0m \x1b[38;5;252mEdited\x1b[0m  \x1b[38;5;111mpanes.rs\x1b[0m  \x1b[38;5;114m+22\x1b[0m\r\n\
+\x1b[38;5;221m  •\x1b[0m \x1b[38;5;252mRan\x1b[0m  \x1b[38;5;114m529 passed\x1b[0m\r\n\r\n\
+\x1b[38;5;245m  Ready to review.\x1b[0m\r\n\
+\x1b[38;5;240m  ────────────────────────\x1b[0m\r\n\r\n\
+\x1b[38;5;245m  ›\x1b[0m \x1b[38;5;252mSummarize commits\x1b[0m\r\n\x1b[A";
         if let Some(p) = app.panes.get(&left) {
             if let Ok(mut e) = p.engine.lock() {
-                e.advance(payload);
+                e.advance(codex_payload.as_bytes());
             }
         }
 
-        // Right pane: a shell prompt so it isn't blank in the still image.
+        // The second pane makes the sidebar's multi-agent view meaningful too.
         let right = app.layout().focus;
-        let prompt: &[u8] = b"\x1b[2J\x1b[H\r\n  \x1b[38;5;108mbohay\x1b[0m \x1b[38;5;245m~/skyrizz/bohay\x1b[0m\r\n  \x1b[38;5;215m\xe2\x9d\xaf\x1b[0m \x1b[7m \x1b[0m\x1b[0m";
+        if let Some(p) = app.panes.get_mut(&right) {
+            p.command = "claude".to_string();
+        }
+        let prompt = "\x1b[2J\x1b[H\r\n\
+\x1b[38;5;213m  ✻ Claude Code\x1b[0m  \x1b[38;5;245mopus-4.8\x1b[0m\r\n\r\n\
+\x1b[38;5;252m  Reviewing release notes.\x1b[0m\r\n\r\n\
+\x1b[38;5;114m  ●\x1b[0m \x1b[38;5;252mRead\x1b[0m  \x1b[38;5;111mv0.10.3.md\x1b[0m\r\n\
+\x1b[38;5;221m  ●\x1b[0m \x1b[38;5;252mWorking\x1b[0m  \x1b[38;5;245mReady\x1b[0m\r\n\r\n\
+\x1b[38;5;245m  >\x1b[0m \x1b[7m \x1b[0m";
         if let Some(p) = app.panes.get(&right) {
             if let Ok(mut e) = p.engine.lock() {
-                e.advance(prompt);
+                e.advance(prompt.as_bytes());
             }
         }
 
         // Force representative states for the still image.
         if let Some(s) = app.status.get_mut(&left) {
             s.state = State::Working;
-            s.agent = "claude".to_string();
+            s.agent = "codex".to_string();
         }
         if let Some(s) = app.status.get_mut(&right) {
-            s.state = State::Idle;
-            s.agent = "zsh".to_string(); // a shell — filtered out of AGENTS
+            s.state = State::Working;
+            s.agent = "claude".to_string();
         }
+        assert!(
+            app.panes
+                .get(&left)
+                .and_then(|p| p.engine.lock().ok())
+                .and_then(|engine| engine.codex_composer_region())
+                .is_some(),
+            "the Codex fixture must retain the live composer geometry"
+        );
         // Show the workspace with its git branch.
         app.workspaces[0].branch = Some("main".to_string());
 

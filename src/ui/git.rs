@@ -11,6 +11,19 @@ use crate::git::{
 };
 use crate::i18n::Catalog;
 
+const PR_STATUS_W: usize = 13;
+const PR_NUMBER_W: usize = 6;
+const PR_AUTHOR_W: usize = 11;
+const PR_REVIEWER_W: usize = 11;
+const PR_CHECKS_W: usize = 8;
+const PR_CHANGE_W: usize = 8;
+const PR_FIXED_W: usize =
+    PR_STATUS_W + PR_NUMBER_W + PR_AUTHOR_W + PR_REVIEWER_W + PR_CHECKS_W + PR_CHANGE_W * 2;
+
+fn pr_title_width(row_width: usize) -> usize {
+    row_width.saturating_sub(PR_FIXED_W).max(12)
+}
+
 /// The view-selector label for `s` in the active language.
 fn section_label(s: Section, cat: &Catalog) -> &'static str {
     match s {
@@ -118,23 +131,36 @@ fn draw_prs(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t: &Th
     if v.is_empty() {
         return message(f, area, cat.git_no_prs, t.green);
     }
-    let title_w = area.width.saturating_sub(62).max(12) as usize;
-    let header = Line::from(Span::styled(
-        format!(
-            "{:<13}{:<6}{:<w$}{:<11}{:<11}{}  +/-",
-            cat.col_status,
-            "#",
-            cat.col_title,
-            cat.col_author,
-            cat.col_reviewer,
-            cat.col_checks,
-            w = title_w
+    // `draw_list` reserves two cells for the selection marker. Calculate and
+    // render the header in that same content width, so its columns align exactly
+    // with the selectable rows below.
+    let row_width = area.width.saturating_sub(2) as usize;
+    let title_w = pr_title_width(row_width);
+    let header = Line::from(vec![
+        Span::styled(
+            pad(cat.col_status, PR_STATUS_W),
+            Style::new().fg(t.subtext0),
         ),
-        Style::new().fg(t.subtext0),
-    ));
+        Span::styled(pad("#", PR_NUMBER_W), Style::new().fg(t.subtext0)),
+        Span::styled(pad(cat.col_title, title_w), Style::new().fg(t.subtext0)),
+        Span::styled(
+            pad(cat.col_author, PR_AUTHOR_W),
+            Style::new().fg(t.subtext0),
+        ),
+        Span::styled(
+            pad(cat.col_reviewer, PR_REVIEWER_W),
+            Style::new().fg(t.subtext0),
+        ),
+        Span::styled(
+            pad(cat.col_checks, PR_CHECKS_W),
+            Style::new().fg(t.subtext0),
+        ),
+        Span::styled(pad("+", PR_CHANGE_W), Style::new().fg(t.subtext0)),
+        Span::styled(pad("-", PR_CHANGE_W), Style::new().fg(t.subtext0)),
+    ]);
     f.render_widget(
         Paragraph::new(header),
-        Rect::new(area.x, area.y, area.width, 1),
+        Rect::new(area.x + 2, area.y, area.width.saturating_sub(2), 1),
     );
     let list = Rect::new(
         area.x,
@@ -160,16 +186,25 @@ fn pr_line(p: &PullRequest, title_w: usize, cat: &Catalog, t: &Theme) -> Line<'s
     };
     Line::from(vec![
         Span::styled(
-            format!("{:<13}", format!("[{badge}]")),
+            pad(&format!("[{badge}]"), PR_STATUS_W),
             Style::new().fg(bcol).bold(),
         ),
-        Span::styled(format!("#{:<5}", p.number), Style::new().fg(t.subtext0)),
+        Span::styled(
+            pad(&format!("#{}", p.number), PR_NUMBER_W),
+            Style::new().fg(t.subtext0),
+        ),
         Span::styled(pad(&title, title_w), Style::new().fg(t.text)),
-        Span::styled(pad(&p.author, 10), Style::new().fg(t.subtext0)),
-        Span::styled(pad(reviewer, 10), Style::new().fg(t.amber)),
-        Span::styled(format!("  {gly}   "), Style::new().fg(ccol)),
-        Span::styled(format!("+{} ", p.additions), Style::new().fg(t.green)),
-        Span::styled(format!("-{}", p.deletions), Style::new().fg(t.coral)),
+        Span::styled(pad(&p.author, PR_AUTHOR_W), Style::new().fg(t.subtext0)),
+        Span::styled(pad(reviewer, PR_REVIEWER_W), Style::new().fg(t.amber)),
+        Span::styled(pad(gly, PR_CHECKS_W), Style::new().fg(ccol)),
+        Span::styled(
+            pad(&format!("+{}", p.additions), PR_CHANGE_W),
+            Style::new().fg(t.green),
+        ),
+        Span::styled(
+            pad(&format!("-{}", p.deletions), PR_CHANGE_W),
+            Style::new().fg(t.coral),
+        ),
     ])
 }
 
@@ -936,35 +971,89 @@ fn draw_commits(f: &mut RenderTarget, area: Rect, g: &GitView, cat: &Catalog, t:
         Load::Loaded(v) => v,
         Load::Idle => return,
     };
-    let sub_w = area.width.saturating_sub(40).max(10);
+    // Match PRs and Issues: a fluid main column plus stable metadata columns.
+    // Reserving one graph width and refs column across all rows makes the list
+    // scan as a table instead of allowing each row to drift.
+    let has_refs = v.iter().any(|c| !c.refs.is_empty());
+    let graph_width = v
+        .iter()
+        .map(|c| crate::ui::display_width(&c.graph))
+        .max()
+        .unwrap_or(0);
     let rows: Vec<Line> = filtered_commits(v, &g.filter)
         .map(|c| {
-            let mut spans = vec![];
-            if !c.graph.is_empty() {
-                spans.push(Span::styled(c.graph.clone(), Style::new().fg(t.overlay0)));
-            }
-            spans.push(Span::styled(
-                format!("{} ", c.sha),
-                Style::new().fg(t.amber),
-            ));
-            spans.push(Span::styled(
-                pad(&c.subject, sub_w as usize),
-                Style::new().fg(t.text),
-            ));
-            if !c.refs.is_empty() {
-                spans.push(Span::styled(
-                    format!("{} ", c.refs),
-                    Style::new().fg(t.mint),
-                ));
-            }
-            spans.push(Span::styled(
-                format!("{} · {}", trunc(&c.author, 12), c.when),
-                Style::new().fg(t.overlay0),
-            ));
-            Line::from(spans)
+            commit_row(
+                c,
+                area.width.saturating_sub(2) as usize,
+                graph_width,
+                has_refs,
+                t,
+            )
         })
         .collect();
     draw_list(f, area, rows, g.cursor, cat, t);
+}
+
+/// Commit table widths. The subject uses all remaining width, like PR/Issue
+/// titles, while refs, author, and relative time remain readable columns.
+fn commit_columns(row_width: usize, graph_width: usize, has_refs: bool) -> (usize, usize, usize) {
+    const SHA_WIDTH: usize = 8; // seven-char SHA plus one separating space
+    const REFS_WIDTH: usize = 30;
+    const META_WIDTH: usize = 28; // author (12) + separator + relative time
+    const SUBJECT_MIN: usize = 12;
+
+    let available = row_width.saturating_sub(graph_width + SHA_WIDTH);
+    let meta = if available >= SUBJECT_MIN + META_WIDTH {
+        META_WIDTH
+    } else {
+        0
+    };
+    let refs = if has_refs && available >= SUBJECT_MIN + meta + REFS_WIDTH {
+        REFS_WIDTH
+    } else {
+        0
+    };
+    let subject = available.saturating_sub(refs + meta).max(SUBJECT_MIN);
+    (subject, refs, meta)
+}
+
+fn commit_row(
+    c: &crate::git::model::Commit,
+    row_width: usize,
+    graph_width: usize,
+    has_refs: bool,
+    t: &Theme,
+) -> Line<'static> {
+    let (subject_w, refs_w, meta_w) = commit_columns(row_width, graph_width, has_refs);
+    let mut spans = Vec::with_capacity(7);
+    if graph_width > 0 {
+        spans.push(Span::styled(
+            pad(&c.graph, graph_width),
+            Style::new().fg(t.overlay0),
+        ));
+    }
+    spans.push(Span::styled(pad(&c.sha, 8), Style::new().fg(t.amber)));
+    spans.push(Span::styled(
+        pad(&c.subject, subject_w),
+        Style::new().fg(t.text),
+    ));
+    if refs_w > 0 {
+        spans.push(Span::styled(pad(&c.refs, refs_w), Style::new().fg(t.mint)));
+    }
+    if meta_w > 0 {
+        let when_w = 12.min(meta_w.saturating_sub(4));
+        let author_w = meta_w.saturating_sub(when_w + 3);
+        spans.push(Span::styled(
+            pad(&c.author, author_w),
+            Style::new().fg(t.subtext0),
+        ));
+        spans.push(Span::styled(" · ", Style::new().fg(t.surface1)));
+        spans.push(Span::styled(
+            trunc(&c.when, when_w),
+            Style::new().fg(t.overlay0),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Returns the clamped scroll offset and, when it is on screen, the rect of the
@@ -1241,6 +1330,43 @@ fn trunc(s: &str, n: usize) -> String {
 
 /// Truncate then pad to exactly `n` columns.
 fn pad(s: &str, n: usize) -> String {
+    if n == 0 {
+        return String::new();
+    }
     let s = trunc(s, n);
-    format!("{s:<n$} ", n = n.saturating_sub(1))
+    format!("{s:<n$}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{commit_columns, pad, pr_title_width};
+
+    #[test]
+    fn padded_columns_never_exceed_their_declared_width() {
+        assert_eq!(pad("a", 3), "a  ");
+        assert_eq!(pad("abc", 3), "abc");
+        assert_eq!(pad("abcd", 3), "ab…");
+        assert_eq!(pad("anything", 0), "");
+    }
+
+    #[test]
+    fn pr_rows_reserve_fixed_columns_before_the_title() {
+        assert_eq!(pr_title_width(140), 75);
+        assert_eq!(pr_title_width(50), 12);
+    }
+
+    #[test]
+    fn wide_commit_rows_fill_the_table_before_metadata() {
+        // Like PR/Issue titles, the subject receives every column left after
+        // the graph, refs, author, and time fields have been reserved.
+        assert_eq!(commit_columns(180, 2, true), (112, 30, 28));
+    }
+
+    #[test]
+    fn narrow_commit_rows_prioritize_the_subject() {
+        // On small displays references yield first; metadata is omitted only
+        // once it would crowd out the commit message itself.
+        assert_eq!(commit_columns(58, 2, true), (20, 0, 28));
+        assert_eq!(commit_columns(30, 2, true), (20, 0, 0));
+    }
 }
