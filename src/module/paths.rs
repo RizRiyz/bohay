@@ -23,7 +23,10 @@ pub fn config_dir(id: &str) -> PathBuf {
 
 /// Per-module state dir: `…/modules/state/<c>/`.
 pub fn state_dir(id: &str) -> PathBuf {
-    modules_root().join("state").join(sanitize(id))
+    crate::persist::session_dir()
+        .join("modules")
+        .join("state")
+        .join(sanitize(id))
 }
 
 /// The base dir for managed git checkouts: `…/modules/git/`.
@@ -106,5 +109,18 @@ mod tests {
         let s = sanitize(&long);
         assert!(s.len() <= 120);
         assert_eq!(sanitize(&long), s, "stable");
+    }
+
+    #[test]
+    fn module_config_is_global_but_runtime_state_is_session_local() {
+        let _env = crate::persist::test_env("module-session-paths");
+        let root = crate::persist::config_dir();
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "alpha");
+
+        assert_eq!(config_dir("you.test"), root.join("modules/config/you.test"));
+        assert_eq!(
+            state_dir("you.test"),
+            root.join("sessions/alpha/modules/state/you.test")
+        );
     }
 }

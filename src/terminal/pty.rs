@@ -221,6 +221,9 @@ impl Pane {
         if let Some(sock) = crate::ipc::api::socket_path_env() {
             cmd.env("BOHAY_SOCKET_PATH", sock);
         }
+        if let Some(name) = crate::session::active_name() {
+            cmd.env(crate::session::SESSION_ENV_VAR, name);
+        }
         // This session's exact binary, so an agent can use `$BOHAY_BIN_PATH`
         // instead of a `bohay` on PATH that may be an older install with a
         // different CLI (skill/binary skew). Matches the server it talks to.

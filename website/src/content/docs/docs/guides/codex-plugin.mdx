@@ -15,6 +15,18 @@ Outside Bohay, the plugin resolves the installed `bohay` command and controls
 its configured production session. With the default configuration this is the
 server at `~/.bohay/bohay.sock`.
 
+For a named server, include the selector in the request or command:
+
+```sh
+bohay --session api agent list
+bohay --session api pane focus 7
+```
+
+The plugin preserves the inherited socket inside a managed pane. Outside a
+pane, an explicit `--session` wins over any inherited socket. It does not run
+`session list`, `help`, or `ping` before an ordinary operation, so named-session
+routing adds no discovery round trip to the fast command path.
+
 ## Install from the Bohay marketplace
 
 Register the public Bohay repository as a Codex marketplace, then install the

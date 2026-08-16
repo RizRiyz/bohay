@@ -176,3 +176,10 @@ Everything lives in **`~/.bohay/`** (override with `$BOHAY_HOME`): your
 [configuration](/docs/reference/configuration/), the auto-saved session
 snapshot, and the orchestration ledger. The directory is created owner-only
 (`0700`).
+
+The existing default session keeps its files directly in this directory, so
+upgrading requires no migration. Named server sessions store their runtime
+files under `~/.bohay/sessions/<name>/`. Preferences, manifests, skills, and
+module installations remain shared. Rollback is therefore simple: older Bohay
+versions continue to see the unchanged default session and ignore the named
+subdirectories.

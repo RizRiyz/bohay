@@ -1730,7 +1730,7 @@ impl App {
                     continue;
                 }
                 // An orchestration board (docs/22): re-create the placeholder tab;
-                // its data lives in the shared `orch.json` ledger, loaded already.
+                // its data lives in this session's `orch.json` ledger, loaded already.
                 if tab.orch {
                     let placeholder = PaneId::alloc();
                     tabs.push(Tab {

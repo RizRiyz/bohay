@@ -4,10 +4,18 @@ description: The JSON control API, covering wire format, methods, and the event 
 ---
 
 Everything the CLI does goes over a local socket speaking newline-delimited
-JSON at `~/.bohay/bohay.sock` (the path is injected into every pane as
-`$BOHAY_SOCKET_PATH`). The CLI is a thin wrapper: **every `bohay <verb>` maps
-to one method**, so the easiest way to learn the API is to use the CLI and
-read its JSON output.
+JSON. The default server remains at `~/.bohay/bohay.sock`. A named server
+normally uses `~/.bohay/sessions/<name>/bohay.sock`. On Unix, an unusually long
+custom `BOHAY_HOME` gets a deterministic short socket alias under an owner-only
+directory in `/tmp` to stay within the operating system's path limit.
+
+The resolved path is injected into every pane as `$BOHAY_SOCKET_PATH`. That
+socket is the authority boundary, so methods do not need a session parameter.
+Use `bohay --session <name> <command>` from outside a pane. Inside a pane, keep
+the inherited socket so commands cannot drift to another server. The CLI is a
+thin wrapper: **every server command maps to one method**, so the easiest way
+to learn the API is to use the CLI and read its JSON output. Session list,
+stop, and delete are local lifecycle helpers that resolve the chosen socket.
 
 ## Wire format
 
@@ -202,5 +210,5 @@ still spell these `node.created` / `node.closed`) · `tab.created` · `tab.close
 - The socket is **owner-only** (`0600`, in a `0700` dir). Access equals
   command execution as your user. See the
   [security model](/docs/explanation/security/).
-- `ping` returns the server's version, useful for health checks and
-  upgrade detection.
+- `ping` returns the server's version and selected session name, useful for
+  health checks, upgrade detection, and routing verification.

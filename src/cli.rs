@@ -32,6 +32,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "help"
                 | "doctor"
                 | "skill"
+                | "session"
         )
     )
 }
@@ -42,6 +43,7 @@ bohay: Mission control for your AI coding agents
 usage: bohay <command> [args]
 
   (no args)            launch / attach the TUI
+  --session <name>     target one named server session
   help                 show this help
   doctor               check optional external tools (git, gh, …)
   ping                 check the server
@@ -169,6 +171,12 @@ orchestration (multiple agents on one project, docs/22):
 events:
   events                     stream live status changes
 
+sessions:
+  session list [--json]      list default and named server sessions
+  session attach <name>      start or attach the named session
+  session stop <name> [--json]    stop only the named session and its panes
+  session delete <name> [--json]  delete a stopped named session
+
 remote:
   --remote <host> [ssh args] attach to a bohay session on <host> over plain ssh
 
@@ -191,6 +199,9 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
     if args.get(1).map(String::as_str) == Some("skill") {
         return skill_cmd(&args[2.min(args.len())..]);
+    }
+    if args.get(1).map(String::as_str) == Some("session") {
+        return session_cmd(&args[2.min(args.len())..]);
     }
     // `doctor` is a local environment check — no server needed.
     if args.get(1).map(String::as_str) == Some("doctor") {
@@ -263,6 +274,133 @@ pub fn run(args: &[String]) -> Result<i32> {
         Err(_) => println!("{line}"),
     }
     Ok(0)
+}
+
+fn session_cmd(args: &[String]) -> Result<i32> {
+    match args.first().map(String::as_str) {
+        Some("list") => session_list(&args[1..]),
+        Some("stop") => session_stop(&args[1..]),
+        Some("delete") => session_delete(&args[1..]),
+        Some("attach")
+            if matches!(
+                args.get(1).map(String::as_str),
+                Some("help" | "--help" | "-h")
+            ) =>
+        {
+            print_session_help();
+            Ok(0)
+        }
+        Some("attach") => {
+            eprintln!("usage: bohay session attach <name>");
+            Ok(2)
+        }
+        Some("help" | "--help" | "-h") => {
+            print_session_help();
+            Ok(0)
+        }
+        _ => {
+            print_session_help();
+            Ok(2)
+        }
+    }
+}
+
+fn print_session_help() {
+    eprintln!("bohay session commands:");
+    eprintln!("  bohay session list [--json]");
+    eprintln!("  bohay session attach <name>");
+    eprintln!("  bohay session stop <name> [--json]");
+    eprintln!("  bohay session delete <name> [--json]");
+}
+
+fn session_list(args: &[String]) -> Result<i32> {
+    let json = match args {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => return Err(anyhow!("usage: bohay session list [--json]")),
+    };
+    let sessions = crate::session::list_sessions()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"sessions": sessions}))?
+        );
+        return Ok(0);
+    }
+    println!("{:<24} {:<10} directory", "name", "status");
+    for session in sessions {
+        println!(
+            "{:<24} {:<10} {}",
+            session.name,
+            if session.running {
+                "running"
+            } else {
+                "stopped"
+            },
+            session.session_dir
+        );
+    }
+    Ok(0)
+}
+
+fn parse_session_name_and_json<'a>(args: &'a [String], usage: &str) -> Result<(&'a str, bool)> {
+    match args {
+        [name] => Ok((name, false)),
+        [name, flag] if flag == "--json" => Ok((name, true)),
+        _ => Err(anyhow!(usage.to_string())),
+    }
+}
+
+fn session_stop(args: &[String]) -> Result<i32> {
+    let (name, json_output) =
+        parse_session_name_and_json(args, "usage: bohay session stop <name> [--json]")?;
+    let target = match crate::session::parse_target_name(name) {
+        Ok(target) => target,
+        Err(message) => return session_error("invalid_session_name", &message, json_output),
+    };
+    match crate::session::stop_session(target.as_deref()) {
+        Ok(session) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"stopped": true, "session": session}))?
+                );
+            } else {
+                println!("stopped session {}", session.name);
+            }
+            Ok(0)
+        }
+        Err(message) => session_error("session_stop_failed", &message, json_output),
+    }
+}
+
+fn session_delete(args: &[String]) -> Result<i32> {
+    let (name, json_output) =
+        parse_session_name_and_json(args, "usage: bohay session delete <name> [--json]")?;
+    match crate::session::delete_session(name) {
+        Ok(session) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"deleted": true, "session": session}))?
+                );
+            } else {
+                println!("deleted session {}", session.name);
+            }
+            Ok(0)
+        }
+        Err(message) => session_error("session_delete_failed", &message, json_output),
+    }
+}
+
+fn session_error(code: &str, message: &str, json_output: bool) -> Result<i32> {
+    let error = json!({"error": {"code": code, "message": message}});
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&error)?);
+    } else {
+        eprintln!("{message}");
+    }
+    Ok(1)
 }
 
 /// `bohay module install owner/repo[/sub] [--ref REF] [--yes]` — clone + build

@@ -15,6 +15,7 @@ bohay: Mission control for your AI coding agents
 usage: bohay <command> [args]
 
   (no args)            launch / attach the TUI
+  --session <name>     target one named server session
   help                 show this help
   doctor               check optional external tools (git, gh, …)
   ping                 check the server
@@ -141,6 +142,12 @@ orchestration (multiple agents on one project, docs/22):
 
 events:
   events                     stream live status changes
+
+sessions:
+  session list [--json]      list default and named server sessions
+  session attach <name>      start or attach the named session
+  session stop <name> [--json]    stop only the named session and its panes
+  session delete <name> [--json]  delete a stopped named session
 
 remote:
   --remote <host> [ssh args] attach to a bohay session on <host> over plain ssh

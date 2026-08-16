@@ -5,6 +5,7 @@ description: Run a session on another machine over plain SSH, with no port forwa
 
 ```sh
 bohay --remote my-server        # any host from ~/.ssh/config, or user@host
+bohay --session api --remote my-server   # the remote host's named api session
 ```
 
 That's the whole setup. bohay connects over **plain `ssh`**, starts (or

@@ -45,6 +45,10 @@ Run `bohay help` only when the requested command grammar is uncertain.
 - Resolve a pane and list its workspace's tabs before `bohay pane move <id>
   --tab <n>` or `--new-tab`. List the active workspace's tabs before `bohay tab
   move <from> <to>`; tab positions are 1-based.
+- Named servers are selected directly with `bohay --session <name> ...`.
+  `session list` is discovery only, `session attach <name>` opens the TUI,
+  `session stop <name>` ends only that server, and `session delete <name>` is
+  allowed only after an exact stopped target and explicit authorization.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 - Do not remove worktrees, delete or merge tasks, uninstall modules, or

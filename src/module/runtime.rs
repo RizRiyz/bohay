@@ -87,6 +87,9 @@ pub fn base_env(module: &InstalledModule, ctx: &Value) -> Vec<(String, String)> 
     if let Some(sock) = crate::ipc::api::socket_path_env() {
         env.push(("BOHAY_SOCKET_PATH".to_string(), sock));
     }
+    if let Some(name) = crate::session::active_name() {
+        env.push((crate::session::SESSION_ENV_VAR.to_string(), name));
+    }
     if let Ok(exe) = std::env::current_exe() {
         env.push(("BOHAY_BIN_PATH".to_string(), exe.display().to_string()));
     }

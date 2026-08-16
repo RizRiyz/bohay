@@ -149,8 +149,8 @@ pub fn bind(path: &Path) -> io::Result<Listener> {
         let name = path.to_fs_name::<GenericFilePath>()?;
         let listener = ListenerOptions::new().name(name).create_sync()?;
         // Owner-only: a connection to this socket is full command execution as
-        // the user, so never rely on the umask (the state dir is also forced
-        // to 0700 — see `persist::ensure_config_dir`).
+        // the user, so never rely on the umask (the selected session dir is also
+        // forced to 0700 — see `persist::ensure_session_dir`).
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
@@ -212,5 +212,22 @@ mod tests {
         let err = lock.reclaim_stale_socket(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "do not delete");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::pipe_id;
+    use std::path::Path;
+
+    #[test]
+    fn named_session_paths_derive_distinct_stable_pipe_ids() {
+        let alpha = pipe_id(Path::new(r"C:\Users\riz\.bohay\sessions\alpha\bohay.sock"));
+        let beta = pipe_id(Path::new(r"C:\Users\riz\.bohay\sessions\beta\bohay.sock"));
+        assert_ne!(alpha, beta);
+        assert_eq!(
+            alpha,
+            pipe_id(Path::new(r"C:\Users\riz\.bohay\sessions\alpha\bohay.sock"))
+        );
     }
 }

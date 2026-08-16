@@ -31,6 +31,22 @@ pane opens straight into its agent, nothing gets typed into a prompt in front
 of you. Live processes can't outlive their owner, so shells come back fresh,
 but you land in the same place you left.
 
+### More than one independent session
+
+The default `bohay` command keeps the same single durable server as before. If
+you need separate failure and resource boundaries, give each server a name:
+
+```sh
+bohay session attach api
+bohay session attach website
+bohay --session api pane list
+```
+
+A named session owns its own server, PTYs, agents, workspaces, tabs, snapshot,
+and orchestration ledger. It is not a workspace. `bohay session stop api`
+stops only `api`, while `website` stays responsive. `bohay session list` checks
+known sessions without starting any server or background manager.
+
 ## 2. Workspace → Tab → Pane
 
 ```

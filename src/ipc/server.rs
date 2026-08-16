@@ -107,10 +107,10 @@ type Clients = HashMap<u64, ClientState>;
 pub fn run() -> Result<()> {
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
-    // Every process targeting one BOHAY_HOME serializes startup here. This is
+    // Every process targeting one selected session serializes startup here. This is
     // deliberately before restoring panes: a losing server must exit without
     // spawning duplicate PTYs or retaining a second terminal grid.
-    let state_dir = persist::ensure_config_dir();
+    let state_dir = persist::ensure_session_dir();
     let startup_lock = transport::acquire_server_startup_lock(&state_dir)?;
     let sock = persist::socket_path();
     let client_sock = persist::client_socket_path();

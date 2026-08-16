@@ -99,6 +99,8 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 pub(crate) struct TestEnv {
     _guard: std::sync::MutexGuard<'static, ()>,
     prev: Option<std::ffi::OsString>,
+    prev_session: Option<std::ffi::OsString>,
+    prev_socket: Option<std::ffi::OsString>,
     dir: PathBuf,
 }
 
@@ -109,6 +111,15 @@ impl Drop for TestEnv {
             Some(p) => std::env::set_var("BOHAY_HOME", p),
             None => std::env::remove_var("BOHAY_HOME"),
         }
+        match &self.prev_session {
+            Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+            None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+        }
+        match &self.prev_socket {
+            Some(value) => std::env::set_var("BOHAY_SOCKET_PATH", value),
+            None => std::env::remove_var("BOHAY_SOCKET_PATH"),
+        }
+        crate::session::clear_explicit_for_test();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -117,12 +128,19 @@ impl Drop for TestEnv {
 pub(crate) fn test_env(tag: &str) -> TestEnv {
     let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev = std::env::var_os("BOHAY_HOME");
+    let prev_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+    let prev_socket = std::env::var_os("BOHAY_SOCKET_PATH");
     let dir = std::env::temp_dir().join(format!("bohay-test-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::env::set_var("BOHAY_HOME", &dir);
+    std::env::remove_var(crate::session::SESSION_ENV_VAR);
+    std::env::remove_var("BOHAY_SOCKET_PATH");
+    crate::session::clear_explicit_for_test();
     TestEnv {
         _guard: guard,
         prev,
+        prev_session,
+        prev_socket,
         dir,
     }
 }
@@ -148,19 +166,43 @@ pub fn config_dir() -> PathBuf {
 /// pathological `$BOHAY_HOME=$HOME` (never chmod the home dir itself).
 pub fn ensure_config_dir() -> PathBuf {
     let dir = config_dir();
-    let _ = fs::create_dir_all(&dir);
+    ensure_private_dir(&dir);
+    dir
+}
+
+/// Selected server runtime directory. The default session remains rooted at
+/// `config_dir`; named sessions live under `config_dir/sessions/<name>`.
+pub fn session_dir() -> PathBuf {
+    crate::session::active_dir()
+}
+
+/// Create the selected runtime directory with the same owner-only protection as
+/// the global root. This is the startup-lock namespace for one server only.
+pub fn ensure_session_dir() -> PathBuf {
+    let dir = session_dir();
+    ensure_private_dir(&dir);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if Some(dir.as_path()) != crate::platform::home_dir().as_deref() {
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    for socket in [socket_path(), client_socket_path()] {
+        if let Some(parent) = socket.parent().filter(|parent| *parent != dir) {
+            ensure_private_dir(parent);
         }
     }
     dir
 }
 
+fn ensure_private_dir(dir: &std::path::Path) {
+    let _ = fs::create_dir_all(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if Some(dir) != crate::platform::home_dir().as_deref() {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+    }
+}
+
 fn session_path() -> PathBuf {
-    config_dir().join("session.json")
+    session_dir().join("session.json")
 }
 
 /// User-editable agent-detection manifests (docs/07). `~/.bohay/manifests/`.
@@ -244,7 +286,7 @@ not = [\"cancelled\"]
 /// **server** to bind — never reads `$BOHAY_SOCKET_PATH`, or a server spawned
 /// from inside a pane would try to bind its parent's socket.
 pub fn socket_path() -> PathBuf {
-    config_dir().join("bohay.sock")
+    crate::session::api_socket_path_for(crate::session::active_name().as_deref())
 }
 
 /// The control socket a **CLI** should talk to: the one injected into this
@@ -254,6 +296,9 @@ pub fn socket_path() -> PathBuf {
 /// out to `bohay`, or a `bohay module link` typed in a dev pane, targets the
 /// instance you're in rather than whatever `$BOHAY_HOME` defaults to.
 pub fn cli_socket_path() -> PathBuf {
+    if crate::session::explicit_session_requested() {
+        return socket_path();
+    }
     match std::env::var_os("BOHAY_SOCKET_PATH") {
         Some(p) if !p.is_empty() => PathBuf::from(p),
         _ => socket_path(),
@@ -262,7 +307,7 @@ pub fn cli_socket_path() -> PathBuf {
 
 /// The binary client/render socket path for this session.
 pub fn client_socket_path() -> PathBuf {
-    config_dir().join("bohay-client.sock")
+    crate::session::client_socket_path_for(crate::session::active_name().as_deref())
 }
 
 /// Build a snapshot from the live app.
@@ -487,7 +532,7 @@ pub fn save(app: &App) {
         let _ = fs::remove_file(session_path());
         return;
     }
-    let dir = ensure_config_dir();
+    let dir = ensure_session_dir();
     if !dir.is_dir() {
         return;
     }

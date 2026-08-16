@@ -67,6 +67,9 @@ Use the installed production Bohay client:
   Bohay installed by Cargo, Homebrew, `install.sh`, or another PATH-managed
   installation.
 - Preserve an explicitly configured `BOHAY_HOME` or `BOHAY_SOCKET_PATH`.
+  Preserve `BOHAY_SESSION` too. When the user explicitly names a server
+  session, pass `--session <name>` directly to every related Bohay command.
+  Do not list sessions first, and do not silently fall back to `default`.
   Otherwise let the installed release binary use its production default at
   `$HOME/.bohay/bohay.sock`.
 - Never substitute `BOHAY_BIN_PATH` or a repository build for a missing
@@ -86,6 +89,26 @@ not describe an unapproved sandbox failure as an offline server. Only report
 the production server offline after an approved command cannot connect.
 
 Use the same selected binary and socket for the entire request.
+
+### Manage named server sessions
+
+A named session is an independent Bohay server and PTY tree, not a workspace.
+Use these commands only when the user explicitly asks to inspect or manage
+server sessions:
+
+```sh
+bohay session list
+bohay session attach <name>
+bohay session stop <name>
+bohay session delete <name>
+bohay --session <name> pane list
+```
+
+`session attach` launches or attaches the TUI. Never run it merely to test
+whether a session exists. `session stop` ends every pane in that named server.
+Before deletion, list sessions once, require the exact stopped name, and obtain
+clear authorization. Never delete `default` and never substitute workspace
+commands for server-session commands.
 
 ## Use the fast command path
 

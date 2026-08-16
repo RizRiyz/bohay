@@ -22,6 +22,7 @@ mod module;
 mod orch;
 mod persist;
 mod platform;
+mod session;
 mod skill;
 mod terminal;
 mod ui;
@@ -51,7 +52,8 @@ fn main() -> Result<()> {
     // waits aren't quantized to Windows' ~15.6ms default (the cause of laggy
     // typing in panes there). No-op on Unix; restored when `main` returns.
     let _timer = platform::high_res_timer();
-    let args: Vec<String> = std::env::args().collect();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let args = session::configure_from_args(&raw_args).map_err(anyhow::Error::msg)?;
     match args.get(1).map(String::as_str) {
         // Standard CLI conveniences (don't start the server).
         Some("--version") | Some("-V") => {
@@ -326,10 +328,13 @@ fn base64_encode(data: &[u8]) -> String {
 /// Terminal.app) collapses the component entirely → one clean process mention.
 /// Every other terminal treats the OSC title as THE title, so they keep
 /// "bohay".
-pub(crate) fn window_title() -> &'static str {
+pub(crate) fn window_title() -> String {
+    if let Some(name) = session::active_name() {
+        return format!("bohay · {name}");
+    }
     match std::env::var("TERM_PROGRAM") {
-        Ok(p) if p == "Apple_Terminal" => "",
-        _ => "bohay",
+        Ok(p) if p == "Apple_Terminal" => String::new(),
+        _ => "bohay".to_string(),
     }
 }
 
@@ -430,24 +435,8 @@ fn attach_cmd(args: &[String]) -> Result<()> {
 /// socket through plain ssh and attach to it locally. No port-forwarding, no
 /// `~/.ssh/config` edits — keepalive options are passed on argv only.
 fn remote_attach(args: &[String]) -> Result<()> {
-    let host = args
-        .get(2)
-        .ok_or_else(|| anyhow!("usage: bohay --remote <host> [ssh args]"))?;
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-T")
-        .arg("-o")
-        .arg("ServerAliveInterval=15")
-        .arg("-o")
-        .arg("ServerAliveCountMax=3");
-    // Any extra args (e.g. `-p 2222`, `-i key`) go to ssh, before the host.
-    for extra in args.iter().skip(3) {
-        cmd.arg(extra);
-    }
-    cmd.arg(host)
-        .arg("bohay")
-        .arg("remote-client-bridge")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped()); // stderr inherited so ssh can prompt for auth
+    let mut cmd = remote_ssh_command(args)?;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()); // stderr inherited so ssh can prompt for auth
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("failed to launch ssh: {e}"))?;
@@ -462,6 +451,32 @@ fn remote_attach(args: &[String]) -> Result<()> {
     result
 }
 
+/// Build the remote bridge command separately so session propagation stays
+/// testable without opening an SSH connection.
+fn remote_ssh_command(args: &[String]) -> Result<Command> {
+    let host = args
+        .get(2)
+        .ok_or_else(|| anyhow!("usage: bohay --remote <host> [ssh args]"))?;
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3");
+    // Any extra args (e.g. `-p 2222`, `-i key`) go to ssh, before the host.
+    for extra in args.iter().skip(3) {
+        cmd.arg(extra);
+    }
+    cmd.arg(host).arg("bohay");
+    if let Some(name) = session::active_name() {
+        cmd.arg("--session").arg(name);
+    } else if session::explicit_session_requested() {
+        cmd.arg("--session").arg(session::DEFAULT_SESSION_NAME);
+    }
+    cmd.arg("remote-client-bridge").stderr(Stdio::inherit());
+    Ok(cmd)
+}
+
 fn server_running(sock: &Path) -> bool {
     ipc::transport::connect(sock).is_ok()
 }
@@ -470,6 +485,9 @@ fn spawn_server() -> Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("server")
+        // The selector was already resolved into BOHAY_SESSION. A parent pane's
+        // injected API socket must not leak into a newly spawned server.
+        .env_remove("BOHAY_SOCKET_PATH")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -607,12 +625,15 @@ fn update_manifest() -> Result<()> {
 fn server_start() -> Result<()> {
     let sock = persist::client_socket_path();
     if server_running(&sock) {
-        println!("bohay server already running");
+        println!(
+            "bohay server already running (session {})",
+            session::display_name()
+        );
         return Ok(());
     }
     spawn_server()?;
     wait_for_socket(&sock)?;
-    println!("bohay server started");
+    println!("bohay server started (session {})", session::display_name());
     Ok(())
 }
 
@@ -623,7 +644,7 @@ fn server_stop() -> Result<()> {
         // socket — then `stop` returning means it's really down (and a following
         // `status` reports "not running", not a half-shutdown "running").
         wait_for_shutdown(&sock);
-        println!("bohay server stopped");
+        println!("bohay server stopped (session {})", session::display_name());
     } else {
         println!("no bohay server running");
     }
@@ -639,7 +660,10 @@ fn server_restart() -> Result<()> {
     }
     spawn_server()?;
     wait_for_socket(&sock)?;
-    println!("bohay server restarted");
+    println!(
+        "bohay server restarted (session {})",
+        session::display_name()
+    );
     Ok(())
 }
 
@@ -659,12 +683,18 @@ fn wait_for_shutdown(sock: &Path) {
 fn server_status() -> Result<()> {
     let sock = persist::client_socket_path();
     if !server_running(&sock) {
-        println!("bohay server: not running");
+        println!(
+            "bohay server: not running (session {})",
+            session::display_name()
+        );
         return Ok(());
     }
     match server_version() {
         Some(running) => {
-            println!("bohay server: running (v{running})");
+            println!(
+                "bohay server: running (v{running}, session {})",
+                session::display_name()
+            );
             let binary = env!("CARGO_PKG_VERSION");
             if running != binary {
                 println!(
@@ -672,7 +702,10 @@ fn server_status() -> Result<()> {
                 );
             }
         }
-        None => println!("bohay server: running"),
+        None => println!(
+            "bohay server: running (session {})",
+            session::display_name()
+        ),
     }
     Ok(())
 }
@@ -711,7 +744,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 
     // `--local` still exposes the control API, so it must obey the same
     // single-server ownership rules as the headless server.
-    let state_dir = persist::ensure_config_dir();
+    let state_dir = persist::ensure_session_dir();
     let startup_lock = ipc::transport::acquire_server_startup_lock(&state_dir)?;
     let sock = persist::socket_path();
     let client_sock = persist::client_socket_path();
@@ -918,6 +951,51 @@ mod tests {
         let data_len = u32::from_le_bytes(w[40..44].try_into().unwrap()) as usize;
         assert_eq!(w.len(), 44 + data_len, "header data length matches payload");
         assert!(data_len > 0, "non-empty audio");
+    }
+
+    #[test]
+    fn named_session_is_visible_in_the_terminal_title() {
+        let _env = crate::persist::test_env("named-session-title");
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "docs");
+        assert_eq!(window_title(), "bohay · docs");
+    }
+
+    #[test]
+    fn remote_bridge_preserves_the_selected_named_session() {
+        let _env = crate::persist::test_env("named-session-remote");
+        let raw = [
+            "bohay",
+            "--session",
+            "api",
+            "--remote",
+            "devbox",
+            "-p",
+            "2222",
+        ]
+        .map(String::from);
+        let args = crate::session::configure_from_args(&raw).unwrap();
+        let command = remote_ssh_command(&args).unwrap();
+        let actual: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                "-T",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-p",
+                "2222",
+                "devbox",
+                "bohay",
+                "--session",
+                "api",
+                "remote-client-bridge",
+            ]
+        );
     }
 
     /// Manual benchmark of the server render hot path (full UI render + in-place
