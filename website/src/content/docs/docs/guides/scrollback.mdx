@@ -1,13 +1,20 @@
 ---
 title: Scrollback & Copy
-description: Scroll any pane's history with the wheel, trackpad, or keyboard scroll mode, and copy text with a drag.
+description: Scroll any pane's history with the wheel, trackpad, or keyboard scroll mode, and copy text with a drag or keyboard selection.
 ---
 
 ## Scrolling
 
-**Mouse/trackpad:** just scroll over a pane. Full-screen apps (vim, TUI agents
-that take the whole pane) keep their own scrolling, so bohay forwards the wheel
-to them. Regular panes scroll bohay's history (5 000 lines per pane).
+**Mouse/trackpad:** just scroll over a pane. Apps that enable terminal mouse
+reporting receive their wheel input; full-screen apps that request alternate
+scrolling do too. Regular transcripts scroll Bohay's retained history.
+
+Each pane has a **10 MiB** retained-history budget by default. Change it in
+**Settings → Layout → Scrollback memory**. Bohay's Alacritty adapter converts this
+budget to a conservative row limit at the current pane width, so it protects
+memory predictably but reports retained bytes as an estimate rather than an
+exact allocator measurement. Reducing the setting trims existing history
+immediately; increasing it applies to subsequent output.
 
 **Keyboard scroll mode:** press **`Shift+↑`** (no prefix needed, so it works
 even where macOS eats `Ctrl+Space`). The status bar switches to SCROLL and
@@ -25,8 +32,20 @@ While scrolled, a **`↑N` badge** at the pane's top-right shows how many lines
 up you are, and anything you type snaps back to live first, so you always see
 what you're typing.
 
+Unmodified `PageUp` and `PageDown` scroll normal transcript history. When a
+terminal app has claimed paging input (for example a full-screen TUI or an
+application-cursor pager), Bohay forwards those keys unchanged. `Shift+↑`,
+`Shift+PageUp`, and prefix scroll shortcuts remain explicit Bohay controls.
+
 ## Copying
 
 Drag across a pane to select. Release **auto-copies** and flashes a *Copied*
 toast. bohay writes both your native OS clipboard (`pbcopy` / `wl-copy` /
 `xclip` / `clip`) and OSC 52, so it works locally *and* over SSH.
+
+For keyboard selection, press **`Shift+V`**. This enters copy mode and keeps
+all navigation inside Bohay: use arrows or `h`/`j`/`k`/`l` for character and
+line movement, `w` / `B` for words, `Space` / `b` for pages, and `g` / `G` for
+the oldest / newest retained row. Press `v` to reset the selection anchor at
+the cursor. Press **`y`** or Enter to copy and return to live output. Press
+**`q`** or Esc to cancel and restore the viewport where copy mode began.

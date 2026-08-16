@@ -1018,6 +1018,38 @@ impl Selection {
     }
 }
 
+/// Keyboard-driven selection in a terminal pane. Rows are absolute indices in
+/// `Pane::rows_text()` (oldest retained row is zero), so the selection remains
+/// stable while its viewport scrolls.
+#[derive(Clone, Copy)]
+pub struct CopyMode {
+    pub pane: PaneId,
+    pub anchor: (usize, usize),
+    pub cursor: (usize, usize),
+    /// The viewport to restore when the user cancels instead of copying.
+    pub saved_scroll: usize,
+}
+
+impl CopyMode {
+    pub(crate) fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    pub(crate) fn contains(&self, row: usize, col: usize) -> bool {
+        let ((sr, sc), (er, ec)) = self.ordered();
+        if row < sr || row > er {
+            return false;
+        }
+        let left = if row == sr { sc } else { 0 };
+        let right = if row == er { ec } else { usize::MAX };
+        col >= left && col <= right
+    }
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     pub status: HashMap<PaneId, PaneStatus>,
@@ -1187,6 +1219,9 @@ pub struct App {
     /// Active mouse text selection in a pane (drag to select). Cleared on a new
     /// click; on release its text is queued to `pending_clipboard`.
     pub selection: Option<Selection>,
+    /// Keyboard copy selection. This deliberately owns navigation keys so they
+    /// cannot reach the child while text is being selected.
+    pub copy_mode: Option<CopyMode>,
     /// A mouse button forwarded into a mouse-tracking pane app: set on press so
     /// the matching drag/release reach the same app even if the cursor leaves
     /// the pane mid-drag. Caches the app's drag/SGR flags from press time so
@@ -1442,7 +1477,7 @@ impl App {
             app_tx.clone(),
             None,
             &shell,
-            config.scrollback(),
+            config.scrollback_bytes(),
         )?;
         let command = pane.command.clone();
         let mut panes = HashMap::new();
@@ -1530,6 +1565,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: false,
             selection: None,
+            copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
@@ -1665,7 +1701,7 @@ impl App {
         let keymap = keys::build_keymap(&config.keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let shell = crate::platform::resolve_shell(&config.shell);
-        let scrollback = config.scrollback();
+        let history_budget_bytes = config.scrollback_bytes();
         let modules = crate::module::registry::load();
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
@@ -1766,7 +1802,7 @@ impl App {
                     // A module pane re-runs its entrypoint if the module is still
                     // installed + runnable; otherwise it falls back to a shell.
                     let restored = ps.module.as_ref().and_then(|(mid, ep)| {
-                        restore_module_pane(&modules, mid, ep, id, &app_tx, scrollback)
+                        restore_module_pane(&modules, mid, ep, id, &app_tx, history_budget_bytes)
                     });
                     let (pane, module_rec) = match restored {
                         Some((p, rec)) => (p, Some(rec)),
@@ -1788,7 +1824,7 @@ impl App {
                                         ps.screen.as_deref(),
                                         &shell,
                                         argv,
-                                        scrollback,
+                                        history_budget_bytes,
                                     ),
                                     None => Pane::spawn(
                                         id,
@@ -1798,7 +1834,7 @@ impl App {
                                         app_tx.clone(),
                                         ps.screen.as_deref(),
                                         &shell,
-                                        scrollback,
+                                        history_budget_bytes,
                                     ),
                                 };
                                 if let Ok(p) = attempt {
@@ -1954,6 +1990,7 @@ impl App {
             pending_notify: Vec::new(),
             pending_sound: false,
             selection: None,
+            copy_mode: None,
             mouse_grab: None,
             pending_clipboard: None,
             pending_open_url: None,
@@ -2324,7 +2361,7 @@ impl App {
     fn spawn_into(&mut self, cwd: PathBuf) -> Option<PaneId> {
         let id = PaneId::alloc();
         let shell = crate::platform::resolve_shell(&self.config.shell);
-        let scrollback = self.config.scrollback();
+        let history_budget_bytes = self.config.scrollback_bytes();
         match Pane::spawn(
             id,
             80,
@@ -2333,7 +2370,7 @@ impl App {
             self.app_tx.clone(),
             None,
             &shell,
-            scrollback,
+            history_budget_bytes,
         ) {
             Ok(pane) => {
                 let cmd = pane.command.clone();
@@ -2357,7 +2394,7 @@ impl App {
     fn spawn_resume_pane(&mut self, cwd: PathBuf, resume: &str) -> Option<PaneId> {
         let id = PaneId::alloc();
         let shell = crate::platform::resolve_shell(&self.config.shell);
-        let scrollback = self.config.scrollback();
+        let history_budget_bytes = self.config.scrollback_bytes();
         let argv = crate::platform::shell_run_then_interactive(&shell, resume.trim());
         let spawned = match &argv {
             Some(a) => Pane::spawn_shell_with(
@@ -2369,7 +2406,7 @@ impl App {
                 None,
                 &shell,
                 a,
-                scrollback,
+                history_budget_bytes,
             ),
             None => Pane::spawn(
                 id,
@@ -2379,7 +2416,7 @@ impl App {
                 self.app_tx.clone(),
                 None,
                 &shell,
-                scrollback,
+                history_budget_bytes,
             ),
         };
         match spawned {
@@ -4012,6 +4049,9 @@ impl App {
         if self.scroll_pane == Some(id) {
             self.scroll_pane = None; // don't leave scroll mode pointing at a dead pane
         }
+        if self.copy_mode.is_some_and(|copy| copy.pane == id) {
+            self.copy_mode = None; // the pane is gone; there is no viewport to restore
+        }
     }
 
     fn close_pane(&mut self, id: PaneId) {
@@ -4218,7 +4258,7 @@ fn restore_module_pane(
     ep: &str,
     id: PaneId,
     app_tx: &Sender<AppEvent>,
-    scrollback: usize,
+    history_budget_bytes: usize,
 ) -> Option<(Pane, crate::module::ModulePaneRecord)> {
     let m = modules.find(mid).filter(|m| m.is_runnable())?;
     let argv = m
@@ -4238,7 +4278,7 @@ fn restore_module_pane(
         app_tx.clone(),
         &argv,
         &env,
-        scrollback,
+        history_budget_bytes,
     )
     .ok()?;
     Some((
@@ -5839,7 +5879,12 @@ mod tests {
         // its old engine, so it cannot race this viewport assertion.
         let (response_tx, _response_rx) = std::sync::mpsc::channel();
         app.panes.get_mut(&left).unwrap().engine = Arc::new(Mutex::new(
-            crate::terminal::vt::alacritty::AlacrittyEngine::new(60, 38, response_tx, 2_000),
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(
+                60,
+                38,
+                response_tx,
+                crate::config::SCROLLBACK_BYTES_DEFAULT,
+            ),
         ));
         if let Some(pane) = app.panes.get(&left) {
             let mut engine = pane.engine.lock().unwrap();
@@ -8829,6 +8874,43 @@ mod tests {
         send(&mut app, plain('0'));
         assert!(app.scroll_pane.is_none(), "0 returns to live and exits");
         assert_eq!(off(&app), 0);
+    }
+
+    #[test]
+    fn keyboard_copy_mode_yanks_history_and_cancel_restores_its_viewport() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        if let Some(pane) = app.panes.get(&id) {
+            if let Ok(mut engine) = pane.engine.lock() {
+                for i in 0..80 {
+                    engine.advance(format!("line {i}\r\n").as_bytes());
+                }
+            }
+        }
+        let send = |app: &mut App, code, modifiers| {
+            app.handle_event(AppEvent::Key(KeyEvent::new(code, modifiers)));
+        };
+        let offset = |app: &App| app.panes.get(&id).unwrap().scroll_state().0;
+
+        send(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+        assert!(app.copy_mode.is_some(), "Shift+V enters keyboard copy mode");
+        send(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(app.pending_clipboard.as_deref(), Some("li"));
+        assert!(app.copy_mode.is_none(), "y exits copy mode");
+        assert_eq!(offset(&app), 0, "copy returns to live output");
+
+        app.panes.get(&id).unwrap().scroll(8);
+        let saved = offset(&app);
+        send(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+        send(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        send(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.copy_mode.is_none(), "q cancels copy mode");
+        assert_eq!(offset(&app), saved, "cancel restores the prior viewport");
     }
 }
 

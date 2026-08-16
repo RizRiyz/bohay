@@ -4,6 +4,102 @@
 use super::*;
 use crate::files::view_text_w;
 
+/// Last selectable character index on a retained row. Empty rows still expose
+/// one visual cell so vertical navigation and a blank-line selection are stable.
+fn copy_line_end(rows: &[String], row: usize) -> usize {
+    rows.get(row)
+        .map(|line| line.chars().count().saturating_sub(1))
+        .unwrap_or(0)
+}
+
+fn copy_word_forward(rows: &[String], mut at: (usize, usize)) -> (usize, usize) {
+    while at.0 < rows.len() {
+        let chars: Vec<char> = rows[at.0].chars().collect();
+        while at.1 < chars.len() && !chars[at.1].is_whitespace() {
+            at.1 += 1;
+        }
+        while at.1 < chars.len() && chars[at.1].is_whitespace() {
+            at.1 += 1;
+        }
+        if at.1 < chars.len() {
+            return at;
+        }
+        at.0 += 1;
+        at.1 = 0;
+    }
+    (
+        rows.len().saturating_sub(1),
+        copy_line_end(rows, rows.len().saturating_sub(1)),
+    )
+}
+
+fn copy_word_back(rows: &[String], mut at: (usize, usize)) -> (usize, usize) {
+    loop {
+        let chars: Vec<char> = rows
+            .get(at.0)
+            .map(|line| line.chars().collect())
+            .unwrap_or_default();
+        let mut col = at.1.min(chars.len());
+        while col > 0 && chars[col - 1].is_whitespace() {
+            col -= 1;
+        }
+        while col > 0 && !chars[col - 1].is_whitespace() {
+            col -= 1;
+        }
+        if col > 0 || !chars.is_empty() {
+            return (at.0, col.min(copy_line_end(rows, at.0)));
+        }
+        if at.0 == 0 {
+            return (0, 0);
+        }
+        at.0 -= 1;
+        at.1 = copy_line_end(rows, at.0).saturating_add(1);
+    }
+}
+
+/// Extract a linear terminal selection from logical rows. Both mouse and
+/// keyboard selection feed this function, keeping clipboard semantics aligned.
+fn extract_rows_selection(
+    rows: &[String],
+    ((start_row, start_col), (end_row, end_col)): ((usize, usize), (usize, usize)),
+) -> Option<String> {
+    if start_row > end_row || start_row >= rows.len() {
+        return None;
+    }
+    let mut out = String::new();
+    let last_row = end_row.min(rows.len().saturating_sub(1));
+    for (row, line) in rows
+        .iter()
+        .enumerate()
+        .take(last_row.saturating_add(1))
+        .skip(start_row)
+    {
+        let chars: Vec<char> = line.chars().collect();
+        let left = if row == start_row { start_col } else { 0 };
+        let right = if row == end_row {
+            end_col
+        } else {
+            chars.len().saturating_sub(1)
+        };
+        if row != start_row {
+            out.push('\n');
+        }
+        if left <= right {
+            out.extend(
+                chars
+                    .iter()
+                    .skip(left)
+                    .take(right.saturating_sub(left).saturating_add(1)),
+            );
+        }
+        while out.ends_with(' ') {
+            out.pop();
+        }
+    }
+    let out = out.trim_end_matches('\n').to_string();
+    (!out.trim().is_empty()).then_some(out)
+}
+
 impl App {
     /// Apply an event; returns whether it changed the rendered UI (→ the loop
     /// should redraw). Input forwarded to a pane returns `false` — the screen only
@@ -21,6 +117,11 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
+                // Copy mode owns input just like scroll mode: never leak a
+                // pasted command into the pane while the user is selecting.
+                if self.copy_mode.is_some() {
+                    return true;
+                }
                 // A paste while a text-input modal is open (a Settings field, a
                 // rename prompt, …) fills that field, not the pane underneath.
                 if self.paste_into_modal(&s) {
@@ -221,6 +322,13 @@ impl App {
         use ratatui::crossterm::event::MouseEventKind;
 
         let kind = m.kind;
+        // Copy mode is keyboard-owned. Any deliberate mouse action cancels it
+        // and restores its saved viewport rather than forwarding a click/wheel
+        // into the child while a selection is active.
+        if self.copy_mode.is_some() && !matches!(kind, MouseEventKind::Moved) {
+            self.cancel_copy_mode();
+            return true;
+        }
         let hover_before = self.rendered_hover_rect(self.hover);
         let divider_before = self
             .hover_divider
@@ -886,8 +994,11 @@ impl App {
                         // Engage keyboard scroll mode while scrolled up (so the
                         // number/j/k keys work); disengage once back at live.
                         set_scroll = Some((pane.scroll_state().0 > 0).then_some(id));
-                    } else {
-                        // Alt screen, no mouse tracking: best-effort arrow keys.
+                    } else if mm.alternate_scroll {
+                        // The application explicitly requested alternate
+                        // scrolling, so translate wheel movement into its
+                        // cursor-key scroll input. Without that mode there is
+                        // no host history on an alternate screen to move.
                         let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
                         for _ in 0..scroll.abs() {
                             pane.send(seq);
@@ -1264,6 +1375,150 @@ impl App {
         true
     }
 
+    /// Begin keyboard copy mode at the visible viewport's top-left cell. The
+    /// selection uses absolute history rows, so scrolling cannot invalidate it.
+    fn begin_copy_mode(&mut self) -> bool {
+        let id = self.layout().focus;
+        let Some(pane) = self.panes.get(&id) else {
+            return false;
+        };
+        let (offset, history) = pane.scroll_state();
+        self.selection = None;
+        self.scroll_pane = None;
+        self.copy_mode = Some(CopyMode {
+            pane: id,
+            anchor: (history.saturating_sub(offset), 0),
+            cursor: (history.saturating_sub(offset), 0),
+            saved_scroll: offset,
+        });
+        true
+    }
+
+    /// Leave copy mode without copying, returning to the exact viewport where
+    /// it began. This is intentionally different from regular scroll mode,
+    /// whose cancel action returns to live output.
+    fn cancel_copy_mode(&mut self) {
+        if let Some(copy) = self.copy_mode.take() {
+            if let Some(pane) = self.panes.get(&copy.pane) {
+                pane.scroll_to(copy.saved_scroll);
+            }
+        }
+    }
+
+    /// Keep a copy cursor on screen. The engine's offset is measured from the
+    /// live bottom while copy coordinates are measured from retained-history
+    /// top, hence `history - row` for the target offset.
+    fn reveal_copy_cursor(&mut self) {
+        let Some(copy) = self.copy_mode else {
+            return;
+        };
+        let Some(pane) = self.panes.get(&copy.pane) else {
+            self.copy_mode = None;
+            return;
+        };
+        let (offset, history) = pane.scroll_state();
+        let height = self
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == copy.pane)
+            .map(|(_, rect)| rect.height.max(1) as usize)
+            .unwrap_or(1);
+        let top = history.saturating_sub(offset);
+        let bottom = top.saturating_add(height.saturating_sub(1));
+        let target_top = if copy.cursor.0 < top {
+            copy.cursor.0
+        } else if copy.cursor.0 > bottom {
+            copy.cursor.0.saturating_add(1).saturating_sub(height)
+        } else {
+            return;
+        };
+        pane.scroll_to(history.saturating_sub(target_top));
+    }
+
+    /// Copy the keyboard selection by the same clipboard queue as drag-to-copy.
+    fn finish_copy_mode(&mut self) {
+        let Some(copy) = self.copy_mode.take() else {
+            return;
+        };
+        let text = self
+            .panes
+            .get(&copy.pane)
+            .map(|pane| pane.rows_text().0)
+            .and_then(|rows| extract_rows_selection(&rows, copy.ordered()));
+        if let Some(text) = text {
+            self.pending_clipboard = Some(text);
+            let msg = self.catalog.copied;
+            self.show_toast(msg);
+        }
+        // A successful copy returns to a live terminal, so the next key is
+        // immediately visible where the child expects it.
+        if let Some(pane) = self.panes.get(&copy.pane) {
+            pane.scroll_to_bottom();
+        }
+    }
+
+    /// Copy-mode navigation. `Shift+V` starts it, then hjkl/arrows, word jumps,
+    /// page keys, Home/End, and g/G move the visual selection; y copies it.
+    fn handle_copy_mode_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mut copy) = self.copy_mode else {
+            return false;
+        };
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            self.cancel_copy_mode();
+            return true;
+        }
+        if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+            self.finish_copy_mode();
+            return true;
+        }
+        if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+            if let Some(copy) = self.copy_mode.as_mut() {
+                copy.anchor = copy.cursor;
+            }
+            return true;
+        }
+        let rows = self
+            .panes
+            .get(&copy.pane)
+            .map(|pane| pane.rows_text().0)
+            .unwrap_or_default();
+        if rows.is_empty() {
+            self.cancel_copy_mode();
+            return true;
+        }
+        let last_row = rows.len().saturating_sub(1);
+        let page = self.focused_page() as usize;
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => copy.cursor.1 = copy.cursor.1.saturating_sub(1),
+            KeyCode::Right | KeyCode::Char('l') => {
+                copy.cursor.1 = copy
+                    .cursor
+                    .1
+                    .saturating_add(1)
+                    .min(copy_line_end(&rows, copy.cursor.0));
+            }
+            KeyCode::Up | KeyCode::Char('k') => copy.cursor.0 = copy.cursor.0.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => copy.cursor.0 = (copy.cursor.0 + 1).min(last_row),
+            KeyCode::PageUp | KeyCode::Char('b') => {
+                copy.cursor.0 = copy.cursor.0.saturating_sub(page)
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') | KeyCode::Char('f') => {
+                copy.cursor.0 = copy.cursor.0.saturating_add(page).min(last_row)
+            }
+            KeyCode::Home | KeyCode::Char('g') => copy.cursor.0 = 0,
+            KeyCode::End | KeyCode::Char('G') => copy.cursor.0 = last_row,
+            KeyCode::Char('0') => copy.cursor.1 = 0,
+            KeyCode::Char('$') => copy.cursor.1 = copy_line_end(&rows, copy.cursor.0),
+            KeyCode::Char('w') => copy.cursor = copy_word_forward(&rows, copy.cursor),
+            KeyCode::Char('B') => copy.cursor = copy_word_back(&rows, copy.cursor),
+            _ => return true,
+        }
+        copy.cursor.1 = copy.cursor.1.min(copy_line_end(&rows, copy.cursor.0));
+        self.copy_mode = Some(copy);
+        self.reveal_copy_cursor();
+        true
+    }
+
     /// The pane whose **content** rect covers terminal cell `(x, y)`.
     /// Try to forward a button press at the event's position into a
     /// mouse-tracking pane app. On success: focuses the pane, snaps its
@@ -1355,35 +1610,19 @@ impl App {
             .visible_rows();
         let ((sx, sy), (ex, ey)) = sel.ordered();
         let (cx, cy) = (sel.content.x, sel.content.y);
-        let mut out = String::new();
-        for ty in sy..=ey {
-            let li = (ty as usize).saturating_sub(cy as usize);
-            let chars: Vec<char> = rows
-                .get(li)
-                .map(|r| r.chars().collect())
-                .unwrap_or_default();
-            let left = if ty == sy {
-                sx.saturating_sub(cx) as usize
-            } else {
-                0
-            };
-            let right = if ty == ey {
-                ex.saturating_sub(cx) as usize
-            } else {
-                chars.len().saturating_sub(1)
-            };
-            let line: String = chars
-                .iter()
-                .skip(left)
-                .take(right.saturating_sub(left) + 1)
-                .collect();
-            if ty != sy {
-                out.push('\n');
-            }
-            out.push_str(line.trim_end());
-        }
-        let out = out.trim_end_matches('\n').to_string();
-        (!out.trim().is_empty()).then_some(out)
+        extract_rows_selection(
+            &rows,
+            (
+                (
+                    (sy as usize).saturating_sub(cy as usize),
+                    (sx as usize).saturating_sub(cx as usize),
+                ),
+                (
+                    (ey as usize).saturating_sub(cy as usize),
+                    (ex as usize).saturating_sub(cx as usize),
+                ),
+            ),
+        )
     }
 
     /// Show a transient toast (e.g. "Copied") bottom-center for ~1.4s.
@@ -1562,6 +1801,15 @@ impl App {
         {
             self.scroll_pane = None;
         }
+        // Copy mode belongs to its pane just like scroll mode. A focus change
+        // cancels it rather than risking keys or a clipboard operation targeting
+        // a different pane.
+        if self
+            .copy_mode
+            .is_some_and(|copy| copy.pane != self.layout().focus)
+        {
+            self.cancel_copy_mode();
+        }
         // The running-command overlay: scroll it, refresh it, or dismiss.
         if self.cmd_inspect.is_some() {
             match key.code {
@@ -1708,6 +1956,11 @@ impl App {
         if self.scroll_pane.is_some() {
             return self.handle_scroll_mode_key(key);
         }
+        // Keyboard copy mode is deliberately ahead of prefix handling and all
+        // pane input: its navigation must never reach the selected program.
+        if self.copy_mode.is_some() {
+            return self.handle_copy_mode_key(key);
+        }
         // Keyboard resize mode (docs/27, RESIZE-3) likewise owns every key until
         // it's left (arrows/`hjkl` resize; `Esc`/`Enter`/`q` exit).
         if self.mode == Mode::Resize {
@@ -1791,6 +2044,14 @@ impl App {
                 if self.views.contains_key(&focus) {
                     return self.handle_file_key(focus, key);
                 }
+                // `Shift+V` starts a visual, keyboard-driven selection. It is a
+                // host action (not terminal input), like Shift+Up scroll mode.
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
+                    && self.begin_copy_mode()
+                {
+                    return true;
+                }
                 // `Shift+↑` / `Shift+PageUp` enter keyboard scroll mode (no prefix,
                 // works on a stock Mac keyboard). From there plain keys navigate.
                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1803,6 +2064,17 @@ impl App {
                     if self.enter_scroll_mode(by) {
                         return true;
                     }
+                }
+                // Plain page keys are convenient host-scroll shortcuts for a
+                // normal transcript. Leave them untouched for full-screen TUIs,
+                // mouse-reporting apps, and primary-screen pagers such as
+                // `less -X`, which advertise application cursor mode.
+                if key.modifiers.is_empty()
+                    && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+                    && self.focused().is_some_and(|pane| pane.host_page_keys())
+                {
+                    self.scroll_focused_pane(key.code);
+                    return true;
                 }
                 let newline = self.config.shift_enter_bytes();
                 if let Some(bytes) = encode_key(&key, newline) {
@@ -2205,6 +2477,7 @@ mod tests {
             drag: true,
             motion: true,
             sgr: true,
+            alternate_scroll: false,
         };
 
         assert_eq!(

@@ -38,14 +38,14 @@ tabs:
   tab close [<n>]            close a tab (default: active)
 
 panes / agents:
-  pane list                  list panes in the current tab
+  pane list                  list panes and read-only history metrics in the current tab
   pane split [<id>] [--down] [--no-focus]   split a pane (default: side by side)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
   pane send [<id>] <text>    send raw text to a pane
   pane read [<id>]           print a pane's recent output
-  pane status [<id>]         print a pane's agent status (any workspace)
+  pane status [<id>]         print a pane's agent status and history metrics (any workspace)
   pane name <name>           name a pane so you can mention it (--pane <id>; --clear)
   pane close [<id>]          close a pane
   agent list                 list every agent across all workspaces/tabs

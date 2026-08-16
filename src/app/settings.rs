@@ -694,12 +694,13 @@ impl App {
                 self.apply_gaps();
             }
             LayoutRow::Scrollback => {
-                let step = config::SCROLLBACK_STEP as i64;
-                let next = (self.config.layout.scrollback as i64 + step * delta as i64)
-                    .clamp(config::SCROLLBACK_MIN as i64, config::SCROLLBACK_MAX as i64)
-                    as usize;
-                self.config.layout.scrollback = next;
-                self.apply_scrollback();
+                let step = config::SCROLLBACK_BYTES_STEP as i64;
+                let next = (self.config.scrollback_bytes() as i64 + step * delta as i64).clamp(
+                    config::SCROLLBACK_BYTES_MIN as i64,
+                    config::SCROLLBACK_BYTES_MAX as i64,
+                ) as usize;
+                self.config.layout.scrollback_bytes = Some(next);
+                self.apply_history_budget();
                 config::save(&self.config);
             }
             LayoutRow::PaneTitles => {
@@ -842,13 +843,13 @@ impl App {
         config::save(&self.config);
     }
 
-    /// Push the scrollback limit to every live pane. Alacritty's
-    /// `Grid::update_history` shrinks retained history when the limit drops, so
-    /// lowering this frees memory now rather than only for new panes.
-    fn apply_scrollback(&mut self) {
-        let lines = self.config.scrollback();
+    /// Push the retained-history budget to every live pane. Alacritty's
+    /// `Grid::update_history` drops excess rows when its conservative capacity
+    /// falls, so lowering this frees memory now rather than only for new panes.
+    fn apply_history_budget(&mut self) {
+        let bytes = self.config.scrollback_bytes();
         for pane in self.panes.values() {
-            pane.set_scrollback(lines);
+            pane.set_history_budget(bytes);
         }
     }
 

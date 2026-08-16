@@ -436,10 +436,20 @@ impl App {
                             .get(id)
                             .map(|p| p.cwd.display().to_string())
                             .unwrap_or_default();
-                        let module = self.module_panes.get(id).map(|r| {
-                            json!({"id": r.module_id, "entrypoint": r.entrypoint})
-                        });
-                        json!({"pane": id.0.to_string(), "agent": agent, "status": status, "focused": *id == focus, "cwd": cwd, "module": module})
+                        let history = self.panes.get(id).map(|p| p.history_metrics());
+                        let module = self
+                            .module_panes
+                            .get(id)
+                            .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
+                        json!({
+                            "pane": id.0.to_string(), "agent": agent, "status": status,
+                            "focused": *id == focus, "cwd": cwd, "module": module,
+                            "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
+                            "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
+                            "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
+                            "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                            "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                        })
                     })
                     .collect();
                 Ok(json!({"type":"pane_list","panes":panes}))
@@ -569,9 +579,15 @@ impl App {
                     .get(&id)
                     .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
                     .unwrap_or_else(|| (String::new(), "unknown".to_string()));
-                Ok(
-                    json!({"type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status}),
-                )
+                let history = self.panes.get(&id).map(|p| p.history_metrics());
+                Ok(json!({
+                    "type":"pane_status","pane": id.0.to_string(), "agent": agent, "status": status,
+                    "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
+                    "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
+                    "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
+                    "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                    "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                }))
             }
             "pane.report_session" => {
                 let id = self.resolve_pane(p).ok_or_else(not_found)?;
@@ -2759,6 +2775,33 @@ mod tests {
                 .expect("agent.read ok");
             assert!(out["text"].is_string(), "{src} returns text");
         }
+    }
+
+    #[test]
+    fn pane_inspection_reports_read_only_history_metrics() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        if let Some(p) = app.panes.get(&pane) {
+            if let Ok(mut engine) = p.engine.lock() {
+                for i in 0..40 {
+                    engine.advance(format!("line {i}\r\n").as_bytes());
+                }
+            }
+        }
+        let out = app
+            .dispatch("pane.status", &json!({"pane": pane.0.to_string()}))
+            .expect("pane status");
+        assert_eq!(out["type"], "pane_status");
+        assert!(out["history_budget_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(out["history_rows"].as_u64().is_some());
+        assert!(out["history_bytes"].as_u64().is_some());
+        assert_eq!(out["history_exact"], false, "Alacritty reports an estimate");
+
+        let listed = app.dispatch("pane.list", &json!({})).expect("pane list");
+        let row = listed["panes"].as_array().unwrap().first().unwrap();
+        assert!(row.get("scroll_offset").is_some());
+        assert!(row.get("history_budget_bytes").is_some());
     }
 
     #[test]

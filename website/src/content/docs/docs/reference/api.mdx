@@ -95,6 +95,29 @@ position, and the currently active tab remains active even when its number
 changes. Zero, missing, same-position, and out-of-range values return
 `invalid_request` without changing state.
 
+## Pane history metrics
+
+`pane.list` (for the active tab) and `pane.status` (for any resolved pane) add
+read-only history fields to their existing result rows:
+
+```json
+{
+  "scroll_offset": 420,
+  "history_rows": 1830,
+  "history_budget_bytes": 10485760,
+  "history_bytes": 7340032,
+  "history_exact": false
+}
+```
+
+`scroll_offset` is the current distance from live output in rows, and
+`history_rows` is the retained scrollback row count. `history_budget_bytes` is
+the configured per-pane budget. `history_bytes` is the engine's retained-memory
+reading; `history_exact` tells consumers whether that number is exact. With the
+current Alacritty adapter it is a conservative estimate (`false`), because the
+underlying terminal engine limits rows rather than allocation bytes. These
+fields observe state only; they do not grant remote control of a pane viewport.
+
 ## Forking an agent session
 
 | Method | Params | Result |

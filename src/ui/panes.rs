@@ -231,6 +231,9 @@ fn draw_one_pane(
     let downsample = app.downsample;
     // A mouse text-selection in this pane highlights its cells.
     let sel = app.selection.filter(|s| s.pane == id);
+    // Keyboard copy selections live in absolute history coordinates. Resolve
+    // those against the engine's current viewport inside the one render lock.
+    let copy = app.copy_mode.filter(|copy| copy.pane == id);
     // The link under a `Ctrl`-held cursor (docs/58). Borrowed, not cloned: this
     // is the render path, and the spans are recomputed only when the hovered
     // cell changes anyway.
@@ -252,6 +255,8 @@ fn draw_one_pane(
     let mut composer_region = None;
     let cursor_pos = match pane.engine.lock() {
         Ok(engine) => {
+            let copy_top =
+                copy.map(|_| engine.history_len().saturating_sub(engine.scroll_offset()));
             {
                 let buf = f.buffer_mut();
                 engine.for_each_cell(&mut |row, col, sym, cell| {
@@ -282,6 +287,22 @@ fn draw_one_pane(
                     // Highlight the cell if it's inside the mouse selection.
                     if sel.is_some_and(|s| s.contains(x, y)) {
                         style = style.bg(t.sel_bg);
+                    }
+                    if copy.is_some_and(|copy| {
+                        copy_top.is_some_and(|top| {
+                            copy.contains(top.saturating_add(row as usize), col as usize)
+                        })
+                    }) {
+                        style = style.bg(t.sel_bg);
+                    }
+                    // The terminal's own cursor belongs to the child. During
+                    // copy mode, draw Bohay's selection cursor instead.
+                    if copy.is_some_and(|copy| {
+                        copy_top.is_some_and(|top| {
+                            copy.cursor == (top.saturating_add(row as usize), col as usize)
+                        })
+                    }) {
+                        style = style.add_modifier(ratatui::style::Modifier::REVERSED);
                     }
                     // Underline the `Ctrl`-hovered link, so it reads as clickable
                     // before you commit to the click. Applied after the selection
@@ -325,7 +346,12 @@ fn draw_one_pane(
                 composer_region = engine.codex_composer_region();
             }
             let cur = engine.cursor();
-            if focused && cur.visible && cur.x < content.width && cur.y < content.height {
+            if focused
+                && copy.is_none()
+                && cur.visible
+                && cur.x < content.width
+                && cur.y < content.height
+            {
                 Some((content.x + cur.x, content.y + cur.y))
             } else {
                 None

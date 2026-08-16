@@ -31,6 +31,23 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &App, t: &Theme
         return;
     }
 
+    // Keyboard copy mode owns navigation too. Keep its hints compact because
+    // the selected cells and inverse cursor are the primary affordance.
+    if app.copy_mode.is_some() {
+        let mut left: Vec<Span> = vec![Span::raw(" ")];
+        left.push(Span::styled(
+            " COPY ",
+            Style::new().fg(t.crust).bg(t.accent).bold(),
+        ));
+        left.push(Span::raw("  "));
+        left.extend(hint("hjkl arrows", "move", t));
+        left.extend(hint("v", "anchor", t));
+        left.extend(hint("y", "copy", t));
+        left.extend(hint("q", "cancel", t));
+        f.render_widget(Paragraph::new(Line::from(left)), area);
+        return;
+    }
+
     // Keyboard resize mode owns the status line with its own hint (docs/27).
     if app.mode == Mode::Resize {
         let mut left: Vec<Span> = vec![Span::raw(" ")];

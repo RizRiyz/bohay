@@ -33,6 +33,18 @@ pub struct CodexComposerRegion {
     pub bottom: u16,
 }
 
+/// Read-only scrollback accounting exposed by every terminal engine. Engines
+/// that cannot enforce a native byte cap report a conservative estimate rather
+/// than pretending it is exact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryMetrics {
+    pub offset: usize,
+    pub retained_rows: usize,
+    pub budget_bytes: usize,
+    pub retained_bytes: usize,
+    pub exact_bytes: bool,
+}
+
 /// Minimal terminal-emulator surface. Owns the grid + scrollback.
 pub trait VtEngine: Send {
     /// Feed child output. Must never panic on arbitrary bytes.
@@ -68,9 +80,10 @@ pub trait VtEngine: Send {
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
     /// retained history. No-op while on the alternate screen.
-    /// Change how many lines of scrollback this pane retains (Settings →
-    /// Layout). Lowering it drops the excess history immediately.
-    fn set_scrollback(&mut self, lines: usize);
+    /// Change this pane's retained-history memory budget. Lowering it drops
+    /// excess history immediately. Engines without native byte accounting must
+    /// use a conservative row cap and report estimated metrics.
+    fn set_history_budget(&mut self, bytes: usize);
 
     fn scroll(&mut self, delta: i32);
 
@@ -87,6 +100,9 @@ pub trait VtEngine: Send {
     /// Total lines of retained scrollback history (the maximum `scroll_offset`).
     /// Lets scroll mode jump to a proportional position (the `1`–`9` keys).
     fn history_len(&self) -> usize;
+
+    /// Current scroll position and retained-history accounting.
+    fn history_metrics(&self) -> HistoryMetrics;
 
     /// Every retained row as plain text, **oldest first**: the scrollback history
     /// followed by the live screen, trailing blanks trimmed. Used by global
@@ -109,6 +125,14 @@ pub trait VtEngine: Send {
     /// wheel/click events to it as escape sequences (e.g. a TUI agent scrolling
     /// its own transcript) rather than scrolling bohay's scrollback.
     fn mouse_report(&self) -> bool;
+
+    /// Whether the pane asked for alternate scrolling on the alternate screen.
+    /// It receives arrow-key scroll input instead of host history movement.
+    fn alternate_scroll(&self) -> bool;
+
+    /// Whether the child enabled application cursor mode. Combined with paste
+    /// and mouse modes, this lets the input layer leave pager keys alone.
+    fn application_cursor(&self) -> bool;
 
     /// Whether the child also requested **drag/motion tracking** (1002/1003) —
     /// press-and-move events are forwarded only then, so a click-only (1000)

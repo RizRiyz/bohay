@@ -25,6 +25,7 @@ pub struct MouseModes {
     pub drag: bool,
     pub motion: bool,
     pub sgr: bool,
+    pub alternate_scroll: bool,
 }
 
 pub struct Pane {
@@ -99,7 +100,7 @@ impl Pane {
         app_tx: Sender<AppEvent>,
         initial: Option<&str>,
         shell: &str,
-        scrollback: usize,
+        history_budget_bytes: usize,
     ) -> Result<Pane> {
         let cmd = CommandBuilder::new(shell);
         Self::build(
@@ -112,7 +113,7 @@ impl Pane {
             cmd,
             basename(shell),
             &[],
-            scrollback,
+            history_budget_bytes,
         )
     }
 
@@ -130,7 +131,7 @@ impl Pane {
         initial: Option<&str>,
         shell: &str,
         argv: &[String],
-        scrollback: usize,
+        history_budget_bytes: usize,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty shell command"));
@@ -149,7 +150,7 @@ impl Pane {
             cmd,
             basename(shell),
             &[],
-            scrollback,
+            history_budget_bytes,
         )
     }
 
@@ -164,7 +165,7 @@ impl Pane {
         app_tx: Sender<AppEvent>,
         argv: &[String],
         env: &[(String, String)],
-        scrollback: usize,
+        history_budget_bytes: usize,
     ) -> Result<Pane> {
         let Some((program, args)) = argv.split_first() else {
             return Err(anyhow::anyhow!("empty module command"));
@@ -183,7 +184,7 @@ impl Pane {
             cmd,
             basename(program),
             env,
-            scrollback,
+            history_budget_bytes,
         )
     }
 
@@ -198,7 +199,7 @@ impl Pane {
         mut cmd: CommandBuilder,
         command: String,
         extra_env: &[(String, String)],
-        scrollback: usize,
+        history_budget_bytes: usize,
     ) -> Result<Pane> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -237,7 +238,7 @@ impl Pane {
             cols,
             rows,
             input_tx.clone(),
-            scrollback,
+            history_budget_bytes,
         )));
         // Replay the saved screen so a restored pane shows its prior content.
         if let Some(screen) = initial {
@@ -313,11 +314,11 @@ impl Pane {
         });
     }
 
-    /// Apply a new scrollback limit (Settings → Layout). Shrinks retained
-    /// history immediately when lowered.
-    pub fn set_scrollback(&self, lines: usize) {
+    /// Apply a new per-pane history memory budget (Settings → Layout). Shrinks
+    /// retained history immediately when lowered.
+    pub fn set_history_budget(&self, bytes: usize) {
         if let Ok(mut e) = self.engine.lock() {
-            e.set_scrollback(lines);
+            e.set_history_budget(bytes);
         }
     }
 
@@ -370,6 +371,19 @@ impl Pane {
             .unwrap_or((0, 0))
     }
 
+    /// Read-only accounting for retained terminal history.
+    pub fn history_metrics(&self) -> crate::terminal::vt::HistoryMetrics {
+        self.engine.lock().map(|e| e.history_metrics()).unwrap_or(
+            crate::terminal::vt::HistoryMetrics {
+                offset: 0,
+                retained_rows: 0,
+                budget_bytes: 0,
+                retained_bytes: 0,
+                exact_bytes: false,
+            },
+        )
+    }
+
     /// Whether the child is on the alternate screen — callers forward wheel
     /// input to the app there instead of scrolling scrollback.
     pub fn alt_screen(&self) -> bool {
@@ -389,8 +403,23 @@ impl Pane {
                 drag: e.mouse_drag(),
                 motion: e.mouse_motion(),
                 sgr: e.sgr_mouse(),
+                alternate_scroll: e.alternate_scroll(),
             })
             .unwrap_or_default()
+    }
+
+    /// Whether plain page keys should scroll Bohay's host history. Full-screen
+    /// programs, mouse-tracking TUIs, and primary-screen pagers in application
+    /// cursor mode retain their own key handling.
+    pub fn host_page_keys(&self) -> bool {
+        self.engine
+            .lock()
+            .map(|e| {
+                !e.alt_screen()
+                    && !e.mouse_report()
+                    && (!e.application_cursor() || e.bracketed_paste())
+            })
+            .unwrap_or(false)
     }
 
     /// Send pasted text to the child, wrapped in the bracketed-paste markers

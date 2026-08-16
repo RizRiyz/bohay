@@ -15,6 +15,15 @@ pub(super) struct SettingsHits {
     pub arrows: Vec<(usize, i32, Rect)>,
 }
 
+fn format_history_budget(bytes: usize) -> String {
+    let mib = crate::config::MIB;
+    if bytes.is_multiple_of(mib) {
+        format!("{} MiB", bytes / mib)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / mib as f64)
+    }
+}
+
 pub(super) fn draw_settings(
     f: &mut RenderTarget,
     area: Rect,
@@ -345,7 +354,7 @@ fn draw_content(
                             i,
                             cursor == i,
                             cat.set_scrollback,
-                            format!("{} lines", app.config.scrollback()),
+                            format_history_budget(app.config.scrollback_bytes()),
                             t,
                             &mut arrows,
                         );

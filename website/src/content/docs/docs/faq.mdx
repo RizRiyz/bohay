@@ -51,9 +51,12 @@ pane was running.
 
 ## Where did my scrollback go?
 
-Each pane keeps 5 000 lines of history. Full-screen apps (vim, TUI agents) own
-their own scrolling, and bohay forwards the wheel to them, so use the app's native
-scrolling there.
+Each pane has a 10 MiB retained-history budget by default, adjustable in
+**Settings → Layout → Scrollback memory**. Bohay's current terminal engine translates
+that into a conservative row limit, so the displayed usage is an estimate rather
+than an exact allocation count. Full-screen apps (vim, TUI agents) own their own
+scrolling, and bohay forwards the wheel to them, so use the app's native scrolling
+there.
 
 ## Windows: what's different?
 

@@ -220,7 +220,7 @@ impl App {
         }
         argv.push(path.to_string_lossy().into_owned());
         let id = PaneId::alloc();
-        let scrollback = self.config.scrollback();
+        let history_budget_bytes = self.config.scrollback_bytes();
         match crate::terminal::pty::Pane::spawn_command(
             id,
             80,
@@ -229,7 +229,7 @@ impl App {
             self.app_tx.clone(),
             &argv,
             &[],
-            scrollback,
+            history_budget_bytes,
         ) {
             Ok(pane) => {
                 let cmd = pane.command.clone();

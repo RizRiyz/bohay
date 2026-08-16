@@ -121,12 +121,14 @@ pub struct LayoutConfig {
     /// read-only, and the right-click menu picks per file.
     #[serde(default = "default_file_open")]
     pub file_open: String,
-    /// Lines of scrollback kept per pane. **The main memory dial**: scrollback
-    /// dominates per-pane cost (measured ~10 MB per pane at 5 000 lines / 120
-    /// columns), and it is the only thing that scales with session age. The
-    /// default matches tmux; raise it if you scroll back a lot, lower it if you
-    /// keep many panes open.
-    #[serde(default = "default_scrollback")]
+    /// Retained scrollback budget per pane. This is the user-facing memory dial:
+    /// 10 MiB by default, regardless of how many panes are open. The Alacritty
+    /// adapter derives a conservative row limit from it until the Ghostty engine
+    /// can enforce a native byte budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback_bytes: Option<usize>,
+    /// Pre-v0.10.3 line-count setting. Read for migration but never write again.
+    #[serde(default = "default_scrollback", skip_serializing)]
     pub scrollback: usize,
     /// Show dotfiles in the FILES tree (docs/38). On by default (dev projects
     /// lean on `.env`/`.gitignore`/`.github` and hiding them surprised people);
@@ -302,6 +304,7 @@ impl Default for LayoutConfig {
             agent_title: false,
             resume_in_new_workspace: true,
             file_open: default_file_open(),
+            scrollback_bytes: Some(SCROLLBACK_BYTES_DEFAULT),
             scrollback: default_scrollback(),
             files_show_hidden: true,
             compact_width: default_compact_width(),
@@ -310,18 +313,29 @@ impl Default for LayoutConfig {
     }
 }
 
-/// Scrollback bounds. The default matches tmux (2 000); the ceiling keeps a
-/// pathological config from turning into gigabytes of grid.
+/// Legacy line-count defaults retained only to migrate existing config files.
 pub const SCROLLBACK_DEFAULT: usize = 2_000;
 pub const SCROLLBACK_MIN: usize = 200;
 pub const SCROLLBACK_MAX: usize = 20_000;
-/// Slider step in Settings — lines-per-keypress (1 would be useless here).
-pub const SCROLLBACK_STEP: usize = 200;
+/// One MiB in bytes. Kept explicit so Settings and config diagnostics use the
+/// same unit without a dependency.
+pub const MIB: usize = 1024 * 1024;
+/// Default per-pane retained-history budget.
+pub const SCROLLBACK_BYTES_DEFAULT: usize = 10 * MIB;
+pub const SCROLLBACK_BYTES_MIN: usize = MIB;
+pub const SCROLLBACK_BYTES_MAX: usize = 256 * MIB;
+/// Settings changes history memory one MiB at a time.
+pub const SCROLLBACK_BYTES_STEP: usize = MIB;
 
 impl Config {
-    /// Lines of scrollback per pane, clamped to the supported range.
-    pub fn scrollback(&self) -> usize {
-        self.layout.scrollback.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX)
+    /// Per-pane history memory budget, clamped to a safe range. Existing
+    /// line-count config is converted once on load; the fallback here keeps
+    /// direct deserialization and old plugins safe as well.
+    pub fn scrollback_bytes(&self) -> usize {
+        self.layout
+            .scrollback_bytes
+            .unwrap_or_else(|| legacy_scrollback_bytes(self.layout.scrollback))
+            .clamp(SCROLLBACK_BYTES_MIN, SCROLLBACK_BYTES_MAX)
     }
 
     /// Bytes forwarded to a pane for Shift/Alt+Enter (see `shift_enter`). Falls
@@ -358,7 +372,30 @@ pub fn load() -> Config {
     fs::read_to_string(config_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
+        .map(migrate_scrollback)
         .unwrap_or_default()
+}
+
+/// Hydrate an old line-count setting into the new persisted byte budget. The
+/// old default becomes today's 10 MiB default; custom values retain their rough
+/// relative size using the previous measured 5,000 lines at 120 columns ≈ 10
+/// MiB relationship.
+fn migrate_scrollback(mut cfg: Config) -> Config {
+    if cfg.layout.scrollback_bytes.is_none() {
+        cfg.layout.scrollback_bytes = Some(legacy_scrollback_bytes(cfg.layout.scrollback));
+    }
+    cfg
+}
+
+fn legacy_scrollback_bytes(lines: usize) -> usize {
+    if lines == SCROLLBACK_DEFAULT {
+        return SCROLLBACK_BYTES_DEFAULT;
+    }
+    lines
+        .clamp(SCROLLBACK_MIN, SCROLLBACK_MAX)
+        .saturating_mul(SCROLLBACK_BYTES_DEFAULT)
+        .saturating_div(5_000)
+        .clamp(SCROLLBACK_BYTES_MIN, SCROLLBACK_BYTES_MAX)
 }
 
 /// Save the config atomically (best effort).
@@ -394,21 +431,27 @@ mod tests {
         assert_eq!(from_empty.theme, "quattro-rally");
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         // Round-trip preserves values.
-        // Scrollback defaults to tmux's 2 000 and is clamped to sane bounds.
-        assert_eq!(c.layout.scrollback, 2_000);
-        assert_eq!(c.scrollback(), 2_000);
+        // Scrollback defaults to a per-pane 10 MiB budget. The legacy line
+        // field remains only so old config can migrate safely.
+        assert_eq!(c.scrollback_bytes(), SCROLLBACK_BYTES_DEFAULT);
         let mut wild = Config::default();
-        wild.layout.scrollback = 99_999_999;
+        wild.layout.scrollback_bytes = Some(usize::MAX);
         assert_eq!(
-            wild.scrollback(),
-            SCROLLBACK_MAX,
+            wild.scrollback_bytes(),
+            SCROLLBACK_BYTES_MAX,
             "absurd values clamp down"
         );
-        wild.layout.scrollback = 1;
-        assert_eq!(wild.scrollback(), SCROLLBACK_MIN, "tiny values clamp up");
+        wild.layout.scrollback_bytes = Some(1);
+        assert_eq!(
+            wild.scrollback_bytes(),
+            SCROLLBACK_BYTES_MIN,
+            "tiny values clamp up"
+        );
         // An old config written before this field still loads, at the new default.
         let old: Config = serde_json::from_str(r#"{"layout":{"col_gap":1}}"#).unwrap();
-        assert_eq!(old.scrollback(), 2_000);
+        assert_eq!(old.scrollback_bytes(), SCROLLBACK_BYTES_DEFAULT);
+        let old_custom: Config = serde_json::from_str(r#"{"layout":{"scrollback":5000}}"#).unwrap();
+        assert_eq!(old_custom.scrollback_bytes(), SCROLLBACK_BYTES_DEFAULT);
 
         // Sounds are optional and must default to off.
         assert!(!c.notifications.sound_on_done);

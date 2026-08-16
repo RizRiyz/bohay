@@ -12,7 +12,7 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, Processor};
 
 use ratatui::style::{Color, Modifier};
 
-use super::{CodexComposerRegion, Cursor, RenderCell, VtEngine};
+use super::{CodexComposerRegion, Cursor, HistoryMetrics, RenderCell, VtEngine};
 
 type TitleSlot = Arc<Mutex<Option<String>>>;
 
@@ -69,10 +69,16 @@ pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
     title: TitleSlot,
+    history_budget_bytes: usize,
 }
 
 impl AlacrittyEngine {
-    pub fn new(cols: u16, rows: u16, resp_tx: Sender<Vec<u8>>, scrollback: usize) -> Self {
+    pub fn new(
+        cols: u16,
+        rows: u16,
+        resp_tx: Sender<Vec<u8>>,
+        history_budget_bytes: usize,
+    ) -> Self {
         let dims = Dims {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
@@ -82,12 +88,12 @@ impl AlacrittyEngine {
             tx: resp_tx,
             title: title.clone(),
         };
-        // Scrollback is the dominant per-pane cost (history lines × columns ×
-        // cell — measured ~10 MB per pane at 5 000 lines), so it is user-set:
-        // `config.layout.scrollback`, defaulting to tmux's 2 000. Only allocated
-        // as history actually accumulates.
+        // Alacritty retains history by rows, not bytes. Derive a conservative
+        // capacity from Bohay's per-pane byte budget and current width. The
+        // estimate deliberately overcharges each row; metrics identify it as an
+        // estimate until an engine provides native byte accounting.
         let config = Config {
-            scrolling_history: scrollback,
+            scrolling_history: history_rows_for_budget(history_budget_bytes, cols),
             ..Config::default()
         };
         let term = Term::new(config, &dims, proxy);
@@ -95,8 +101,37 @@ impl AlacrittyEngine {
             term,
             parser: Processor::new(),
             title,
+            history_budget_bytes,
         }
     }
+
+    fn apply_history_budget(&mut self) {
+        self.term.set_options(Config {
+            scrolling_history: history_rows_for_budget(
+                self.history_budget_bytes,
+                self.term.grid().columns() as u16,
+            ),
+            ..Config::default()
+        });
+    }
+}
+
+/// Conservative upper estimate for a retained terminal row. It includes more
+/// than the measured fixed cell footprint plus allocator/row overhead, so the
+/// Alacritty adapter stays below the selected history budget in ordinary use.
+const HISTORY_CELL_BYTES: usize = 32;
+const HISTORY_ROW_OVERHEAD_BYTES: usize = 512;
+
+fn estimated_row_bytes(cols: usize) -> usize {
+    cols.max(1)
+        .saturating_mul(HISTORY_CELL_BYTES)
+        .saturating_add(HISTORY_ROW_OVERHEAD_BYTES)
+}
+
+fn history_rows_for_budget(bytes: usize, cols: u16) -> usize {
+    bytes
+        .saturating_div(estimated_row_bytes(cols.max(1) as usize))
+        .max(1)
 }
 
 impl VtEngine for AlacrittyEngine {
@@ -109,6 +144,7 @@ impl VtEngine for AlacrittyEngine {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
         });
+        self.apply_history_budget();
     }
 
     fn cursor(&self) -> Cursor {
@@ -274,14 +310,12 @@ impl VtEngine for AlacrittyEngine {
         self.title.lock().ok().and_then(|g| g.clone())
     }
 
-    fn set_scrollback(&mut self, lines: usize) {
+    fn set_history_budget(&mut self, bytes: usize) {
         // `set_options` funnels into `Grid::update_history`, which *shrinks* the
         // retained history when the limit drops — so lowering the setting frees
         // memory on existing panes instead of only applying to new ones.
-        self.term.set_options(Config {
-            scrolling_history: lines,
-            ..Config::default()
-        });
+        self.history_budget_bytes = bytes;
+        self.apply_history_budget();
     }
 
     fn scroll(&mut self, delta: i32) {
@@ -307,6 +341,18 @@ impl VtEngine for AlacrittyEngine {
     fn history_len(&self) -> usize {
         // `Dimensions::history_size` = total_lines − screen_lines (the scrollback).
         self.term.grid().history_size()
+    }
+
+    fn history_metrics(&self) -> HistoryMetrics {
+        let retained_rows = self.history_len();
+        HistoryMetrics {
+            offset: self.scroll_offset(),
+            retained_rows,
+            budget_bytes: self.history_budget_bytes,
+            retained_bytes: retained_rows
+                .saturating_mul(estimated_row_bytes(self.term.grid().columns())),
+            exact_bytes: false,
+        }
     }
 
     fn rows_text(&self) -> Vec<String> {
@@ -352,6 +398,14 @@ impl VtEngine for AlacrittyEngine {
     fn mouse_report(&self) -> bool {
         // MOUSE_MODE = REPORT_CLICK | MOUSE_MOTION | MOUSE_DRAG.
         self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    fn alternate_scroll(&self) -> bool {
+        self.term.mode().contains(TermMode::ALTERNATE_SCROLL)
+    }
+
+    fn application_cursor(&self) -> bool {
+        self.term.mode().contains(TermMode::APP_CURSOR)
     }
 
     fn mouse_drag(&self) -> bool {
@@ -515,6 +569,10 @@ mod tests {
         }
     }
 
+    fn budget_for_rows(cols: usize, rows: usize) -> usize {
+        estimated_row_bytes(cols).saturating_mul(rows)
+    }
+
     // docs/07: agent detection must read the **live** screen, never the
     // scrolled-back viewport. Scrollback preserves the spinner/interrupt frames
     // an agent printed earlier, so a user scrolling up would otherwise drag a
@@ -529,7 +587,7 @@ mod tests {
     #[test]
     fn scrollback_limit_is_honored_and_shrinks_live() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx, 100);
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 100));
         feed_lines(&mut e, 400);
         assert_eq!(
             e.history_len(),
@@ -538,14 +596,14 @@ mod tests {
         );
 
         // Lowering it reclaims immediately…
-        e.set_scrollback(20);
+        e.set_history_budget(budget_for_rows(20, 20));
         assert_eq!(e.history_len(), 20, "excess history is dropped on the spot");
         // …and the viewport can't be left scrolled past the new end.
         e.scroll_to_top();
         assert!(e.scroll_offset() <= 20);
 
         // Raising it takes effect as new output accumulates.
-        e.set_scrollback(200);
+        e.set_history_budget(budget_for_rows(20, 200));
         feed_lines(&mut e, 400);
         assert_eq!(e.history_len(), 200, "the raised limit is used");
     }
@@ -553,7 +611,7 @@ mod tests {
     #[test]
     fn scrolled_back_still_renders_and_copies_history() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 6, tx, 2000);
+        let mut e = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
         e.advance(b"OLDEST\r\n");
         feed_lines(&mut e, 40);
 
@@ -584,7 +642,7 @@ mod tests {
     #[test]
     fn rows_text_dumps_full_history_oldest_first() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 6, tx, 2000);
+        let mut e = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
         feed_lines(&mut e, 40); // line0..line39; only ~6 fit the live screen
         let rows = e.rows_text();
         let i0 = rows
@@ -602,7 +660,7 @@ mod tests {
     #[test]
     fn scroll_to_lands_and_clamps() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 6, tx, 2000);
+        let mut e = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
         feed_lines(&mut e, 40);
         let hist = e.history_len();
         assert!(hist > 0, "there is history to land in");
@@ -617,7 +675,7 @@ mod tests {
     #[test]
     fn for_each_cell_emits_the_whole_grapheme_cluster() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 3, tx, 200);
+        let mut e = AlacrittyEngine::new(40, 3, tx, budget_for_rows(40, 200));
         // 🖥️ = U+1F5A5 (desktop computer) + U+FE0F (VS16). Alacritty stores the
         // VS16 as a `zerowidth` attachment on the base cell; emitting only the
         // base char rendered a bare monochrome glyph or a tofu box.
@@ -645,7 +703,7 @@ mod tests {
     #[test]
     fn detection_text_ignores_scrollback_offset() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 5, tx, 2000);
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 2_000));
         // An old turn that was working, now scrolled far above the live screen.
         e.advance(b"\xE2\xA0\xB9 Thinking... (esc to interrupt)\r\n");
         feed_lines(&mut e, 40);
@@ -685,7 +743,7 @@ mod tests {
     #[test]
     fn scrollback_offset_moves_clamps_and_resets() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx, 2000); // 5 visible rows
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000)); // 5 visible rows
         feed_lines(&mut e, 50); // 50 lines → ~45 in scrollback
 
         assert_eq!(e.scroll_offset(), 0, "starts live at the bottom");
@@ -715,7 +773,7 @@ mod tests {
     #[test]
     fn alt_screen_has_no_scrollback() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx, 2000);
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
         feed_lines(&mut e, 20);
         e.advance(b"\x1b[?1049h"); // enter the alternate screen
         assert!(e.alt_screen());
@@ -724,9 +782,22 @@ mod tests {
     }
 
     #[test]
+    fn alternate_scroll_mode_is_reported() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
+        // Alacritty follows the terminal default: alternate scrolling starts
+        // enabled, and an application can explicitly turn it off.
+        assert!(e.alternate_scroll());
+        e.advance(b"\x1b[?1007l");
+        assert!(!e.alternate_scroll());
+        e.advance(b"\x1b[?1007h");
+        assert!(e.alternate_scroll());
+    }
+
+    #[test]
     fn mouse_tracking_modes_are_detected() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(20, 5, tx, 2000);
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
         assert!(!e.mouse_report(), "no tracking by default");
         assert!(!e.sgr_mouse());
         // A TUI agent enabling normal + SGR mouse reporting (DECSET 1000, 1006).
@@ -751,7 +822,7 @@ mod tests {
     #[test]
     fn codex_composer_region_finds_the_real_default_background_layout() {
         let (tx, _rx) = channel();
-        let mut e = AlacrittyEngine::new(40, 8, tx, 2000);
+        let mut e = AlacrittyEngine::new(40, 8, tx, budget_for_rows(40, 2_000));
         // Codex leaves one blank padding row above and below its `›` prompt.
         e.advance("\x1b[2;1H› Write tests".as_bytes());
 

@@ -1634,7 +1634,12 @@ mod tests {
         // nondeterministically even though the renderer was correct.
         let (response_tx, _response_rx) = mpsc::channel();
         app.panes.get_mut(&id).unwrap().engine = Arc::new(Mutex::new(
-            crate::terminal::vt::alacritty::AlacrittyEngine::new(80, 24, response_tx, 2_000),
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(
+                80,
+                24,
+                response_tx,
+                crate::config::SCROLLBACK_BYTES_DEFAULT,
+            ),
         ));
         app.panes
             .get(&id)

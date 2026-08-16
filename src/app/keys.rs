@@ -287,6 +287,18 @@ pub const KEY_REFERENCE: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Copy mode  (no prefix)",
+        &[
+            ("Shift+v", "select terminal text with the keyboard"),
+            ("arrows  hjkl", "extend the selection by character / line"),
+            ("w / B", "next / previous word"),
+            ("Space / b", "page down / up"),
+            ("v", "reset the selection anchor at the cursor"),
+            ("y  ⏎", "copy and return to live output"),
+            ("q  esc", "cancel and restore the prior viewport"),
+        ],
+    ),
+    (
         "Resize mode  (⌃Space r)",
         &[
             ("arrows  hjkl", "resize the focused pane"),
