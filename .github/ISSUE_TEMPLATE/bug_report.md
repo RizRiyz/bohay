@@ -5,8 +5,14 @@ title: ""
 labels: bug
 ---
 
+<!--
+Thanks for reporting a Bohay problem. Please remove anything sensitive from
+commands, paths, logs, or screenshots before submitting.
+-->
+
 **What happened?**
-A clear description of the bug — what you did, what you expected, what you got.
+Describe the actual behavior, the behavior you expected, and how it affects
+your workflow.
 
 **Steps to reproduce**
 1.
@@ -14,10 +20,18 @@ A clear description of the bug — what you did, what you expected, what you got
 3.
 
 **Environment**
-- OS + version:
-- Terminal app (iTerm2, Windows Terminal, kitty, …):
-- `bohay server status` output:
-- `bohay doctor` output:
+- OS + version (for macOS, run `sw_vers`):
+- Terminal app + version (for example Ghostty, iTerm2, Windows Terminal, or kitty):
+- Bohay version and server status (`bohay server status`):
+- Diagnostic output (`bohay doctor`):
+
+```text
+Paste command output here, with secrets removed.
+```
 
 **Anything else?**
-Screenshots, logs, or the agent you were running (claude / copilot / codex / opencode / …).
+Attach screenshots or relevant logs, name the agent you were running
+(Claude, Codex, Copilot, OpenCode, and so on), and include any useful context.
+
+For server, socket, memory, or performance reports, include the relevant
+process and socket details if your platform provides them.

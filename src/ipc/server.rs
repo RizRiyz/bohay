@@ -4,8 +4,8 @@
 
 use crate::ipc::transport::{self, Conn};
 use std::collections::HashMap;
-use std::io::BufReader;
-use std::path::PathBuf;
+use std::io::{self, BufReader};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -107,21 +107,51 @@ type Clients = HashMap<u64, ClientState>;
 pub fn run() -> Result<()> {
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
+    // Every process targeting one BOHAY_HOME serializes startup here. This is
+    // deliberately before restoring panes: a losing server must exit without
+    // spawning duplicate PTYs or retaining a second terminal grid.
+    let state_dir = persist::ensure_config_dir();
+    let startup_lock = transport::acquire_server_startup_lock(&state_dir)?;
     let sock = persist::socket_path();
+    let client_sock = persist::client_socket_path();
+    // A responsive listener means another server owns this state directory.
+    // Do not reclaim either socket or start a competing process.
+    if transport::connect(&sock).is_ok() || transport::connect(&client_sock).is_ok() {
+        return Ok(());
+    }
     api::set_socket_path(sock.clone());
-    let mut app = App::restore_or_new(DEFAULT_SIZE.0, DEFAULT_SIZE.1, tx.clone())?;
+
+    let (api_tx, api_rx) = mpsc::channel::<api::ApiRequest>();
+    let events = api::new_bus();
+    let api_listener = api::bind_server(&sock, &startup_lock)?;
+    let client_listener = match bind_client_listener(&client_sock, &startup_lock) {
+        Ok(listener) => listener,
+        Err(err) => {
+            drop(api_listener);
+            let _ = remove_unbound_socket(&sock);
+            return Err(err.into());
+        }
+    };
+
+    let mut app = match App::restore_or_new(DEFAULT_SIZE.0, DEFAULT_SIZE.1, tx.clone()) {
+        Ok(app) => app,
+        Err(err) => {
+            drop(client_listener);
+            drop(api_listener);
+            let _ = remove_unbound_socket(&client_sock);
+            let _ = remove_unbound_socket(&sock);
+            return Err(err);
+        }
+    };
+    app.events = events.clone();
     app.server_mode = true;
     shutdown::install();
 
-    let (api_tx, api_rx) = mpsc::channel::<api::ApiRequest>();
-    api::start_server(sock, api_tx, app.events.clone());
     let mut terminal_theme_enabled = app.config.theme == "terminal";
     let terminal_theme = Arc::new(AtomicBool::new(terminal_theme_enabled));
-    start_client_listener(
-        persist::client_socket_path(),
-        tx.clone(),
-        terminal_theme.clone(),
-    );
+    api::start_server(api_listener, api_tx, events);
+    start_client_listener(client_listener, tx.clone(), terminal_theme.clone());
+    drop(startup_lock);
     // The session is restored and the API socket is listening, so a module's
     // `[[startup]]` hooks can now call back in — this is where a module
     // repaints the docks it owns (docs/13 §3.7).
@@ -581,13 +611,19 @@ fn render_client(
     }
 }
 
-fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {
-    // Creates the state dir owner-only (0700) — this socket drives the UI.
-    let _ = crate::persist::ensure_config_dir();
-    let listener = match transport::bind(&path) {
-        Ok(l) => l,
-        Err(_) => return,
-    };
+fn bind_client_listener(
+    path: &Path,
+    startup_lock: &transport::ServerStartupLock,
+) -> io::Result<transport::Listener> {
+    startup_lock.reclaim_stale_socket(path)?;
+    transport::bind(path)
+}
+
+fn start_client_listener(
+    listener: transport::Listener,
+    app_tx: Sender<AppEvent>,
+    terminal_theme: Arc<AtomicBool>,
+) {
     thread::spawn(move || {
         for (id, stream) in (1u64..).zip(transport::incoming(&listener)) {
             let app_tx = app_tx.clone();
@@ -595,6 +631,24 @@ fn start_client_listener(path: PathBuf, app_tx: Sender<AppEvent>, terminal_theme
             thread::spawn(move || handle_client(id, stream, app_tx, terminal_theme));
         }
     });
+}
+
+/// Remove a listener pathname only after its listener has been dropped and the
+/// startup lock is still held. Named pipes have no filesystem path to clean up.
+fn remove_unbound_socket(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
 }
 
 fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme: Arc<AtomicBool>) {

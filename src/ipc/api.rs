@@ -3,8 +3,9 @@
 //! requests are marshalled onto the single-threaded app loop; `events.subscribe`
 //! streams from a simple broadcast bus. See docs/08.
 
+use std::io;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -49,16 +50,18 @@ pub fn socket_path_env() -> Option<String> {
     SOCKET.get().map(|p| p.to_string_lossy().to_string())
 }
 
-/// Bind the socket and accept connections on a background thread.
-pub fn start_server(path: PathBuf, api_tx: Sender<ApiRequest>, bus: EventBus) {
-    // Creates the state dir owner-only (0700) — the socket is full control.
-    let _ = crate::persist::ensure_config_dir();
-    // Best-effort stale-socket reclaim (single-instance dev; proper detection
-    // arrives with the M2 server).
-    let listener = match transport::bind(&path) {
-        Ok(l) => l,
-        Err(_) => return,
-    };
+/// Reclaim a proven-stale API socket and bind its listener. The caller holds
+/// the per-state-directory startup lock across both API and client binds.
+pub fn bind_server(
+    path: &Path,
+    startup_lock: &transport::ServerStartupLock,
+) -> io::Result<transport::Listener> {
+    startup_lock.reclaim_stale_socket(path)?;
+    transport::bind(path)
+}
+
+/// Accept API connections from an already-bound listener on a background thread.
+pub fn start_server(listener: transport::Listener, api_tx: Sender<ApiRequest>, bus: EventBus) {
     thread::spawn(move || {
         for stream in transport::incoming(&listener) {
             let api_tx = api_tx.clone();

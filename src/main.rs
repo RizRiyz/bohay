@@ -709,10 +709,34 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     let cols = size.width.saturating_sub(34).max(20);
     let rows = size.height.saturating_sub(4).max(4);
 
-    // Advertise the socket before spawning panes so they inherit BOHAY_SOCKET_PATH.
+    // `--local` still exposes the control API, so it must obey the same
+    // single-server ownership rules as the headless server.
+    let state_dir = persist::ensure_config_dir();
+    let startup_lock = ipc::transport::acquire_server_startup_lock(&state_dir)?;
     let sock = persist::socket_path();
+    let client_sock = persist::client_socket_path();
+    if ipc::transport::connect(&sock).is_ok() || ipc::transport::connect(&client_sock).is_ok() {
+        return Err(anyhow!(
+            "a Bohay server is already active for {}; use `bohay` to attach to it",
+            state_dir.display()
+        ));
+    }
+
+    let events = ipc::api::new_bus();
+    let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
+    let api_listener = ipc::api::bind_server(&sock, &startup_lock)?;
+
+    // Advertise the socket before spawning panes so they inherit BOHAY_SOCKET_PATH.
     ipc::api::set_socket_path(sock.clone());
-    let mut app = App::restore_or_new(cols, rows, tx.clone())?;
+    let mut app = match App::restore_or_new(cols, rows, tx.clone()) {
+        Ok(app) => app,
+        Err(err) => {
+            drop(api_listener);
+            let _ = remove_unbound_socket(&sock);
+            return Err(err);
+        }
+    };
+    app.events = events.clone();
     app.set_color_mode(ipc::protocol::truecolor_supported());
     let pending = if app.config.theme == "terminal" {
         let probe = terminal::theme_probe::probe();
@@ -737,8 +761,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         let tx = tx.clone();
         thread::spawn(move || input_loop(tx, pending));
     }
-    let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
-    ipc::api::start_server(sock, api_tx, app.events.clone());
+    ipc::api::start_server(api_listener, api_tx, events);
+    drop(startup_lock);
     app.run_module_startup_hooks(); // docs/13 §3.7 — same point as the server role
     if app.config.install_agent_skill {
         let _ = skill::install_default(); // keep the agent skill installed (opt out via config)
@@ -824,6 +848,24 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 
     persist::save(&app);
     Ok(())
+}
+
+/// Clean up a just-bound Unix socket before a local startup aborts. The caller
+/// still owns the startup lock; Windows named pipes have no filesystem path.
+fn remove_unbound_socket(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
 }
 
 fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
@@ -1781,7 +1823,11 @@ mod tests {
         let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
         let path = std::env::temp_dir().join(format!("bohay-test-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        ipc::api::start_server(path.clone(), api_tx, app.events.clone());
+        let startup_lock =
+            ipc::transport::acquire_server_startup_lock(path.parent().unwrap()).unwrap();
+        let listener = ipc::api::bind_server(&path, &startup_lock).unwrap();
+        ipc::api::start_server(listener, api_tx, app.events.clone());
+        drop(startup_lock);
         thread::spawn(move || {
             while let Ok(req) = api_rx.recv() {
                 let resp = app.handle_api(&req);

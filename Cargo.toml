@@ -66,6 +66,8 @@ toml_edit = "0.22"
 bincode = { version = "2", features = ["serde"] }
 # Cross-platform local IPC: Unix-domain sockets on Unix, named pipes on Windows.
 interprocess = "2"
+# Cross-process startup lock so concurrent clients cannot orphan a live server.
+fs2 = "0.4"
 
 # `libc` (setsid + macOS proc_pidinfo) is only needed on Unix.
 [target.'cfg(unix)'.dependencies]
