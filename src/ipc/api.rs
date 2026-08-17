@@ -12,6 +12,7 @@ use std::thread;
 
 use serde_json::{json, Value};
 
+use crate::event::AppEvent;
 use crate::ipc::transport::{self, Conn};
 
 /// A request handed to the app loop, with a channel to send the reply back.
@@ -61,17 +62,19 @@ pub fn bind_server(
 }
 
 /// Accept API connections from an already-bound listener on a background thread.
-pub fn start_server(listener: transport::Listener, api_tx: Sender<ApiRequest>, bus: EventBus) {
+/// Requests are forwarded into the app's event channel so the loop wakes the
+/// moment one arrives instead of waiting for its idle tick.
+pub fn start_server(listener: transport::Listener, event_tx: Sender<AppEvent>, bus: EventBus) {
     thread::spawn(move || {
         for stream in transport::incoming(&listener) {
-            let api_tx = api_tx.clone();
+            let event_tx = event_tx.clone();
             let bus = bus.clone();
-            thread::spawn(move || handle_conn(stream, api_tx, bus));
+            thread::spawn(move || handle_conn(stream, event_tx, bus));
         }
     });
 }
 
-fn handle_conn(stream: Conn, api_tx: Sender<ApiRequest>, bus: EventBus) {
+fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
     let mut writer = stream.clone();
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -135,14 +138,52 @@ fn handle_conn(stream: Conn, api_tx: Sender<ApiRequest>, bus: EventBus) {
         return;
     }
 
+    // `wait.output` parks its reply inside the app and answers when the pane's
+    // output matches or the deadline lapses — the connection just blocks on
+    // the reply channel (docs/81).
+    if method == "wait.output" {
+        let pane = params.get("pane").and_then(|v| v.as_str()).unwrap_or("");
+        let needle = params.get("match").and_then(|v| v.as_str()).unwrap_or("");
+        let timeout = params
+            .get("timeout_s")
+            .and_then(|v| v.as_f64())
+            .map(std::time::Duration::from_secs_f64);
+        if pane.is_empty() || needle.is_empty() {
+            let _ = writeln!(
+                writer,
+                "{}",
+                json!({"id":id,"error":{"code":"invalid_request",
+                    "message":"wait.output needs a pane and a match"}})
+            );
+            return;
+        }
+        let (reply, reply_rx) = mpsc::channel::<String>();
+        if event_tx
+            .send(AppEvent::WaitOutput {
+                id,
+                pane: pane.to_string(),
+                needle: needle.to_string(),
+                timeout,
+                reply,
+            })
+            .is_err()
+        {
+            return;
+        }
+        if let Ok(resp) = reply_rx.recv() {
+            let _ = writeln!(writer, "{resp}");
+        }
+        return;
+    }
+
     let (reply, reply_rx) = mpsc::channel::<String>();
-    if api_tx
-        .send(ApiRequest {
+    if event_tx
+        .send(AppEvent::Api(ApiRequest {
             id,
             method,
             params,
             reply,
-        })
+        }))
         .is_err()
     {
         return;

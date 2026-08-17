@@ -180,10 +180,46 @@ impl App {
                 if let Some(s) = self.status.get_mut(&id) {
                     s.last_activity = Instant::now();
                 }
+                // A parked `wait.output` for this pane just got new output to
+                // test against — resolve it on the same wake (docs/81).
+                self.check_output_waits(id);
                 true // the pane's screen advanced
             }
             AppEvent::PtyExit(id) => {
                 self.close_pane(id);
+                true
+            }
+            // Control-API requests arrive on the event channel so the loop wakes
+            // for them immediately (docs/81). Answer inline: like the old
+            // server-side drain, an answered request counts as activity.
+            AppEvent::Api(req) => {
+                let resp = self.handle_api(&req);
+                let _ = req.reply.send(resp);
+                true
+            }
+            // A `wait.output` connection parks its reply here and blocks until
+            // the pane's output matches (docs/81) — no polling on either side.
+            AppEvent::WaitOutput {
+                id: request_id,
+                pane,
+                needle,
+                reply,
+                timeout,
+            } => {
+                let params = json!({ "pane": pane });
+                match self.resolve_pane(&params) {
+                    Some(id) => {
+                        self.register_output_wait(id, request_id, needle, reply, timeout);
+                    }
+                    None => {
+                        let _ = reply.send(
+                            json!({ "id": request_id, "error": {
+                                "code": "not_found", "message": "pane not found"
+                            }})
+                            .to_string(),
+                        );
+                    }
+                }
                 true
             }
             AppEvent::ModuleCommandFinished {

@@ -1291,6 +1291,9 @@ pub struct App {
     /// `pane.list` for diagnostics and performance comparisons.
     detection_extractions: u64,
     detection_skips: u64,
+    /// Pending server-side `wait.output` requests keyed by pane (docs/81).
+    /// Satisfied by the pane's next output event, expired by the loop tick.
+    output_waits: HashMap<PaneId, Vec<crate::app::dispatch::OutputWait>>,
     /// Scroll offsets + scrollable regions for the two sidebar lists, so long
     /// WORKSPACES / AGENTS lists can be wheeled through.
     pub workspaces_scroll: usize,
@@ -1606,6 +1609,7 @@ impl App {
                 .unwrap_or_else(Instant::now),
             detection_extractions: 0,
             detection_skips: 0,
+            output_waits: HashMap::new(),
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -2033,6 +2037,7 @@ impl App {
                 .unwrap_or_else(Instant::now),
             detection_extractions: 0,
             detection_skips: 0,
+            output_waits: HashMap::new(),
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -4117,6 +4122,8 @@ impl App {
 
     fn close_pane(&mut self, id: PaneId) {
         self.drop_leaf_runtime(id);
+        // Parked `wait.output` calls can never see new output on a dead pane.
+        self.cancel_output_waits(id);
         // Drop any live alias for the dead pane so a name never resolves to a
         // reallocated pane id (agent_names is ephemeral by design).
         self.agent_names.retain(|_, p| *p != id);

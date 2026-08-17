@@ -113,4 +113,18 @@ pub enum AppEvent {
     /// An *asked-for* check finished (the changelog's "Check for updates"
     /// button). Carries the outcome so the answer can be shown either way.
     UpdateChecked(crate::update::CheckOutcome),
+    /// A control-API request from a CLI invocation or module process. Arrives on
+    /// the same channel as every other event so the loop wakes immediately —
+    /// draining it on the idle tick would add a tick's latency to every CLI call.
+    Api(crate::ipc::api::ApiRequest),
+    /// A `wait.output` request (docs/81): reply once the pane's output contains
+    /// the needle, or the deadline elapses. Carries its own reply channel so
+    /// the connection can block without ever polling the loop.
+    WaitOutput {
+        id: String,
+        pane: String,
+        needle: String,
+        timeout: Option<std::time::Duration>,
+        reply: Sender<String>,
+    },
 }

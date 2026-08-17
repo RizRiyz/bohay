@@ -1015,28 +1015,59 @@ fn parse_wait(args: &[String]) -> Result<WaitSpec> {
 }
 
 /// `bohay wait …` — block until the condition holds (exit 0) or the timeout
-/// elapses (exit 2). Built entirely on existing API methods + the event stream.
+/// elapses (exit 2). `wait output` is answered server-side: the connection
+/// stays open and the server replies the moment the pane's output matches,
+/// so the CLI never polls (docs/81). Older servers answer `unknown_method`
+/// and fall back to a fast client-side poll.
 fn wait_cmd(args: &[String]) -> Result<i32> {
     let spec = parse_wait(args)?;
     let deadline = spec
         .timeout
         .map(|t| Instant::now() + Duration::from_secs_f64(t));
     match spec.condition {
-        WaitFor::Output { needle } => loop {
-            let v = send_request("pane.read", json!({ "pane": spec.pane }))?;
-            let text = v
+        WaitFor::Output { needle } => {
+            let mut params = json!({ "pane": spec.pane, "match": needle });
+            if let Some(timeout) = spec.timeout {
+                params["timeout_s"] = json!(timeout);
+            }
+            let v = send_request("wait.output", params)?;
+            let matched = v
                 .get("result")
-                .and_then(|r| r.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
-            if text.contains(&needle) {
+                .and_then(|r| r.get("matched"))
+                .and_then(|m| m.as_bool())
+                .unwrap_or(false);
+            if matched {
                 return Ok(0);
             }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                return Ok(2);
+            // Pre-`wait.output` server: poll pane.read at a tight interval.
+            let unknown = v
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
+                == Some("invalid_request")
+                && v.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.starts_with("unknown method"));
+            if unknown {
+                loop {
+                    let v = send_request("pane.read", json!({ "pane": spec.pane }))?;
+                    let text = v
+                        .get("result")
+                        .and_then(|r| r.get("text"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    if text.contains(&needle) {
+                        return Ok(0);
+                    }
+                    if deadline.is_some_and(|d| Instant::now() >= d) {
+                        return Ok(2);
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
-            std::thread::sleep(Duration::from_millis(200));
-        },
+            Ok(2)
+        }
         WaitFor::AgentStatus { status } => wait_status_stream(&spec.pane, &status, deadline),
     }
 }
@@ -1286,8 +1317,8 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
     }
 }
 
-/// Wait for a just-prompted agent to finish, the way `herdr agent prompt --wait`
-/// does: the prompt must produce a lifecycle change within a few seconds or we
+/// Wait for a just-prompted agent to finish, like prompt-and-wait tools do:
+/// the prompt must produce a lifecycle change within a few seconds or we
 /// call it **stalled** (exit 3) rather than hang; then we wait until the agent
 /// settles at `idle`/`done`/`blocked` (exit 0), or the deadline passes (exit 2).
 fn agent_wait_settled(pane: &str, deadline: Instant) -> Result<i32> {

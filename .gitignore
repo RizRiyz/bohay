@@ -7,6 +7,7 @@ RELEASING.md
 homebrew-bohay/
 .claude/
 .agents/skills/
+tests/
 
 # Local-only maintainer identity map (contains email; not for GitHub).
 .mailmap

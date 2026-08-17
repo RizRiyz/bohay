@@ -300,7 +300,16 @@ impl Pane {
             .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
+    /// Clear the pending-output coalescing flag so the reader's next
+    /// announcement fires immediately. Input is interaction, not background
+    /// output, and a parked `wait.output` must stay event-driven (docs/81).
+    pub fn rearm_pty_notify(&self) {
+        self.data_pending
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn send(&self, bytes: &[u8]) {
+        self.rearm_pty_notify();
         let _ = self.input_tx.send(bytes.to_vec());
     }
 

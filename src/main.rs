@@ -757,7 +757,6 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     }
 
     let events = ipc::api::new_bus();
-    let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
     let api_listener = ipc::api::bind_server(&sock, &startup_lock)?;
 
     // Advertise the socket before spawning panes so they inherit BOHAY_SOCKET_PATH.
@@ -795,7 +794,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         let tx = tx.clone();
         thread::spawn(move || input_loop(tx, pending));
     }
-    ipc::api::start_server(api_listener, api_tx, events);
+    ipc::api::start_server(api_listener, tx.clone(), events);
     drop(startup_lock);
     app.run_module_startup_hooks(); // docs/13 §3.7 — same point as the server role
     if app.config.install_agent_skill {
@@ -824,11 +823,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         while let Ok(ev) = rx.try_recv() {
             app.handle_event(ev);
         }
-        // Service control-API requests.
-        while let Ok(req) = api_rx.try_recv() {
-            let resp = app.handle_api(&req);
-            let _ = req.reply.send(resp);
-        }
+        // Parked `wait.output` deadlines lapse on the tick (docs/81).
+        app.tick_output_waits(Instant::now());
         if app.should_quit || app.detach_requested {
             break;
         }
@@ -1902,20 +1898,21 @@ mod tests {
     fn api_serves_requests() {
         use std::io::{BufRead, BufReader, Write};
 
-        let (tx, _rx) = mpsc::channel();
-        let mut app = App::new(80, 24, tx).unwrap();
-        let (api_tx, api_rx) = mpsc::channel::<ipc::api::ApiRequest>();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx.clone()).unwrap();
         let path = std::env::temp_dir().join(format!("bohay-test-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let startup_lock =
             ipc::transport::acquire_server_startup_lock(path.parent().unwrap()).unwrap();
         let listener = ipc::api::bind_server(&path, &startup_lock).unwrap();
-        ipc::api::start_server(listener, api_tx, app.events.clone());
+        ipc::api::start_server(listener, tx, app.events.clone());
         drop(startup_lock);
         thread::spawn(move || {
-            while let Ok(req) = api_rx.recv() {
-                let resp = app.handle_api(&req);
-                let _ = req.reply.send(resp);
+            while let Ok(ev) = rx.recv() {
+                if let crate::event::AppEvent::Api(req) = ev {
+                    let resp = app.handle_api(&req);
+                    let _ = req.reply.send(resp);
+                }
             }
         });
 

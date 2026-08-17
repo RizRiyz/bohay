@@ -143,7 +143,6 @@ pub fn run() -> Result<()> {
     }
     api::set_socket_path(sock.clone());
 
-    let (api_tx, api_rx) = mpsc::channel::<api::ApiRequest>();
     let events = api::new_bus();
     let api_listener = api::bind_server(&sock, &startup_lock)?;
     let client_listener = match bind_client_listener(&client_sock, &startup_lock) {
@@ -171,7 +170,7 @@ pub fn run() -> Result<()> {
 
     let mut terminal_theme_enabled = app.config.theme == "terminal";
     let terminal_theme = Arc::new(AtomicBool::new(terminal_theme_enabled));
-    api::start_server(api_listener, api_tx, events);
+    api::start_server(api_listener, tx.clone(), events);
     start_client_listener(client_listener, tx.clone(), terminal_theme.clone());
     drop(startup_lock);
     // The session is restored and the API socket is listening, so a module's
@@ -260,12 +259,6 @@ pub fn run() -> Result<()> {
             foreground_activity |= changed && !background;
             background_activity |= changed && background;
         }
-        while let Ok(req) = api_rx.try_recv() {
-            let resp = app.handle_api(&req);
-            let _ = req.reply.send(resp);
-            activity = true;
-            foreground_activity = true;
-        }
         let enabled = app.config.theme == "terminal";
         if enabled != terminal_theme_enabled {
             terminal_theme_enabled = enabled;
@@ -335,10 +328,14 @@ pub fn run() -> Result<()> {
 
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData
         // to ride on, so repaint when detection reports a visible change.
-        if app.detect_tick(Instant::now()) {
+        let now = Instant::now();
+        if app.detect_tick(now) {
             activity = true;
             foreground_activity = true;
         }
+        // Parked `wait.output` deadlines lapse on the tick (docs/81); a no-op
+        // while nobody is waiting.
+        app.tick_output_waits(now);
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));
         }
