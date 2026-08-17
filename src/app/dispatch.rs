@@ -95,7 +95,14 @@ impl App {
         {
             self.last_proc_at = now;
             self.proc_scan_inflight = true;
-            let pids: Vec<u32> = self.panes.values().filter_map(|p| p.child_pid).collect();
+            let pids: Vec<u32> = self
+                .panes
+                .values()
+                .filter_map(|p| {
+                    let pid = p.child_pid.load(std::sync::atomic::Ordering::SeqCst);
+                    (pid != 0).then_some(pid)
+                })
+                .collect();
             let tx = self.app_tx.clone();
             std::thread::spawn(move || {
                 let found = crate::platform::descendant_commands(&pids);

@@ -1716,10 +1716,12 @@ impl App {
             return;
         };
         let cwd = pane.cwd.clone();
-        let procs = pane
-            .child_pid
-            .map(crate::platform::process_tree)
-            .unwrap_or_default();
+        let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
+        let procs = if pid != 0 {
+            crate::platform::process_tree(pid)
+        } else {
+            Vec::new()
+        };
         self.cmd_inspect = Some(CmdInspect {
             pane: id,
             cwd,

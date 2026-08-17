@@ -4,6 +4,7 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -30,23 +31,30 @@ pub struct MouseModes {
 
 pub struct Pane {
     pub engine: Arc<Mutex<dyn VtEngine>>,
-    master: Box<dyn MasterPty + Send>,
+    /// `None` until a deferred spawn's worker stores it (docs/82).
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     input_tx: Sender<Vec<u8>>,
     pub cwd: PathBuf,
     pub command: String,
-    /// The shell's pid, for reading its live working directory.
-    pub child_pid: Option<u32>,
+    /// The shell's pid, for reading its live working directory and process
+    /// tree. 0 means a deferred spawn has not finished yet — callers must
+    /// treat that as "no process" rather than a real pid.
+    pub child_pid: Arc<AtomicU32>,
     /// `PtyData` coalescing: set by the reader when it announces new output,
     /// cleared by the app loop when it consumes the event. While set, further
     /// reads skip the send — a saturated PTY (thousands of 8 KB reads/s) wakes
     /// the loop once per iteration instead of once per read (measured ~30% of
     /// a core of pure wakeup churn during a `yes` firehose).
-    data_pending: Arc<std::sync::atomic::AtomicBool>,
+    data_pending: Arc<AtomicBool>,
     /// Set by the reaper once the child has been waited on. After that the OS may
     /// recycle its pid, so [`Drop`] must never signal it — it could hit an
     /// unrelated process.
-    child_exited: Arc<std::sync::atomic::AtomicBool>,
-    size: (u16, u16),
+    child_exited: Arc<AtomicBool>,
+    /// The latest requested size, shared with the deferred spawn worker so a
+    /// resize racing the spawn still lands.
+    size: Arc<Mutex<(u16, u16)>>,
+    /// Set by `Drop` so a close-before-spawn aborts the spawn worker.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Drop for Pane {
@@ -65,11 +73,17 @@ impl Drop for Pane {
     /// releases the engine and the scrollback, and the last `input_tx` drop ends
     /// the writer.
     fn drop(&mut self) {
+        // A deferred spawn that hasn't forked yet aborts in the worker; one
+        // that has forked is killed by the worker's own post-fork check.
+        self.cancelled.store(true, Ordering::SeqCst);
         // Already reaped → the pid may belong to someone else now.
-        if self.child_exited.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.child_exited.load(Ordering::SeqCst) {
             return;
         }
-        let Some(pid) = self.child_pid else { return };
+        let pid = self.child_pid.load(Ordering::SeqCst);
+        if pid == 0 {
+            return;
+        }
         // SIGHUP rather than SIGKILL: a shell hangs up its jobs and exits
         // cleanly, and a deliberately `nohup`ed process still survives — the
         // same contract as closing the terminal window.
@@ -188,6 +202,35 @@ impl Pane {
         )
     }
 
+    /// Spawn an interactive shell pane whose child process starts **after**
+    /// this returns (docs/82): the pane exists (engine, input queue, writer)
+    /// immediately, and a worker thread opens the PTY, forks the shell, and
+    /// hands the writer over. `pane split` answers the CLI without paying the
+    /// fork cost on the loop thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_deferred(
+        id: PaneId,
+        cols: u16,
+        rows: u16,
+        cwd: PathBuf,
+        app_tx: Sender<AppEvent>,
+        shell: &str,
+        history_budget_bytes: usize,
+    ) -> Pane {
+        let cmd = CommandBuilder::new(shell);
+        Self::build_deferred(
+            id,
+            cols,
+            rows,
+            cwd,
+            app_tx,
+            cmd,
+            basename(shell),
+            &[],
+            history_budget_bytes,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build(
         id: PaneId,
@@ -209,29 +252,11 @@ impl Pane {
             pixel_height: 0,
         })?;
 
-        cmd.cwd(&cwd);
-        // Caller-supplied env first, then bohay's identity vars (so they can't
-        // be overridden — no spoofing the module/pane identity).
-        for (k, v) in extra_env {
-            cmd.env(k, v);
-        }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("BOHAY_ENV", "1");
-        cmd.env("BOHAY_PANE_ID", id.0.to_string());
-        if let Some(sock) = crate::ipc::api::socket_path_env() {
-            cmd.env("BOHAY_SOCKET_PATH", sock);
-        }
-        if let Some(name) = crate::session::active_name() {
-            cmd.env(crate::session::SESSION_ENV_VAR, name);
-        }
-        // This session's exact binary, so an agent can use `$BOHAY_BIN_PATH`
-        // instead of a `bohay` on PATH that may be an older install with a
-        // different CLI (skill/binary skew). Matches the server it talks to.
-        if let Ok(exe) = std::env::current_exe() {
-            cmd.env("BOHAY_BIN_PATH", exe);
-        }
+        apply_pane_env(&mut cmd, id, &cwd, extra_env);
         let child = pair.slave.spawn_command(cmd)?;
-        let child_pid = child.process_id();
+        let child_pid = child
+            .process_id()
+            .expect("a spawned child always has a pid");
         drop(pair.slave);
 
         // All bytes (user input + terminal responses) funnel through one channel
@@ -263,33 +288,196 @@ impl Pane {
         let reader = pair.master.try_clone_reader()?;
         let eng = engine.clone();
         let tx = app_tx.clone();
-        let data_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let data_pending = Arc::new(AtomicBool::new(false));
         let pending = data_pending.clone();
         thread::spawn(move || read_loop(id, reader, eng, tx, pending));
 
         // Reap the child so we notice it exiting. The exit flag is set *before*
         // the event goes out, so by the time the loop closes the pane (and drops
         // it) `Drop` already knows not to signal a possibly-recycled pid.
-        let child_exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_exited = Arc::new(AtomicBool::new(false));
         let exited = child_exited.clone();
         thread::spawn(move || {
             let mut child = child;
             let _ = child.wait();
-            exited.store(true, std::sync::atomic::Ordering::SeqCst);
+            exited.store(true, Ordering::SeqCst);
             let _ = app_tx.send(AppEvent::PtyExit(id));
         });
 
         Ok(Pane {
             engine,
-            child_pid,
-            master: pair.master,
+            child_pid: Arc::new(AtomicU32::new(child_pid)),
+            master: Arc::new(Mutex::new(Some(pair.master))),
             input_tx,
             cwd,
             command,
             data_pending,
             child_exited,
-            size: (cols, rows),
+            size: Arc::new(Mutex::new((cols, rows))),
+            cancelled: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// The deferred half of `spawn_deferred` (docs/82). Returns a fully usable
+    /// pane immediately; the fork happens on a worker thread. Failures there
+    /// surface as `AppEvent::PtyExit(id)`, exactly like a child that died at
+    /// startup, so no pane is left silently dead.
+    #[allow(clippy::too_many_arguments)]
+    fn build_deferred(
+        id: PaneId,
+        cols: u16,
+        rows: u16,
+        cwd: PathBuf,
+        app_tx: Sender<AppEvent>,
+        mut cmd: CommandBuilder,
+        command: String,
+        extra_env: &[(String, String)],
+        history_budget_bytes: usize,
+    ) -> Pane {
+        // Everything a caller can observe before the child exists: the engine
+        // (pane.read, detection, rendering) and the input queue.
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
+        let engine: Arc<Mutex<dyn VtEngine>> = Arc::new(Mutex::new(AlacrittyEngine::new(
+            cols,
+            rows,
+            input_tx.clone(),
+            history_budget_bytes,
+        )));
+
+        // The writer thread starts with the pane and blocks until the spawn
+        // worker hands over the PTY writer; bytes sent meanwhile queue in
+        // input_rx. On every failure path the worker drops `master_tx`, so
+        // this thread exits with the queue instead of leaking.
+        let (master_tx, master_rx) = mpsc::channel::<Box<dyn Write + Send>>();
+        thread::spawn(move || {
+            let Ok(mut writer) = master_rx.recv() else {
+                return;
+            };
+            while let Ok(bytes) = input_rx.recv() {
+                if writer.write_all(&bytes).is_err() {
+                    break;
+                }
+                let _ = writer.flush();
+            }
+        });
+
+        let child_pid = Arc::new(AtomicU32::new(0));
+        let master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>> = Arc::new(Mutex::new(None));
+        let data_pending = Arc::new(AtomicBool::new(false));
+        let child_exited = Arc::new(AtomicBool::new(false));
+        let size = Arc::new(Mutex::new((cols, rows)));
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        let worker = {
+            let (engine, child_pid, master, data_pending, child_exited, size, cancelled) = (
+                engine.clone(),
+                child_pid.clone(),
+                master.clone(),
+                data_pending.clone(),
+                child_exited.clone(),
+                size.clone(),
+                cancelled.clone(),
+            );
+            let tx = app_tx.clone();
+            // Owned copies for the 'static worker thread.
+            let worker_cwd = cwd.clone();
+            let worker_env = extra_env.to_vec();
+            thread::spawn(move || {
+                let fail = || {
+                    let _ = tx.send(AppEvent::PtyExit(id));
+                };
+
+                let (cols, rows) = *size.lock().unwrap_or_else(|p| p.into_inner());
+                let pty_system = native_pty_system();
+                let pair = match pty_system.openpty(PtySize {
+                    rows: rows.max(1),
+                    cols: cols.max(1),
+                    pixel_width: 0,
+                    pixel_height: 0,
+                }) {
+                    Ok(pair) => pair,
+                    Err(_) => return fail(),
+                };
+                apply_pane_env(&mut cmd, id, &worker_cwd, &worker_env);
+                // Closed before the fork: abort without creating the child.
+                if cancelled.load(Ordering::SeqCst) {
+                    return;
+                }
+                let child = match pair.slave.spawn_command(cmd) {
+                    Ok(child) => child,
+                    Err(_) => return fail(),
+                };
+                let Some(pid) = child.process_id() else {
+                    return fail();
+                };
+                drop(pair.slave);
+                // Closed between fork and handoff: hang up the fresh child.
+                if cancelled.load(Ordering::SeqCst) {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGHUP);
+                    }
+                    #[cfg(windows)]
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/PID", &pid.to_string(), "/T", "/F"])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                    }
+                    return;
+                }
+                child_pid.store(pid, Ordering::SeqCst);
+
+                // A resize raced the spawn: re-apply the latest size.
+                let latest = *size.lock().unwrap_or_else(|p| p.into_inner());
+                if latest != (cols, rows) {
+                    let _ = pair.master.resize(PtySize {
+                        rows: latest.1.max(1),
+                        cols: latest.0.max(1),
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
+
+                let writer = match pair.master.take_writer() {
+                    Ok(writer) => writer,
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::PtyExit(id));
+                        return;
+                    }
+                };
+                let reader = match pair.master.try_clone_reader() {
+                    Ok(reader) => reader,
+                    Err(_) => return fail(),
+                };
+                *master.lock().unwrap_or_else(|p| p.into_inner()) = Some(pair.master);
+                let reaper_tx = tx.clone();
+                thread::spawn(move || read_loop(id, reader, engine, tx, data_pending));
+                thread::spawn(move || {
+                    let mut child = child;
+                    let _ = child.wait();
+                    child_exited.store(true, Ordering::SeqCst);
+                    let _ = reaper_tx.send(AppEvent::PtyExit(id));
+                });
+
+                let _ = master_tx.send(writer);
+            })
+        };
+        drop(worker);
+
+        Pane {
+            engine,
+            child_pid,
+            master,
+            input_tx,
+            cwd,
+            command,
+            data_pending,
+            child_exited,
+            size,
+            cancelled,
+        }
     }
 
     /// Consume the pending-output flag (the loop's re-arm cadence). Returns
@@ -472,26 +660,38 @@ impl Pane {
 
     /// Resize the PTY + engine. Returns whether the size actually changed (so the
     /// caller can note the resize for detection's post-resize grace, docs/07).
+    /// A deferred pane that has not spawned yet records the size; the spawn
+    /// worker applies it (docs/82).
     pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
-        if cols == 0 || rows == 0 || (cols, rows) == self.size {
+        if cols == 0 || rows == 0 {
             return false;
         }
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        {
+            let mut size = self.size.lock().unwrap_or_else(|p| p.into_inner());
+            if (cols, rows) == *size {
+                return false;
+            }
+            *size = (cols, rows);
+        }
+        if let Ok(master) = self.master.lock() {
+            if let Some(master) = master.as_ref() {
+                let _ = master.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+        }
         if let Ok(mut e) = self.engine.lock() {
             e.resize(cols, rows);
         }
-        self.size = (cols, rows);
         true
     }
 
     #[cfg(test)]
     pub(crate) fn size(&self) -> (u16, u16) {
-        self.size
+        *self.size.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -517,14 +717,45 @@ fn basename(s: &str) -> String {
         .to_string()
 }
 
+/// Apply the working directory and identity environment every pane child
+/// inherits — shared by the synchronous and deferred spawn paths so a pane
+/// always gets the same contract regardless of when its shell starts.
+fn apply_pane_env(
+    cmd: &mut CommandBuilder,
+    id: PaneId,
+    cwd: &std::path::Path,
+    extra_env: &[(String, String)],
+) {
+    cmd.cwd(cwd);
+    // Caller-supplied env first, then bohay's identity vars (so they can't
+    // be overridden — no spoofing the module/pane identity).
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("BOHAY_ENV", "1");
+    cmd.env("BOHAY_PANE_ID", id.0.to_string());
+    if let Some(sock) = crate::ipc::api::socket_path_env() {
+        cmd.env("BOHAY_SOCKET_PATH", sock);
+    }
+    if let Some(name) = crate::session::active_name() {
+        cmd.env(crate::session::SESSION_ENV_VAR, name);
+    }
+    // This session's exact binary, so an agent can use `$BOHAY_BIN_PATH`
+    // instead of a `bohay` on PATH that may be an older install with a
+    // different CLI (skill/binary skew). Matches the server it talks to.
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("BOHAY_BIN_PATH", exe);
+    }
+}
+
 fn read_loop(
     id: PaneId,
     mut reader: Box<dyn Read + Send>,
     engine: Arc<Mutex<dyn VtEngine>>,
     tx: Sender<AppEvent>,
-    data_pending: Arc<std::sync::atomic::AtomicBool>,
+    data_pending: Arc<AtomicBool>,
 ) {
-    use std::sync::atomic::Ordering;
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
@@ -584,6 +815,91 @@ mod reap_tests {
         .expect("spawn")
     }
 
+    /// A deferred pane (docs/82) is fully usable before its shell exists:
+    /// input queued right after creation reaches the child once the worker
+    /// forks, and the pid stays 0 until then.
+    #[test]
+    fn deferred_pane_delivers_input_and_spawns_its_child() {
+        // Keep the receiver alive: the reader thread exits when its PtyData
+        // send fails, which would stop the pump after the first burst.
+        let (tx, _rx) = mpsc::channel();
+        let pane = Pane::spawn_deferred(
+            PaneId::alloc(),
+            80,
+            24,
+            std::env::temp_dir(),
+            tx,
+            "/bin/sh",
+            500,
+        );
+        assert_eq!(
+            pane.child_pid.load(Ordering::SeqCst),
+            0,
+            "the child is forked off-loop, not at construction"
+        );
+        // Input sent before the fork must still arrive (queued writer).
+        pane.send(b"echo DEFERRED-OK\r");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if pane
+                .engine
+                .lock()
+                .unwrap()
+                .detection_text(24)
+                .contains("DEFERRED-OK")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the deferred pane never delivered its input"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_ne!(
+            pane.child_pid.load(Ordering::SeqCst),
+            0,
+            "the worker forked the child"
+        );
+    }
+
+    /// A resize issued before the deferred fork must still reach the child:
+    /// the worker opens the PTY at the latest recorded size (docs/82).
+    #[test]
+    fn deferred_pane_applies_a_resize_racing_the_spawn() {
+        let (tx, _rx) = mpsc::channel();
+        let mut pane = Pane::spawn_deferred(
+            PaneId::alloc(),
+            80,
+            24,
+            std::env::temp_dir(),
+            tx,
+            "/bin/sh",
+            500,
+        );
+        // The spawn has not forked yet: this is the racing resize.
+        assert!(pane.resize(132, 40));
+        pane.send(b"stty size\r");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if pane
+                .engine
+                .lock()
+                .unwrap()
+                .detection_text(40)
+                .contains("40 132")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child did not see the racing resize; text: {:?}",
+                pane.engine.lock().unwrap().detection_text(40)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// Closing a pane must hang up its child. Regression for the leak where the
     /// reader thread's cloned PTY fd kept the child alive, which in turn kept the
     /// engine (and its whole scrollback grid) and both threads alive for the life
@@ -591,7 +907,8 @@ mod reap_tests {
     #[test]
     fn dropping_a_pane_reaps_its_child() {
         let pane = spawn_sh();
-        let pid = pane.child_pid.expect("pid");
+        let pid = pane.child_pid.load(Ordering::SeqCst);
+        assert_ne!(pid, 0, "the sync spawn path has a child");
         assert!(alive(pid), "child runs while the pane is open");
         drop(pane);
         assert!(wait_gone(pid), "LEAK: child {pid} survived the pane");
@@ -602,9 +919,11 @@ mod reap_tests {
     #[test]
     fn closing_one_pane_leaves_the_others_running() {
         let keep = spawn_sh();
-        let kept_pid = keep.child_pid.expect("pid");
+        let kept_pid = keep.child_pid.load(Ordering::SeqCst);
+        assert_ne!(kept_pid, 0);
         let doomed = spawn_sh();
-        let doomed_pid = doomed.child_pid.expect("pid");
+        let doomed_pid = doomed.child_pid.load(Ordering::SeqCst);
+        assert_ne!(doomed_pid, 0);
 
         drop(doomed);
         assert!(wait_gone(doomed_pid), "the closed pane's child exited");
