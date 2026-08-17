@@ -6,7 +6,7 @@ use crate::ipc::transport::{self, Conn};
 use std::collections::HashMap;
 use std::io::{self, BufReader};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -26,9 +26,31 @@ use crate::ui;
 const DEFAULT_SIZE: (u16, u16) = (120, 32);
 /// Minimum time between rendered frames — the fps cap during activity (60fps).
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// Background-only PTY output cannot change the active terminal grid. A 10fps
+/// probe is enough for sidebar state while avoiding full UI render/diff work
+/// for every inactive-pane read. Any visible output or interaction immediately
+/// returns to [`FRAME_INTERVAL`].
+const BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 /// How often to wake when idle (drives agent detection + toast expiry) — coarser
 /// than the frame cap so an idle session doesn't spin the CPU.
 const IDLE_INTERVAL: Duration = Duration::from_millis(33);
+
+static FRAMES_SENT: AtomicU64 = AtomicU64::new(0);
+static FULL_FRAMES_SENT: AtomicU64 = AtomicU64::new(0);
+static DIFF_RUNS_SENT: AtomicU64 = AtomicU64::new(0);
+static FRAME_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
+static RENDER_PASSES: AtomicU64 = AtomicU64::new(0);
+
+/// Process-lifetime frame counters for performance diagnostics.
+pub fn performance_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "frames_sent": FRAMES_SENT.load(Ordering::Relaxed),
+        "full_frames_sent": FULL_FRAMES_SENT.load(Ordering::Relaxed),
+        "diff_runs_sent": DIFF_RUNS_SENT.load(Ordering::Relaxed),
+        "frame_bytes_sent": FRAME_BYTES_SENT.load(Ordering::Relaxed),
+        "render_passes": RENDER_PASSES.load(Ordering::Relaxed),
+    })
+}
 
 struct ClientSender {
     messages: Sender<ServerMessage>,
@@ -179,6 +201,10 @@ pub fn run() -> Result<()> {
     // Un-rendered activity waiting for the frame cap to expire — drives a trailing
     // render so a change that lands mid-interval isn't stuck until the next event.
     let mut dirty = false;
+    // True only while every pending redraw reason is output from a pane outside
+    // the active tab. Visible output and UI state changes always promote the
+    // pending frame back to the normal interactive cadence.
+    let mut background_only = false;
     // Advances the working-agent spinner ~10x/s (the idle tick already wakes the
     // loop every IDLE_INTERVAL, so this just gates the frame + a repaint).
     let mut last_spin = Instant::now();
@@ -192,27 +218,37 @@ pub fn run() -> Result<()> {
     loop {
         // Pending + clients attached → wait only until the cap frees up (flush
         // promptly); otherwise tick at the coarser idle cadence.
+        let current_interval = frame_interval(background_only);
         let wait = if dirty && !clients.is_empty() {
-            FRAME_INTERVAL
+            current_interval
                 .saturating_sub(last_draw.elapsed())
                 .max(Duration::from_millis(1))
         } else {
             IDLE_INTERVAL
         };
+        let mut foreground_activity = false;
+        let mut background_activity = false;
         let mut activity = match rx.recv_timeout(wait) {
-            Ok(ev) => apply(
-                ev,
-                &mut app,
-                &mut clients,
-                &mut foreground,
-                &mut interactive_size,
-                &mut next_activity,
-            ),
+            Ok(ev) => {
+                let background = background_pty_event(&app, &ev);
+                let changed = apply(
+                    ev,
+                    &mut app,
+                    &mut clients,
+                    &mut foreground,
+                    &mut interactive_size,
+                    &mut next_activity,
+                );
+                foreground_activity = changed && !background;
+                background_activity = changed && background;
+                changed
+            }
             Err(RecvTimeoutError::Timeout) => false,
             Err(RecvTimeoutError::Disconnected) => break,
         };
         while let Ok(ev) = rx.try_recv() {
-            activity |= apply(
+            let background = background_pty_event(&app, &ev);
+            let changed = apply(
                 ev,
                 &mut app,
                 &mut clients,
@@ -220,11 +256,15 @@ pub fn run() -> Result<()> {
                 &mut interactive_size,
                 &mut next_activity,
             );
+            activity |= changed;
+            foreground_activity |= changed && !background;
+            background_activity |= changed && background;
         }
         while let Ok(req) = api_rx.try_recv() {
             let resp = app.handle_api(&req);
             let _ = req.reply.send(resp);
             activity = true;
+            foreground_activity = true;
         }
         let enabled = app.config.theme == "terminal";
         if enabled != terminal_theme_enabled {
@@ -283,6 +323,7 @@ pub fn run() -> Result<()> {
                 foreground = latest_client(&clients);
                 apply_foreground_theme(&mut app, &clients, foreground);
                 activity = true;
+                foreground_activity = true;
             }
         }
 
@@ -296,6 +337,7 @@ pub fn run() -> Result<()> {
         // to ride on, so repaint when detection reports a visible change.
         if app.detect_tick(Instant::now()) {
             activity = true;
+            foreground_activity = true;
         }
         for msg in app.pending_notify.drain(..) {
             broadcast(&mut clients, ServerMessage::Notify(msg));
@@ -314,10 +356,12 @@ pub fn run() -> Result<()> {
         // An expired toast forces one render so it disappears (idle frames don't).
         if app.tick_toast(Instant::now()) {
             activity = true;
+            foreground_activity = true;
         }
         // Likewise for an expired search-jump flash (docs/63).
         if app.tick_search_flash(Instant::now()) {
             activity = true;
+            foreground_activity = true;
         }
         // Animate the sidebar spinner while any agent is working: advance the
         // frame and mark dirty so the diff sends only the changed dot cell.
@@ -325,25 +369,42 @@ pub fn run() -> Result<()> {
             app.spinner = app.spinner.wrapping_add(1);
             last_spin = Instant::now();
             dirty = true;
+            background_only = false;
         }
-        dirty |= activity;
+        if activity {
+            background_only = next_background_only(
+                dirty,
+                background_only,
+                foreground_activity,
+                background_activity,
+            );
+            dirty = true;
+        }
         // Fallback re-arm (the render path below re-arms at the frame rate): a
         // flag still set here means un-rendered output → schedule a frame.
         if last_rearm.elapsed() >= REARM_INTERVAL {
             last_rearm = Instant::now();
-            dirty |= app.rearm_pty_notify();
+            let (visible, background) = app.rearm_pty_notify_by_visibility();
+            if visible {
+                dirty = true;
+                background_only = false;
+            } else if background {
+                background_only = background_only || !dirty;
+                dirty = true;
+            }
         }
 
         // A forced redraw (resize / focus-regained / external damage) must render
         // even if nothing else changed this tick — and so must a client that is
         // waiting on its full-frame resync (see `needs_render`).
-        dirty = needs_render(
-            dirty,
-            app.force_redraw,
-            clients.values().any(|client| client.behind),
-        );
+        let any_behind = clients.values().any(|client| client.behind);
+        let urgent = app.force_redraw || any_behind;
+        dirty = needs_render(dirty, app.force_redraw, any_behind);
+        if urgent {
+            background_only = false;
+        }
 
-        if dirty && !clients.is_empty() && last_draw.elapsed() >= FRAME_INTERVAL {
+        if dirty && !clients.is_empty() && last_draw.elapsed() >= frame_interval(background_only) {
             let forced = std::mem::take(&mut app.force_redraw);
             render_clients(
                 &mut app,
@@ -356,7 +417,9 @@ pub fn run() -> Result<()> {
             // Re-arm the PTY readers now that their output is on screen. A flag
             // set during this frame = more output already waiting → stay dirty
             // so the burst keeps rendering at the frame cap, tail included.
-            dirty = app.rearm_pty_notify();
+            let (visible, background) = app.rearm_pty_notify_by_visibility();
+            dirty = visible || background;
+            background_only = background && !visible;
         }
     }
 
@@ -486,6 +549,33 @@ fn apply_foreground_theme(app: &mut App, clients: &Clients, foreground: Option<u
     }
 }
 
+fn background_pty_event(app: &App, event: &AppEvent) -> bool {
+    matches!(event, AppEvent::PtyData(id) if !app.pane_is_visible(*id))
+}
+
+fn frame_interval(background_only: bool) -> Duration {
+    if background_only {
+        BACKGROUND_FRAME_INTERVAL
+    } else {
+        FRAME_INTERVAL
+    }
+}
+
+fn next_background_only(
+    dirty: bool,
+    background_only: bool,
+    foreground_activity: bool,
+    background_activity: bool,
+) -> bool {
+    if foreground_activity {
+        false
+    } else if !dirty {
+        background_activity
+    } else {
+        background_only
+    }
+}
+
 /// Whether this tick must render, even when nothing in the app changed.
 ///
 /// `any_behind` is the subtle one. A client whose bounded channel was full
@@ -511,6 +601,7 @@ fn render_clients(
     interactive_size: &mut (u16, u16),
     force_all: bool,
 ) {
+    RENDER_PASSES.fetch_add(1, Ordering::Relaxed);
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
         apply_foreground_theme(app, clients, *foreground);
@@ -706,7 +797,12 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
     let writer_frame_pending = frame_pending.clone();
     thread::spawn(move || {
         for msg in message_rx {
-            if matches!(msg, ServerMessage::Frame(_) | ServerMessage::FrameDiff(_)) {
+            let frame_stats = match &msg {
+                ServerMessage::Frame(_) => Some((true, 0usize)),
+                ServerMessage::FrameDiff(frame) => Some((false, frame.runs.len())),
+                _ => None,
+            };
+            if frame_stats.is_some() {
                 // Match sync_channel(1): receiving frees the single frame slot,
                 // even while the socket write itself is still in progress.
                 writer_frame_pending.store(false, Ordering::Release);
@@ -715,8 +811,19 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
                 msg,
                 ServerMessage::Detach | ServerMessage::ServerShutdown { .. }
             );
-            if protocol::write_message(&mut writer, &msg).is_err() || stop {
-                break;
+            match protocol::write_message_counted(&mut writer, &msg) {
+                Ok(bytes) => {
+                    if let Some((full, runs)) = frame_stats {
+                        FRAMES_SENT.fetch_add(1, Ordering::Relaxed);
+                        FULL_FRAMES_SENT.fetch_add(u64::from(full), Ordering::Relaxed);
+                        DIFF_RUNS_SENT.fetch_add(runs as u64, Ordering::Relaxed);
+                        FRAME_BYTES_SENT.fetch_add(bytes as u64, Ordering::Relaxed);
+                    }
+                    if stop {
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
         }
     });
@@ -832,7 +939,8 @@ mod shutdown {
 mod tests {
     use super::ServerMessage;
     use super::{
-        apply, broadcast, needs_render, render_clients, ClientSender, ClientState, FrameSendError,
+        apply, broadcast, frame_interval, needs_render, next_background_only, render_clients,
+        ClientSender, ClientState, FrameSendError, BACKGROUND_FRAME_INTERVAL, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
@@ -893,6 +1001,18 @@ mod tests {
             !needs_render(false, false, false),
             "nothing to do means no frame"
         );
+    }
+
+    #[test]
+    fn background_frames_use_the_slower_cap_only_while_background_only() {
+        assert_eq!(frame_interval(false), FRAME_INTERVAL);
+        assert_eq!(frame_interval(true), BACKGROUND_FRAME_INTERVAL);
+        assert!(BACKGROUND_FRAME_INTERVAL > FRAME_INTERVAL);
+
+        assert!(next_background_only(false, false, false, true));
+        assert!(next_background_only(true, true, false, true));
+        assert!(!next_background_only(true, true, true, true));
+        assert!(!next_background_only(true, false, false, true));
     }
 
     /// A tab switch requests a frame at the same time a finished selection sends

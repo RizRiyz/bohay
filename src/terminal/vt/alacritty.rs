@@ -70,6 +70,7 @@ pub struct AlacrittyEngine {
     parser: Processor,
     title: TitleSlot,
     history_budget_bytes: usize,
+    output_generation: u64,
 }
 
 impl AlacrittyEngine {
@@ -102,6 +103,7 @@ impl AlacrittyEngine {
             parser: Processor::new(),
             title,
             history_budget_bytes,
+            output_generation: 0,
         }
     }
 
@@ -113,6 +115,35 @@ impl AlacrittyEngine {
             ),
             ..Config::default()
         });
+    }
+
+    fn write_retained_row(&self, index: usize, output: &mut String) -> bool {
+        let Ok(index) = i32::try_from(index) else {
+            return false;
+        };
+        let grid = self.term.grid();
+        let top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+        let line = top.saturating_add(index);
+        if line > bottom {
+            return false;
+        }
+
+        output.clear();
+        let row = &grid[Line(line)];
+        for column in 0..grid.columns() {
+            let cell = &row[Column(column)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            output.push(if cell.c == '\0' { ' ' } else { cell.c });
+            if let Some(zerowidth) = cell.zerowidth() {
+                output.extend(zerowidth);
+            }
+        }
+        let trimmed = output.trim_end().len();
+        output.truncate(trimmed);
+        true
     }
 }
 
@@ -137,6 +168,11 @@ fn history_rows_for_budget(bytes: usize, cols: u16) -> usize {
 impl VtEngine for AlacrittyEngine {
     fn advance(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+        self.output_generation = self.output_generation.wrapping_add(1);
+    }
+
+    fn output_generation(&self) -> u64 {
+        self.output_generation
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
@@ -275,6 +311,9 @@ impl VtEngine for AlacrittyEngine {
                     continue;
                 }
                 line.push(if cell.c == '\0' { ' ' } else { cell.c });
+                if let Some(zerowidth) = cell.zerowidth() {
+                    line.extend(zerowidth);
+                }
             }
             if !out.is_empty() {
                 out.push('\n');
@@ -314,8 +353,14 @@ impl VtEngine for AlacrittyEngine {
         // `set_options` funnels into `Grid::update_history`, which *shrinks* the
         // retained history when the limit drops — so lowering the setting frees
         // memory on existing panes instead of only applying to new ones.
+        let shrinking = bytes < self.history_budget_bytes;
         self.history_budget_bytes = bytes;
         self.apply_history_budget();
+        // A deliberate budget reduction is the right time to return spare rows
+        // to the allocator. Normal PTY output keeps the small byte-capped cache.
+        if shrinking {
+            self.term.compact_history();
+        }
     }
 
     fn scroll(&mut self, delta: i32) {
@@ -345,39 +390,41 @@ impl VtEngine for AlacrittyEngine {
 
     fn history_metrics(&self) -> HistoryMetrics {
         let retained_rows = self.history_len();
+        let retained_bytes =
+            retained_rows.saturating_mul(estimated_row_bytes(self.term.grid().columns()));
         HistoryMetrics {
             offset: self.scroll_offset(),
             retained_rows,
             budget_bytes: self.history_budget_bytes,
-            retained_bytes: retained_rows
-                .saturating_mul(estimated_row_bytes(self.term.grid().columns())),
+            retained_bytes,
+            estimated_grid_bytes: self.term.estimated_grid_bytes(),
+            cache_bytes: Some(self.term.history_cache_bytes()),
+            compacted_rows: Some(self.term.compacted_history_rows()),
+            allocated_cells: Some(self.term.allocated_cell_capacity()),
             exact_bytes: false,
         }
     }
 
-    fn rows_text(&self) -> Vec<String> {
-        // Index the grid by absolute `Line` (like `detection_text`), from the
-        // topmost retained history line up to the live bottom, so this is the
-        // whole buffer independent of the user's scroll position. On the alt
-        // screen `history_size` is 0, so this collapses to the visible screen.
-        let grid = self.term.grid();
-        let cols = grid.columns();
-        let top = grid.topmost_line().0; // negative for history, else 0
-        let bottom = grid.bottommost_line().0; // screen_lines - 1
-        let mut out = Vec::with_capacity((bottom - top + 1).max(0) as usize);
-        for l in top..=bottom {
-            let row = &grid[Line(l)];
-            let mut line = String::with_capacity(cols);
-            for c in 0..cols {
-                let cell = &row[Column(c)];
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                line.push(if cell.c == '\0' { ' ' } else { cell.c });
+    fn retained_row_count(&self) -> usize {
+        self.term
+            .grid()
+            .history_size()
+            .saturating_add(self.term.grid().screen_lines())
+    }
+
+    fn retained_row_text(&self, index: usize) -> Option<String> {
+        let mut output = String::with_capacity(self.term.grid().columns());
+        self.write_retained_row(index, &mut output)
+            .then_some(output)
+    }
+
+    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str)) {
+        let mut output = String::with_capacity(self.term.grid().columns());
+        for index in 0..self.retained_row_count() {
+            if self.write_retained_row(index, &mut output) {
+                f(index, &output);
             }
-            out.push(line.trim_end().to_string());
         }
-        out
     }
 
     fn scroll_to(&mut self, offset: usize) {
@@ -598,6 +645,17 @@ mod tests {
         // Lowering it reclaims immediately…
         e.set_history_budget(budget_for_rows(20, 20));
         assert_eq!(e.history_len(), 20, "excess history is dropped on the spot");
+        let compacted = e.history_metrics();
+        assert_eq!(
+            compacted.cache_bytes,
+            Some(0),
+            "budget shrink releases cached rows"
+        );
+        assert!(
+            !compacted.exact_bytes,
+            "dynamic cell allocations remain estimated"
+        );
+        assert!(compacted.estimated_grid_bytes > 0);
         // …and the viewport can't be left scrolled past the new end.
         e.scroll_to_top();
         assert!(e.scroll_offset() <= 20);
@@ -606,6 +664,60 @@ mod tests {
         e.set_history_budget(budget_for_rows(20, 200));
         feed_lines(&mut e, 400);
         assert_eq!(e.history_len(), 200, "the raised limit is used");
+    }
+
+    #[test]
+    fn cold_history_compacts_losslessly_and_survives_reflow() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 5, tx, budget_for_rows(40, 500));
+        e.advance(b"\x1b[38;2;12;200;155mCOLOR\x1b[0m cafe\xcc\x81 \x1b]8;;https://bohay.dev\x1b\\LINK\x1b]8;;\x1b\\\r\n");
+        assert!(e.detection_text(100).contains("cafe\u{301}"));
+        feed_lines(&mut e, 80);
+
+        let before = e.history_metrics();
+        assert!(before.compacted_rows.unwrap_or(0) > 0);
+        assert!(before.allocated_cells.unwrap_or(0) > 0);
+
+        e.scroll_to_top();
+        let mut rendered = Vec::new();
+        e.for_each_cell(&mut |_row, _column, symbol, style| {
+            if symbol != " " {
+                rendered.push((symbol.to_string(), style.fg));
+            }
+        });
+        assert!(rendered.iter().any(|(symbol, _)| symbol == "e\u{301}"));
+        assert!(rendered
+            .iter()
+            .any(|(symbol, color)| { symbol == "C" && *color == Color::Rgb(12, 200, 155) }));
+        assert!(e.visible_rows().join("\n").contains("LINK"));
+        let retained = e
+            .retained_row_text(0)
+            .expect("oldest feature row remains readable");
+        assert!(retained.contains("cafe\u{301}"));
+
+        e.resize(80, 8);
+        e.scroll_to_top();
+        let after = e.history_metrics();
+        assert!(after.compacted_rows.unwrap_or(0) > 0);
+        assert!(e.visible_rows().join("\n").contains("COLOR"));
+        assert!(e.visible_rows().join("\n").contains("LINK"));
+    }
+
+    #[test]
+    fn output_generation_advances_only_with_parser_input() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
+        assert_eq!(e.output_generation(), 0);
+        e.advance(b"hello");
+        assert_eq!(e.output_generation(), 1);
+        e.resize(40, 10);
+        assert_eq!(
+            e.output_generation(),
+            1,
+            "resize uses the explicit force path"
+        );
+        e.advance(b" world");
+        assert_eq!(e.output_generation(), 2);
     }
 
     #[test]
@@ -644,7 +756,13 @@ mod tests {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
         feed_lines(&mut e, 40); // line0..line39; only ~6 fit the live screen
-        let rows = e.rows_text();
+        let mut rows = Vec::new();
+        e.for_each_retained_row(&mut |_index, line| rows.push(line.to_string()));
+        assert_eq!(e.retained_row_count(), rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(e.retained_row_text(index).as_ref(), Some(row));
+        }
+        assert_eq!(e.retained_row_text(rows.len()), None);
         let i0 = rows
             .iter()
             .position(|r| r.contains("line0"))

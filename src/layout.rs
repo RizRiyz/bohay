@@ -112,6 +112,11 @@ impl TileLayout {
         v
     }
 
+    /// Whether a pane belongs to this layout, without allocating a leaf list.
+    pub fn contains(&self, id: PaneId) -> bool {
+        contains_leaf(&self.root, id)
+    }
+
     /// Geometry for every pane within `area`.
     pub fn panes(&self, area: Rect) -> Vec<PaneInfo> {
         let mut v = Vec::new();
@@ -370,6 +375,13 @@ fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
     }
 }
 
+fn contains_leaf(node: &Node, id: PaneId) -> bool {
+    match node {
+        Node::Leaf(pane) => *pane == id,
+        Node::Split { a, b, .. } => contains_leaf(a, id) || contains_leaf(b, id),
+    }
+}
+
 fn collect(node: &Node, area: Rect, out: &mut Vec<PaneInfo>) {
     match node {
         Node::Leaf(id) => out.push(PaneInfo {
@@ -604,6 +616,8 @@ mod tests {
         let b = PaneId::alloc();
         l.split_focused(Axis::Col, b); // a | b
         assert_eq!(l.len(), 2);
+        assert!(l.contains(a));
+        assert!(l.contains(b));
         assert_eq!(l.focus, b);
 
         let area = Rect::new(0, 0, 80, 24);
@@ -615,6 +629,7 @@ mod tests {
         assert!(!l.remove(b)); // back to just `a`
         assert_eq!(l.len(), 1);
         assert_eq!(l.focus, a);
+        assert!(!l.contains(b));
         assert!(l.remove(a)); // empty
     }
 

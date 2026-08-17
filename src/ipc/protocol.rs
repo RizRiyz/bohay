@@ -168,11 +168,19 @@ pub fn apply_diff(frame: &mut FrameData, diff: &FrameDiff) {
 // ── framing ─────────────────────────────────────────────────────────────────
 
 pub fn write_message<W: Write>(w: &mut W, msg: &impl Serialize) -> io::Result<()> {
+    write_message_counted(w, msg).map(|_| ())
+}
+
+/// Write one framed message and return its exact wire length, including the
+/// four-byte size prefix. This lets diagnostics count bytes without encoding a
+/// rendered frame twice.
+pub fn write_message_counted<W: Write>(w: &mut W, msg: &impl Serialize) -> io::Result<usize> {
     let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     w.write_all(&(bytes.len() as u32).to_le_bytes())?;
     w.write_all(&bytes)?;
-    w.flush()
+    w.flush()?;
+    Ok(bytes.len().saturating_add(4))
 }
 
 pub fn read_message<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {

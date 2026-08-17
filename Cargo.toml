@@ -82,6 +82,7 @@ strip = true
 # even when the terminal never uses synchronized updates.
 [patch.crates-io]
 vte = { path = "vendor/vte" }
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
 
 # ── Linux packaging (docs/16) ────────────────────────────────────────────────
 # bohay is a single static (musl) binary with no shared-library dependencies, so

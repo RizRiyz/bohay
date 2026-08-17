@@ -174,16 +174,46 @@ impl App {
         // non-resumable agents still need a repaint, but not a persisted session.
         let mut visible_identity_changed = false;
         for id in ids {
-            let (title, bottom, base) = match self.panes.get(&id) {
-                Some(p) => {
-                    let (title, bottom) = match p.engine.lock() {
-                        Ok(e) => (e.title(), e.detection_text(14)),
-                        Err(_) => (None, String::new()),
-                    };
-                    (title, bottom, p.command.clone())
-                }
-                None => continue,
+            let Some(pane) = self.panes.get(&id) else {
+                continue;
             };
+            let (last_generation, force_detect) = self
+                .status
+                .get(&id)
+                .map(|s| (s.last_detect_generation, s.force_detect))
+                .unwrap_or((None, true));
+            let inspected = match pane.engine.lock() {
+                Ok(engine) => {
+                    let generation = engine.output_generation();
+                    if force_detect || last_generation != Some(generation) {
+                        Some((
+                            generation,
+                            engine.title().map(Arc::<str>::from),
+                            Arc::<str>::from(engine.detection_text(14)),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            };
+            if let Some(s) = self.status.get_mut(&id) {
+                if let Some((generation, title, bottom)) = inspected {
+                    s.last_detect_generation = Some(generation);
+                    s.detected_title = title;
+                    s.detected_bottom = bottom;
+                    s.force_detect = false;
+                    self.detection_extractions = self.detection_extractions.saturating_add(1);
+                } else {
+                    self.detection_skips = self.detection_skips.saturating_add(1);
+                }
+            }
+            let (title, bottom) = self
+                .status
+                .get(&id)
+                .map(|s| (s.detected_title.clone(), s.detected_bottom.clone()))
+                .unwrap_or_else(|| (None, Arc::from("")));
+            let base = pane.command.as_str();
             let recent = self
                 .status
                 .get(&id)
@@ -214,15 +244,19 @@ impl App {
                 })
                 .unwrap_or_default();
             // Ground truth for identity, when the last scan could see this pane.
-            let running = self.proc_commands.get(&id).cloned().unwrap_or_default();
+            let running = self
+                .proc_commands
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             let det = detect::classify(
                 title.as_deref(),
                 &bottom,
                 recent,
                 recent_input,
-                &base,
+                base,
                 &known,
-                &running,
+                running,
                 &self.manifests,
             );
 
@@ -418,6 +452,9 @@ impl App {
             "manifest.reload" => {
                 self.manifests =
                     crate::detect::Manifests::load(&crate::persist::ensure_manifests_dir());
+                for status in self.status.values_mut() {
+                    status.force_detect = true;
+                }
                 Ok(json!({"type":"ok","rules": self.manifests.rule_count()}))
             }
             "server.stop" => {
@@ -453,11 +490,22 @@ impl App {
                             "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
                             "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
                             "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                            "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
+                            "history_cache_bytes": history.and_then(|m| m.cache_bytes),
+                            "history_compacted_rows": history.and_then(|m| m.compacted_rows),
+                            "history_allocated_cells": history.and_then(|m| m.allocated_cells),
                             "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                            "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
                         })
                     })
                     .collect();
-                Ok(json!({"type":"pane_list","panes":panes}))
+                Ok(json!({
+                    "type":"pane_list",
+                    "panes":panes,
+                    "detection_extractions": self.detection_extractions,
+                    "detection_skips": self.detection_skips,
+                    "render_performance": crate::ipc::server::performance_snapshot(),
+                }))
             }
             "pane.split" => {
                 let base = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
@@ -591,7 +639,12 @@ impl App {
                     "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
                     "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
                     "history_bytes": history.map(|m| m.retained_bytes).unwrap_or(0),
+                    "history_estimated_grid_bytes": history.map(|m| m.estimated_grid_bytes).unwrap_or(0),
+                    "history_cache_bytes": history.and_then(|m| m.cache_bytes),
+                    "history_compacted_rows": history.and_then(|m| m.compacted_rows),
+                    "history_allocated_cells": history.and_then(|m| m.allocated_cells),
                     "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
+                    "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
                 }))
             }
             "pane.report_session" => {
@@ -611,6 +664,7 @@ impl App {
                         s.agent = agent.clone();
                     }
                     s.agent_session = Some(AgentSession { agent, session_id });
+                    s.force_detect = true;
                 }
                 self.session_dirty = true;
                 Ok(json!({"type":"ok"}))
@@ -2550,6 +2604,12 @@ mod tests {
         std::fs::create_dir_all(&b).unwrap();
         assert!(app.create_workspace_at(a.clone()));
         assert!(app.create_workspace_at(b.clone()));
+        // The test may run with TMPDIR inside the Bohay checkout. Keep this
+        // fixture independent from its parent repository so pin ordering is
+        // tested without the separate worktree-grouping behavior.
+        for workspace in &mut app.workspaces {
+            workspace.worktree = None;
+        }
         app.workspaces[0].name = "zero".into();
         app.workspaces[1].name = "one".into();
         app.workspaces[2].name = "two".into();
@@ -2801,12 +2861,30 @@ mod tests {
         assert!(out["history_budget_bytes"].as_u64().unwrap_or(0) > 0);
         assert!(out["history_rows"].as_u64().is_some());
         assert!(out["history_bytes"].as_u64().is_some());
+        assert!(out["history_estimated_grid_bytes"].as_u64().is_some());
+        assert!(out.get("history_cache_bytes").is_some());
+        assert!(out["history_compacted_rows"].as_u64().is_some());
+        assert!(out["history_allocated_cells"].as_u64().is_some());
+        assert_eq!(out["history_bytes_kind"], "estimated");
         assert_eq!(out["history_exact"], false, "Alacritty reports an estimate");
 
         let listed = app.dispatch("pane.list", &json!({})).expect("pane list");
+        assert!(listed["detection_extractions"].as_u64().is_some());
+        assert!(listed["detection_skips"].as_u64().is_some());
+        assert!(listed["render_performance"]["frames_sent"]
+            .as_u64()
+            .is_some());
+        assert!(listed["render_performance"]["render_passes"]
+            .as_u64()
+            .is_some());
         let row = listed["panes"].as_array().unwrap().first().unwrap();
         assert!(row.get("scroll_offset").is_some());
         assert!(row.get("history_budget_bytes").is_some());
+        assert!(row.get("history_estimated_grid_bytes").is_some());
+        assert!(row.get("history_cache_bytes").is_some());
+        assert!(row.get("history_compacted_rows").is_some());
+        assert!(row.get("history_allocated_cells").is_some());
+        assert_eq!(row["history_bytes_kind"], "estimated");
     }
 
     #[test]

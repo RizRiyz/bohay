@@ -347,13 +347,27 @@ impl Pane {
         }
     }
 
-    /// Every retained row as plain text (oldest first) plus the current history
-    /// length, for global search (docs/63). The history length lets a caller map
-    /// a matched row index to a scroll offset. Empty + 0 if the lock is poisoned.
-    pub fn rows_text(&self) -> (Vec<String>, usize) {
-        match self.engine.lock() {
-            Ok(e) => (e.rows_text(), e.history_len()),
-            Err(_) => (Vec::new(), 0),
+    /// Number of retained rows, including the visible screen.
+    pub fn retained_row_count(&self) -> usize {
+        self.engine
+            .lock()
+            .map(|e| e.retained_row_count())
+            .unwrap_or(0)
+    }
+
+    /// Read one retained row without allocating every other row.
+    pub fn retained_row_text(&self, index: usize) -> Option<String> {
+        self.engine.lock().ok()?.retained_row_text(index)
+    }
+
+    /// Visit retained rows under one engine lock. Each callback receives the
+    /// row index, history length, total row count, and text from one consistent
+    /// terminal snapshot.
+    pub fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, usize, usize, &str)) {
+        if let Ok(engine) = self.engine.lock() {
+            let history = engine.history_len();
+            let row_count = engine.retained_row_count();
+            engine.for_each_retained_row(&mut |index, line| f(index, history, row_count, line));
         }
     }
 
@@ -382,6 +396,10 @@ impl Pane {
                 retained_rows: 0,
                 budget_bytes: 0,
                 retained_bytes: 0,
+                estimated_grid_bytes: 0,
+                cache_bytes: None,
+                compacted_rows: None,
+                allocated_cells: None,
                 exact_bytes: false,
             },
         )

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -885,6 +885,15 @@ pub struct PaneStatus {
     /// old spinner line flips an idle agent to "working" for the ~2.5s the Idle
     /// dwell then takes to clear. `None` until the pane is first resized (docs/07).
     pub last_resize: Option<Instant>,
+    /// Last terminal-output generation whose title and bottom rows were read.
+    last_detect_generation: Option<u64>,
+    /// Cached terminal inputs for classification. Unchanged panes reuse these
+    /// while still evaluating activity and quiet-dwell deadlines.
+    detected_title: Option<Arc<str>>,
+    detected_bottom: Arc<str>,
+    /// Process identity, resize, manifest, and session changes force one fresh
+    /// terminal inspection even when no new PTY bytes arrived.
+    pub(crate) force_detect: bool,
     /// For a Blocked agent, the on-screen line it is waiting on (its bottom-text
     /// snippet), so Mission Control can show *why* it's blocked and offer a
     /// one-key answer. Captured **once** when the pane enters Blocked (not every
@@ -912,6 +921,10 @@ impl PaneStatus {
             candidate: State::Idle,
             candidate_since: Instant::now(),
             last_resize: None,
+            last_detect_generation: None,
+            detected_title: None,
+            detected_bottom: Arc::from(""),
+            force_detect: true,
             blocked_hint: None,
         }
     }
@@ -1019,7 +1032,7 @@ impl Selection {
 }
 
 /// Keyboard-driven selection in a terminal pane. Rows are absolute indices in
-/// `Pane::rows_text()` (oldest retained row is zero), so the selection remains
+/// retained-row coordinates (oldest retained row is zero), so the selection remains
 /// stable while its viewport scrolls.
 #[derive(Clone, Copy)]
 pub struct CopyMode {
@@ -1274,6 +1287,10 @@ pub struct App {
     /// Throttle for per-pane agent classification — it locks each pane's VT engine
     /// and scans its grid, so it runs at ~100ms, not at the render frame rate.
     last_detect_at: Instant,
+    /// Runtime evidence for the generation gate, exposed additively by
+    /// `pane.list` for diagnostics and performance comparisons.
+    detection_extractions: u64,
+    detection_skips: u64,
     /// Scroll offsets + scrollable regions for the two sidebar lists, so long
     /// WORKSPACES / AGENTS lists can be wheeled through.
     pub workspaces_scroll: usize,
@@ -1587,6 +1604,8 @@ impl App {
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
+            detection_extractions: 0,
+            detection_skips: 0,
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -2012,6 +2031,8 @@ impl App {
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
+            detection_extractions: 0,
+            detection_skips: 0,
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -2329,6 +2350,40 @@ impl App {
         self.panes
             .values()
             .fold(false, |any, p| any | p.take_data_pending())
+    }
+
+    /// Re-arm PTY notifications while distinguishing output visible in the
+    /// active tab from output owned by another tab or workspace. The server
+    /// uses this to keep focused rendering responsive without repeatedly
+    /// diffing an unchanged UI for background-only bursts.
+    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool) {
+        let layout = self.workspaces.get(self.active_ws).and_then(|workspace| {
+            workspace
+                .tabs
+                .get(workspace.active_tab)
+                .map(|tab| &tab.layout)
+        });
+        let mut visible = false;
+        let mut background = false;
+        for (id, pane) in &self.panes {
+            if !pane.take_data_pending() {
+                continue;
+            }
+            if layout.is_some_and(|layout| layout.contains(*id)) {
+                visible = true;
+            } else {
+                background = true;
+            }
+        }
+        (visible, background)
+    }
+
+    /// Whether a pane is rendered in the active tab.
+    pub fn pane_is_visible(&self, id: PaneId) -> bool {
+        self.workspaces
+            .get(self.active_ws)
+            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+            .is_some_and(|tab| tab.layout.contains(id))
     }
 
     pub fn ws(&self) -> &Workspace {
@@ -3644,7 +3699,13 @@ impl App {
             st.agent = self.manifests.agent_in_processes(cmds).unwrap_or(base);
             lifecycle_changed = true;
         }
+        let processes_changed = self.proc_commands != next;
         self.proc_commands = next;
+        if processes_changed {
+            for status in self.status.values_mut() {
+                status.force_detect = true;
+            }
+        }
         if lifecycle_changed {
             self.session_dirty = true;
         }
@@ -5770,6 +5831,32 @@ mod tests {
             !app.session_dirty,
             "a non-resumable identity repaint does not create persistence work"
         );
+    }
+
+    #[test]
+    fn unchanged_panes_reuse_cached_detection_text() {
+        let _env = crate::persist::test_env("detect-generation-cache");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let first = Instant::now();
+
+        app.detect_tick(first);
+        let extracted = app.detection_extractions;
+        assert!(extracted > 0, "the first tick inspects every pane");
+
+        app.detect_tick(first + Duration::from_millis(200));
+        assert_eq!(
+            app.detection_extractions, extracted,
+            "an unchanged pane does not rebuild title or bottom text"
+        );
+        assert!(app.detection_skips > 0);
+
+        if let Some(pane) = app.panes.get(&pane) {
+            pane.engine.lock().unwrap().advance(b"new output\r\n");
+        }
+        app.detect_tick(first + Duration::from_millis(400));
+        assert_eq!(app.detection_extractions, extracted + 1);
     }
 
     #[test]

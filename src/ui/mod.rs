@@ -424,6 +424,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             if resized {
                 if let Some(s) = app.status.get_mut(id) {
                     s.last_resize = Some(std::time::Instant::now());
+                    s.force_detect = true;
                 }
             }
         }

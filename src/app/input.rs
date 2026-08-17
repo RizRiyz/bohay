@@ -6,15 +6,19 @@ use crate::files::view_text_w;
 
 /// Last selectable character index on a retained row. Empty rows still expose
 /// one visual cell so vertical navigation and a blank-line selection are stable.
-fn copy_line_end(rows: &[String], row: usize) -> usize {
-    rows.get(row)
-        .map(|line| line.chars().count().saturating_sub(1))
+fn copy_line_end(line: Option<&str>) -> usize {
+    line.map(|line| line.chars().count().saturating_sub(1))
         .unwrap_or(0)
 }
 
-fn copy_word_forward(rows: &[String], mut at: (usize, usize)) -> (usize, usize) {
-    while at.0 < rows.len() {
-        let chars: Vec<char> = rows[at.0].chars().collect();
+fn copy_word_forward(
+    row_count: usize,
+    mut row_text: impl FnMut(usize) -> Option<String>,
+    mut at: (usize, usize),
+) -> (usize, usize) {
+    while at.0 < row_count {
+        let line = row_text(at.0).unwrap_or_default();
+        let chars: Vec<char> = line.chars().collect();
         while at.1 < chars.len() && !chars[at.1].is_whitespace() {
             at.1 += 1;
         }
@@ -27,18 +31,18 @@ fn copy_word_forward(rows: &[String], mut at: (usize, usize)) -> (usize, usize) 
         at.0 += 1;
         at.1 = 0;
     }
-    (
-        rows.len().saturating_sub(1),
-        copy_line_end(rows, rows.len().saturating_sub(1)),
-    )
+    let last = row_count.saturating_sub(1);
+    let line = row_text(last);
+    (last, copy_line_end(line.as_deref()))
 }
 
-fn copy_word_back(rows: &[String], mut at: (usize, usize)) -> (usize, usize) {
+fn copy_word_back(
+    mut row_text: impl FnMut(usize) -> Option<String>,
+    mut at: (usize, usize),
+) -> (usize, usize) {
     loop {
-        let chars: Vec<char> = rows
-            .get(at.0)
-            .map(|line| line.chars().collect())
-            .unwrap_or_default();
+        let line = row_text(at.0).unwrap_or_default();
+        let chars: Vec<char> = line.chars().collect();
         let mut col = at.1.min(chars.len());
         while col > 0 && chars[col - 1].is_whitespace() {
             col -= 1;
@@ -47,14 +51,50 @@ fn copy_word_back(rows: &[String], mut at: (usize, usize)) -> (usize, usize) {
             col -= 1;
         }
         if col > 0 || !chars.is_empty() {
-            return (at.0, col.min(copy_line_end(rows, at.0)));
+            return (at.0, col.min(copy_line_end(Some(&line))));
         }
         if at.0 == 0 {
             return (0, 0);
         }
         at.0 -= 1;
-        at.1 = copy_line_end(rows, at.0).saturating_add(1);
+        let line = row_text(at.0);
+        at.1 = copy_line_end(line.as_deref()).saturating_add(1);
     }
+}
+
+fn append_selected_row(
+    out: &mut String,
+    line: &str,
+    row: usize,
+    ((start_row, start_col), (end_row, end_col)): ((usize, usize), (usize, usize)),
+) {
+    let chars: Vec<char> = line.chars().collect();
+    let left = if row == start_row { start_col } else { 0 };
+    let right = if row == end_row {
+        end_col
+    } else {
+        chars.len().saturating_sub(1)
+    };
+    if row != start_row {
+        out.push('\n');
+    }
+    if left <= right {
+        out.extend(
+            chars
+                .iter()
+                .skip(left)
+                .take(right.saturating_sub(left).saturating_add(1)),
+        );
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+}
+
+fn finish_selected_text(mut out: String) -> Option<String> {
+    let trimmed_len = out.trim_end_matches('\n').len();
+    out.truncate(trimmed_len);
+    (!out.trim().is_empty()).then_some(out)
 }
 
 /// Extract a linear terminal selection from logical rows. Both mouse and
@@ -74,30 +114,14 @@ fn extract_rows_selection(
         .take(last_row.saturating_add(1))
         .skip(start_row)
     {
-        let chars: Vec<char> = line.chars().collect();
-        let left = if row == start_row { start_col } else { 0 };
-        let right = if row == end_row {
-            end_col
-        } else {
-            chars.len().saturating_sub(1)
-        };
-        if row != start_row {
-            out.push('\n');
-        }
-        if left <= right {
-            out.extend(
-                chars
-                    .iter()
-                    .skip(left)
-                    .take(right.saturating_sub(left).saturating_add(1)),
-            );
-        }
-        while out.ends_with(' ') {
-            out.pop();
-        }
+        append_selected_row(
+            &mut out,
+            line,
+            row,
+            ((start_row, start_col), (end_row, end_col)),
+        );
     }
-    let out = out.trim_end_matches('\n').to_string();
-    (!out.trim().is_empty()).then_some(out)
+    finish_selected_text(out)
 }
 
 impl App {
@@ -1440,11 +1464,21 @@ impl App {
         let Some(copy) = self.copy_mode.take() else {
             return;
         };
-        let text = self
-            .panes
-            .get(&copy.pane)
-            .map(|pane| pane.rows_text().0)
-            .and_then(|rows| extract_rows_selection(&rows, copy.ordered()));
+        let text = self.panes.get(&copy.pane).and_then(|pane| {
+            let range = copy.ordered();
+            let mut output = String::new();
+            let start_row = (range.0).0;
+            let end_row = (range.1).0;
+            // Hold one engine lock so every selected row comes from the same
+            // terminal snapshot. Rows that disappeared after the selection was
+            // made are skipped instead of discarding the remaining copy.
+            pane.for_each_retained_row(&mut |row, _history, _row_count, line| {
+                if (start_row..=end_row).contains(&row) {
+                    append_selected_row(&mut output, line, row, range);
+                }
+            });
+            finish_selected_text(output)
+        });
         if let Some(text) = text {
             self.pending_clipboard = Some(text);
             let msg = self.catalog.copied;
@@ -1477,25 +1511,23 @@ impl App {
             }
             return true;
         }
-        let rows = self
-            .panes
-            .get(&copy.pane)
-            .map(|pane| pane.rows_text().0)
-            .unwrap_or_default();
-        if rows.is_empty() {
+        let Some(pane) = self.panes.get(&copy.pane) else {
+            self.cancel_copy_mode();
+            return true;
+        };
+        let row_count = pane.retained_row_count();
+        if row_count == 0 {
             self.cancel_copy_mode();
             return true;
         }
-        let last_row = rows.len().saturating_sub(1);
+        let last_row = row_count.saturating_sub(1);
         let page = self.focused_page() as usize;
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => copy.cursor.1 = copy.cursor.1.saturating_sub(1),
             KeyCode::Right | KeyCode::Char('l') => {
-                copy.cursor.1 = copy
-                    .cursor
-                    .1
-                    .saturating_add(1)
-                    .min(copy_line_end(&rows, copy.cursor.0));
+                copy.cursor.1 = copy.cursor.1.saturating_add(1).min(copy_line_end(
+                    pane.retained_row_text(copy.cursor.0).as_deref(),
+                ));
             }
             KeyCode::Up | KeyCode::Char('k') => copy.cursor.0 = copy.cursor.0.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => copy.cursor.0 = (copy.cursor.0 + 1).min(last_row),
@@ -1508,12 +1540,21 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => copy.cursor.0 = 0,
             KeyCode::End | KeyCode::Char('G') => copy.cursor.0 = last_row,
             KeyCode::Char('0') => copy.cursor.1 = 0,
-            KeyCode::Char('$') => copy.cursor.1 = copy_line_end(&rows, copy.cursor.0),
-            KeyCode::Char('w') => copy.cursor = copy_word_forward(&rows, copy.cursor),
-            KeyCode::Char('B') => copy.cursor = copy_word_back(&rows, copy.cursor),
+            KeyCode::Char('$') => {
+                copy.cursor.1 = copy_line_end(pane.retained_row_text(copy.cursor.0).as_deref())
+            }
+            KeyCode::Char('w') => {
+                copy.cursor =
+                    copy_word_forward(row_count, |row| pane.retained_row_text(row), copy.cursor)
+            }
+            KeyCode::Char('B') => {
+                copy.cursor = copy_word_back(|row| pane.retained_row_text(row), copy.cursor)
+            }
             _ => return true,
         }
-        copy.cursor.1 = copy.cursor.1.min(copy_line_end(&rows, copy.cursor.0));
+        copy.cursor.1 = copy.cursor.1.min(copy_line_end(
+            pane.retained_row_text(copy.cursor.0).as_deref(),
+        ));
         self.copy_mode = Some(copy);
         self.reveal_copy_cursor();
         true

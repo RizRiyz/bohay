@@ -25,7 +25,7 @@ pub struct SearchHit {
     /// Scroll offset (lines above the live bottom) that brings the match on
     /// screen, for `Pane::scroll_to`.
     pub offset: usize,
-    /// Absolute row index within the pane's `rows_text`, for stable ordering.
+    /// Absolute retained-row index within the pane, for stable ordering.
     pub row: usize,
     pub line: String,
     pub col: usize,
@@ -190,9 +190,15 @@ impl App {
                         capped = true;
                         continue;
                     }
-                    let (rows, history) = pane.rows_text();
-                    bytes += rows.iter().map(String::len).sum::<usize>();
-                    let lower = rows.iter().map(|r| r.to_lowercase()).collect();
+                    let mut rows = Vec::new();
+                    let mut lower = Vec::new();
+                    let mut history = 0;
+                    pane.for_each_retained_row(&mut |_index, retained, _row_count, line| {
+                        history = retained;
+                        bytes = bytes.saturating_add(line.len());
+                        rows.push(line.to_string());
+                        lower.push(line.to_lowercase());
+                    });
                     out.push(PaneRows {
                         pane: id,
                         ws: wi,
@@ -210,8 +216,55 @@ impl App {
     /// One-shot search over every pane, for the `search` socket/CLI verb. Returns
     /// the hits (capped for display) and the total number found.
     pub fn search_all(&self, query: &str, case_sensitive: bool) -> (Vec<SearchHit>, usize) {
-        let (snapshot, _capped) = self.search_snapshot();
-        run_search(&snapshot, query, case_sensitive)
+        let query = if case_sensitive {
+            query.to_string()
+        } else {
+            query.to_lowercase()
+        };
+        if query.is_empty() {
+            return (Vec::new(), 0);
+        }
+
+        let mut hits = Vec::new();
+        let mut total = 0usize;
+        for (wi, ws) in self.workspaces.iter().enumerate() {
+            for tab in &ws.tabs {
+                for id in tab.layout.leaves() {
+                    let Some(pane) = self.panes.get(&id) else {
+                        continue;
+                    };
+                    let mut pane_hits = 0usize;
+                    pane.for_each_retained_row(&mut |row, history, row_count, line| {
+                        let lowercase;
+                        let haystack = if case_sensitive {
+                            line
+                        } else {
+                            lowercase = line.to_lowercase();
+                            &lowercase
+                        };
+                        let Some(col) = haystack.find(&query) else {
+                            return;
+                        };
+                        total = total.saturating_add(1);
+                        if pane_hits >= PER_PANE_CAP || hits.len() >= TOTAL_CAP {
+                            return;
+                        }
+                        pane_hits += 1;
+                        hits.push(SearchHit {
+                            pane: id,
+                            ws: wi,
+                            ws_name: ws.name.clone(),
+                            offset: history.saturating_sub(row),
+                            row,
+                            line: line.to_string(),
+                            col,
+                            above: row_count.saturating_sub(1).saturating_sub(row),
+                        });
+                    });
+                }
+            }
+        }
+        (hits, total)
     }
 
     /// Open the global-search overlay: snapshot the panes now, start empty.
@@ -285,17 +338,25 @@ impl App {
         // live grid. If the line is gone, fall back to the snapshot values.
         let (offset, above) = match self.panes.get(&h.pane) {
             Some(pane) => {
-                let (rows, history) = pane.rows_text();
-                let idx = rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| **l == h.line)
-                    .min_by_key(|(i, _)| (*i as isize - h.row as isize).unsigned_abs())
-                    .map(|(i, _)| i);
+                let mut idx = None;
+                let mut distance = usize::MAX;
+                let mut retained = 0;
+                let mut total_rows = 0;
+                pane.for_each_retained_row(&mut |row, history, row_count, line| {
+                    retained = history;
+                    total_rows = row_count;
+                    if line == h.line {
+                        let candidate = row.abs_diff(h.row);
+                        if candidate < distance {
+                            idx = Some(row);
+                            distance = candidate;
+                        }
+                    }
+                });
                 match idx {
                     Some(i) => (
-                        history.saturating_sub(i),
-                        rows.len().saturating_sub(1).saturating_sub(i),
+                        retained.saturating_sub(i),
+                        total_rows.saturating_sub(1).saturating_sub(i),
                     ),
                     None => (h.offset, h.above),
                 }

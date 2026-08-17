@@ -41,7 +41,16 @@ pub struct HistoryMetrics {
     pub offset: usize,
     pub retained_rows: usize,
     pub budget_bytes: usize,
+    /// Legacy estimate retained for API compatibility. This is not process RSS.
     pub retained_bytes: usize,
+    /// Estimated shallow allocation for the terminal engine's grids.
+    pub estimated_grid_bytes: usize,
+    /// Estimated shallow allocation held only for row reuse.
+    pub cache_bytes: Option<usize>,
+    /// Rows stored using the engine's compact cold-history representation.
+    pub compacted_rows: Option<usize>,
+    /// Physical cell slots allocated by the engine, excluding logical repeats.
+    pub allocated_cells: Option<usize>,
     pub exact_bytes: bool,
 }
 
@@ -49,6 +58,9 @@ pub struct HistoryMetrics {
 pub trait VtEngine: Send {
     /// Feed child output. Must never panic on arbitrary bytes.
     fn advance(&mut self, bytes: &[u8]);
+
+    /// Monotonic generation of successfully parsed terminal output.
+    fn output_generation(&self) -> u64;
 
     /// Reflow to a new (cols, rows).
     fn resize(&mut self, cols: u16, rows: u16);
@@ -104,11 +116,17 @@ pub trait VtEngine: Send {
     /// Current scroll position and retained-history accounting.
     fn history_metrics(&self) -> HistoryMetrics;
 
-    /// Every retained row as plain text, **oldest first**: the scrollback history
-    /// followed by the live screen, trailing blanks trimmed. Used by global
-    /// search (docs/63) to scan a pane's whole output. The alternate screen has
-    /// no scrollback, so this returns just the visible screen there. Read-only.
-    fn rows_text(&self) -> Vec<String>;
+    /// Number of rows available through [`Self::for_each_retained_row`], including
+    /// the visible screen after the scrollback history.
+    fn retained_row_count(&self) -> usize;
+
+    /// Read one retained row by oldest-first index without materializing the
+    /// entire history.
+    fn retained_row_text(&self, index: usize) -> Option<String>;
+
+    /// Visit retained rows oldest-first using one reusable line buffer. The
+    /// callback must not retain the borrowed text after it returns.
+    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str));
 
     /// Jump the viewport so the row `offset` lines above the live bottom sits at
     /// the top (clamped to `history_len()`); `0` is live. Lands on a search match
