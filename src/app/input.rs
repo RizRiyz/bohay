@@ -64,6 +64,7 @@ fn copy_word_back(
 
 fn append_selected_row(
     out: &mut String,
+    appended: &mut bool,
     line: &str,
     row: usize,
     ((start_row, start_col), (end_row, end_col)): ((usize, usize), (usize, usize)),
@@ -75,9 +76,10 @@ fn append_selected_row(
     } else {
         chars.len().saturating_sub(1)
     };
-    if row != start_row {
+    if *appended {
         out.push('\n');
     }
+    *appended = true;
     if left <= right {
         out.extend(
             chars
@@ -108,6 +110,7 @@ fn extract_rows_selection(
     }
     let mut out = String::new();
     let last_row = end_row.min(rows.len().saturating_sub(1));
+    let mut appended = false;
     for (row, line) in rows
         .iter()
         .enumerate()
@@ -116,6 +119,7 @@ fn extract_rows_selection(
     {
         append_selected_row(
             &mut out,
+            &mut appended,
             line,
             row,
             ((start_row, start_col), (end_row, end_col)),
@@ -1472,9 +1476,10 @@ impl App {
             // Hold one engine lock so every selected row comes from the same
             // terminal snapshot. Rows that disappeared after the selection was
             // made are skipped instead of discarding the remaining copy.
+            let mut appended = false;
             pane.for_each_retained_row(&mut |row, _history, _row_count, line| {
                 if (start_row..=end_row).contains(&row) {
-                    append_selected_row(&mut output, line, row, range);
+                    append_selected_row(&mut output, &mut appended, line, row, range);
                 }
             });
             finish_selected_text(output)
@@ -3042,5 +3047,23 @@ mod link_click_tests {
         assert!(app.pane_menu_items().contains(&PaneMenuItem::OpenLink));
         app.pane_menu_action(PaneMenuItem::OpenLink);
         assert_eq!(app.pending_open_url.as_deref(), Some(URL));
+    }
+
+    /// Copy-mode skips rows that fell out of retention, so the newline
+    /// separator must track appended rows — comparing against the selection's
+    /// start row would make a skipped leading row start the copy with `\n`.
+    #[test]
+    fn skipped_leading_rows_do_not_add_a_leading_newline() {
+        let mut out = String::new();
+        let mut appended = false;
+        let range = ((2, 0), (5, 2));
+        // Rows 2 and 3 were evicted and are skipped; row 4 is appended first.
+        append_selected_row(&mut out, &mut appended, "abc", 4, range);
+        append_selected_row(&mut out, &mut appended, "def", 5, range);
+        assert_eq!(
+            finish_selected_text(out).as_deref(),
+            Some("abc\ndef"),
+            "a skipped first row must not produce a leading newline"
+        );
     }
 }

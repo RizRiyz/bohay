@@ -5841,6 +5841,20 @@ mod tests {
         let pane = app.layout().focus;
         let first = Instant::now();
 
+        // Give the pane a deterministic engine. Its real shell reader keeps its
+        // old engine, so stray output between ticks cannot race the extraction
+        // counts; only the explicit advance below changes the generation.
+        use std::sync::{Arc, Mutex};
+        let (response_tx, _response_rx) = std::sync::mpsc::channel();
+        app.panes.get_mut(&pane).unwrap().engine = Arc::new(Mutex::new(
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(
+                80,
+                24,
+                response_tx,
+                crate::config::SCROLLBACK_BYTES_DEFAULT,
+            ),
+        ));
+
         app.detect_tick(first);
         let extracted = app.detection_extractions;
         assert!(extracted > 0, "the first tick inspects every pane");
