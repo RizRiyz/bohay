@@ -1868,7 +1868,12 @@ impl App {
             let _ = reply.send(wait_response(&request_id, true, Some(id)));
             return;
         }
-        let deadline = timeout.map(|d| Instant::now() + d);
+        // Always bound the wait: a client that disconnects cannot be detected on
+        // the reply channel, so an uncapped waiter would be re-scanned forever.
+        // A shorter caller-specified timeout still wins; a longer one (or none)
+        // is capped so an abandoned waiter is reclaimed within an hour.
+        const MAX_WAIT: Duration = Duration::from_secs(3600);
+        let deadline = Some(Instant::now() + timeout.unwrap_or(MAX_WAIT).min(MAX_WAIT));
         self.output_waits.entry(id).or_default().push(OutputWait {
             request_id,
             needle,
@@ -1916,9 +1921,16 @@ impl App {
         if self.output_waits.is_empty() {
             return;
         }
-        let panes: Vec<PaneId> = self.output_waits.keys().copied().collect();
-        for id in panes {
-            self.check_output_waits(id);
+        // A marker can arrive inside an already-coalesced burst, so re-test
+        // periodically — but not every tick, which would lock each waiting pane's
+        // VT engine and rebuild its recent text at the loop rate (~30-60/s).
+        // Deadline expiry below still runs on every tick.
+        if now.duration_since(self.last_output_wait_scan) >= Duration::from_millis(100) {
+            self.last_output_wait_scan = now;
+            let panes: Vec<PaneId> = self.output_waits.keys().copied().collect();
+            for id in panes {
+                self.check_output_waits(id);
+            }
         }
         for waiters in self.output_waits.values_mut() {
             waiters.retain(|waiter| {
@@ -3107,6 +3119,40 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .unwrap()
             .contains("\"matched\":false"));
+        assert!(app.output_waits.is_empty(), "no waiters leak");
+    }
+
+    /// A waiter registered without `timeout_s` still gets a bounded deadline, so
+    /// a disconnected client cannot leave it parked for the life of the pane.
+    #[test]
+    fn output_wait_without_timeout_is_bounded() {
+        let _env = crate::persist::test_env("wait-bound");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (reply, _rx): (_, std::sync::mpsc::Receiver<String>) = std::sync::mpsc::channel();
+        app.register_output_wait(pane, "t".into(), "NEVER".into(), reply, None);
+        let waiter = &app.output_waits[&pane][0];
+        assert!(waiter.deadline.is_some(), "an abandoned waiter must expire");
+    }
+
+    /// Every pane-close path funnels through `drop_leaf_runtime`, so closing a
+    /// workspace or tab must fail its parked waiters rather than leaking them.
+    #[test]
+    fn closing_a_workspace_cancels_parked_waiters() {
+        let _env = crate::persist::test_env("wait-close-ws");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (reply, rx): (_, std::sync::mpsc::Receiver<String>) = std::sync::mpsc::channel();
+        app.register_output_wait(pane, "t".into(), "NEVER".into(), reply, None);
+        app.close_workspace(0);
+        assert!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .contains("\"matched\":false"),
+            "a closed workspace fails its parked waiters"
+        );
         assert!(app.output_waits.is_empty(), "no waiters leak");
     }
 }

@@ -134,12 +134,34 @@ impl App {
     /// changes when the pane echoes (a separate `PtyData` event), so we don't waste
     /// a full render per keystroke.
     pub fn handle_event(&mut self, ev: AppEvent) -> bool {
-        // Closing the last workspace empties `workspaces` and sets `should_quit`; the
-        // loop drains the rest of the event batch before it checks that flag, so
-        // ignore events here once there's nothing left to act on (`layout()`
-        // would otherwise index an empty `workspaces`).
+        // Control-API requests and parked `wait.output` replies must be answered
+        // even with no workspace open. A server that has closed its last node
+        // stays alive (docs/43 §3.3), and the methods that reopen one are the
+        // only way back; dropping the reply channel here would leave the caller
+        // reading EOF instead of a `workspace.open` / `server.stop` answer.
         if self.workspaces.is_empty() {
-            return false;
+            match ev {
+                AppEvent::Api(req) => {
+                    let resp = self.handle_api(&req);
+                    let _ = req.reply.send(resp);
+                    return true;
+                }
+                AppEvent::WaitOutput { id, reply, .. } => {
+                    let _ = reply.send(
+                        json!({ "id": id, "error": {
+                            "code": "no_session", "message": "no active session"
+                        }})
+                        .to_string(),
+                    );
+                    return true;
+                }
+                // Closing the last workspace empties `workspaces` and sets
+                // `should_quit`; the loop drains the rest of the event batch
+                // before it checks that flag, so ignore everything else here
+                // once there's nothing left to act on (`layout()` would
+                // otherwise index an empty `workspaces`).
+                _ => return false,
+            }
         }
         match ev {
             AppEvent::Key(k) => self.handle_key(k),
@@ -2379,6 +2401,30 @@ mod tests {
             app.force_redraw,
             "resize requests a full repaint, not just a diff"
         );
+    }
+
+    // A server that has closed its last node keeps running (docs/43 §3.3), so
+    // control-API requests routed through the event channel must still be
+    // answered — otherwise the reply channel drops and the CLI reads EOF.
+    #[test]
+    fn api_requests_are_answered_with_no_workspace_open() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.close_workspace(0);
+        assert!(app.workspaces.is_empty(), "the only node is gone");
+        let (reply, rx) = std::sync::mpsc::channel();
+        let req = crate::ipc::api::ApiRequest {
+            id: "ping".into(),
+            method: "ping".into(),
+            params: serde_json::Value::Null,
+            reply,
+        };
+        let dirty = app.handle_event(AppEvent::Api(req));
+        assert!(dirty, "an answered control request counts as activity");
+        let resp = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("an empty server still answers its control API");
+        assert!(resp.contains("pong"), "got a real pong, not EOF: {resp}");
     }
 
     // Agents treat Enter as "submit" and Shift+Enter as "new line". A terminal

@@ -1066,6 +1066,16 @@ fn wait_cmd(args: &[String]) -> Result<i32> {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             }
+            // A server error (bad pane id, no active session, invalid timeout) is
+            // not a timeout: report it so a failed request is not mistaken for an
+            // elapsed deadline.
+            if let Some(err) = v.get("error") {
+                let msg = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("wait.output failed");
+                eprintln!("wait output: {msg}");
+            }
             Ok(2)
         }
         WaitFor::AgentStatus { status } => wait_status_stream(&spec.pane, &status, deadline),

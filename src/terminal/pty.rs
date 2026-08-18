@@ -411,7 +411,14 @@ impl Pane {
                     return fail();
                 };
                 drop(pair.slave);
-                // Closed between fork and handoff: hang up the fresh child.
+                // Publish the pid *before* the cancellation check: a concurrent
+                // `Drop` then either sees the pid and signals it, or sees 0 — in
+                // which case its `cancelled` store precedes this load and the
+                // hangup below runs. Checking first would let `Drop` read 0,
+                // return, and leave the child running with no owner.
+                child_pid.store(pid, Ordering::SeqCst);
+                // Closed between fork and handoff: hang up the fresh child and
+                // reap it ourselves, since no reaper thread will be spawned.
                 if cancelled.load(Ordering::SeqCst) {
                     #[cfg(unix)]
                     unsafe {
@@ -425,9 +432,11 @@ impl Pane {
                             .stderr(std::process::Stdio::null())
                             .spawn();
                     }
+                    let mut child = child;
+                    let _ = child.wait();
+                    child_exited.store(true, Ordering::SeqCst);
                     return;
                 }
-                child_pid.store(pid, Ordering::SeqCst);
 
                 // A resize raced the spawn: re-apply the latest size.
                 let latest = *size.lock().unwrap_or_else(|p| p.into_inner());

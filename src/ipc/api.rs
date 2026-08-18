@@ -144,10 +144,17 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
     if method == "wait.output" {
         let pane = params.get("pane").and_then(|v| v.as_str()).unwrap_or("");
         let needle = params.get("match").and_then(|v| v.as_str()).unwrap_or("");
-        let timeout = params
-            .get("timeout_s")
-            .and_then(|v| v.as_f64())
-            .map(std::time::Duration::from_secs_f64);
+        let timeout = match parse_timeout_s(&params) {
+            Ok(t) => t,
+            Err(msg) => {
+                let _ = writeln!(
+                    writer,
+                    "{}",
+                    json!({"id":id,"error":{"code":"invalid_request","message":msg}})
+                );
+                return;
+            }
+        };
         if pane.is_empty() || needle.is_empty() {
             let _ = writeln!(
                 writer,
@@ -190,5 +197,51 @@ fn handle_conn(stream: Conn, event_tx: Sender<AppEvent>, bus: EventBus) {
     }
     if let Ok(resp) = reply_rx.recv() {
         let _ = writeln!(writer, "{resp}");
+    }
+}
+
+/// Parse an optional `timeout_s` (fractional seconds) for `wait.output`.
+/// `None` only when the field is absent; a present but non-numeric, negative,
+/// NaN, infinite, or overflowing value is rejected rather than mapped to an
+/// unbounded wait or allowed to panic `from_secs_f64`.
+fn parse_timeout_s(params: &Value) -> Result<Option<std::time::Duration>, &'static str> {
+    let Some(v) = params.get("timeout_s") else {
+        return Ok(None);
+    };
+    let Some(secs) = v.as_f64() else {
+        return Err("timeout_s must be a number");
+    };
+    match std::time::Duration::try_from_secs_f64(secs) {
+        Ok(d) => Ok(Some(d)),
+        Err(_) => Err("timeout_s must be a non-negative finite number of seconds"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_s_parses_without_panicking() {
+        // Absent -> no deadline.
+        assert!(parse_timeout_s(&json!({})).unwrap().is_none());
+        // Valid -> Some(duration).
+        let d = parse_timeout_s(&json!({ "timeout_s": 1.5 }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(d, std::time::Duration::from_millis(1500));
+        // Zero is a valid immediate deadline.
+        assert!(parse_timeout_s(&json!({ "timeout_s": 0 }))
+            .unwrap()
+            .is_some());
+        // Negative, overflowing, and non-numeric values all reject instead of
+        // panicking or silently widening the wait.
+        for bad in [
+            json!({ "timeout_s": -1.0 }),
+            json!({ "timeout_s": 1e300 }),
+            json!({ "timeout_s": "5" }),
+        ] {
+            assert!(parse_timeout_s(&bad).is_err(), "{bad} must be rejected");
+        }
     }
 }

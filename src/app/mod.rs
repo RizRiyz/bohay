@@ -1294,6 +1294,10 @@ pub struct App {
     /// Pending server-side `wait.output` requests keyed by pane (docs/81).
     /// Satisfied by the pane's next output event, expired by the loop tick.
     output_waits: HashMap<PaneId, Vec<crate::app::dispatch::OutputWait>>,
+    /// Throttle for re-scanning parked waiters — the scan locks each waiting
+    /// pane's VT engine and rebuilds its recent text, so it runs at ~100ms,
+    /// not at the render frame rate. Deadline expiry still runs every tick.
+    last_output_wait_scan: Instant,
     /// Scroll offsets + scrollable regions for the two sidebar lists, so long
     /// WORKSPACES / AGENTS lists can be wheeled through.
     pub workspaces_scroll: usize,
@@ -1610,6 +1614,7 @@ impl App {
             detection_extractions: 0,
             detection_skips: 0,
             output_waits: HashMap::new(),
+            last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -2038,6 +2043,7 @@ impl App {
             detection_extractions: 0,
             detection_skips: 0,
             output_waits: HashMap::new(),
+            last_output_wait_scan: Instant::now(),
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only: false,
@@ -4140,6 +4146,10 @@ impl App {
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);
+        // Parked `wait.output` calls can never see new output on a dead pane, and
+        // every close path (close_pane, close_tab, close_workspace) funnels
+        // through here — so cancellation cannot be forgotten by a new path.
+        self.cancel_output_waits(id);
         self.editor_files.remove(&id); // untrack an editor pane's file (docs/38)
         self.module_panes.remove(&id); // untrack a module pane (MOD-2)
         if self.preview_view == Some(id) {
@@ -4155,8 +4165,6 @@ impl App {
 
     fn close_pane(&mut self, id: PaneId) {
         self.drop_leaf_runtime(id);
-        // Parked `wait.output` calls can never see new output on a dead pane.
-        self.cancel_output_waits(id);
         // Drop any live alias for the dead pane so a name never resolves to a
         // reallocated pane id (agent_names is ephemeral by design).
         self.agent_names.retain(|_, p| *p != id);
