@@ -70,19 +70,21 @@ irm https://luvus.dev/install.ps1 | iex
 
 ### Upgrading from Bohay 0.10.2
 
-Stop the old server, install Luvus, then launch it:
+Install Luvus, then run the migration from a normal terminal outside Bohay:
 
 ```bash
-bohay server stop
 curl -fsSL https://luvus.dev/install.sh | sh
+curl -fsSL https://luvus.dev/migrate.sh | sh
 luvus
 ```
 
-On first launch, Luvus copies durable state from `~/.bohay/` to `~/.luvus/`
-without deleting the old directory. Sessions, settings, manifests, modules, and
-named sessions carry over; runtime sockets, locks, and managed worktrees are not
-duplicated. Existing worktree paths remain valid because the Bohay directory is
-left untouched. Keep it until you have verified the migration.
+The migration script stops default and named servers, preserves any existing
+`~/.luvus/` state as a timestamped backup, and asks Luvus to copy durable state
+from `~/.bohay/` without deleting the old directory. Sessions, settings,
+manifests, modules, and named sessions carry over; runtime sockets, locks, and
+managed worktrees are not duplicated. Existing worktree paths remain valid
+because the Bohay directory is left untouched. Keep it until you have verified
+the migration.
 
 ## Quick start
 

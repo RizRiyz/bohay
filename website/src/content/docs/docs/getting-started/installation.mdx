@@ -172,27 +172,29 @@ just installed, so an upgrade never silently half-applies.
 
 ### Moving from Bohay 0.10.2 to Luvus 0.11.0
 
-Luvus is the new name and binary for Bohay. Stop the Bohay server before the
-first Luvus launch so its final session snapshot is complete and no legacy
-socket is active:
+Luvus is the new name and binary for Bohay. Install Luvus, then run the
+migration from a normal terminal outside Bohay so the script can safely stop
+the old server and its panes:
 
 ```sh
-bohay server stop
 curl -fsSL https://luvus.dev/install.sh | sh
+curl -fsSL https://luvus.dev/migrate.sh | sh
 luvus
 ```
 
-The first default-home launch copies durable state from `~/.bohay/` to
-`~/.luvus/` (`.bohay-dev` to `.luvus-dev` for debug builds). It carries over
-settings, session snapshots, named sessions, manifests, module configuration,
-and orchestration data. It deliberately skips sockets, locks, the old managed
-skill cache, and `worktrees/`. Existing worktree paths still work because the
-Bohay directory is never moved or deleted.
+The script stops default and named Luvus/Bohay servers, preserves an existing
+`~/.luvus/` directory as a timestamped backup, then lets Luvus copy durable
+state from `~/.bohay/`. It carries over settings, session snapshots, named
+sessions, manifests, module configuration, and orchestration data. It
+deliberately skips sockets, locks, the old managed skill cache, and
+`worktrees/`. Existing worktree paths still work because the Bohay directory is
+never moved or deleted.
 
-Migration is copy-only and does not run when `LUVUS_HOME` or `BOHAY_HOME` is
-explicitly set. If a Bohay server is still reachable, migration is deferred;
-stop it and launch Luvus again. Keep `~/.bohay/` until you have verified your
-workspaces and agents, then archive or remove it yourself.
+Migration is copy-only and supports the default homes. It refuses to run inside
+a Bohay/Luvus pane or when `LUVUS_HOME` or `BOHAY_HOME` is explicitly set. If a
+Bohay server is still reachable, the previous Luvus state is restored and the
+script exits without discarding data. Keep `~/.bohay/` until you have verified
+your workspaces and agents, then archive or remove it yourself.
 
 During the 0.11.x transition, Luvus accepts the old `BOHAY_*` input variables
 when the matching `LUVUS_*` variable is absent. Panes and modules receive both

@@ -21,6 +21,7 @@ website/dist/
 website/.astro/
 website/public/install.sh
 website/public/install.ps1
+website/public/migrate.sh
 .DS_Store
 
 # Python bytecode from example modules
