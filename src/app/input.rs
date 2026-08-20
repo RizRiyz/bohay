@@ -1447,7 +1447,7 @@ impl App {
                     // forwarded, so typing to the agent resumes with no lost key.
                     pane.scroll_to_bottom();
                     exit = true;
-                    if let Some(bytes) = encode_key(&key, newline) {
+                    if let Some(bytes) = encode_key(&key, newline, pane.application_cursor()) {
                         pane.send(&bytes);
                     }
                 }
@@ -2183,7 +2183,10 @@ impl App {
                     return true;
                 }
                 let newline = self.config.shift_enter_bytes();
-                if let Some(bytes) = encode_key(&key, newline) {
+                // Cursor keys follow the pane's DECCKM state: a `less` that
+                // turned application cursor mode on only recognizes SS3 codes.
+                let app_cursor = self.focused().is_some_and(|p| p.application_cursor());
+                if let Some(bytes) = encode_key(&key, newline, app_cursor) {
                     if let Some(p) = self.focused() {
                         // Typing snaps the view back to the live bottom, so you
                         // always see what you type (like every terminal).
@@ -2286,7 +2289,11 @@ fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
 /// Encode a crossterm key event into the bytes a terminal program expects.
 /// `newline` is the configured Shift/Alt+Enter sequence (`config::shift_enter`),
 /// forwarded verbatim for "new line, don't submit" so it can be tuned per setup.
-fn encode_key(key: &KeyEvent, newline: &[u8]) -> Option<Vec<u8>> {
+/// `app_cursor` mirrors the pane's DECCKM state: cursor keys go out as SS3
+/// (`ESC O <letter>`) when the app enabled application cursor mode, exactly as a
+/// real terminal would send them — some apps (`less`) only recognize the SS3
+/// form once they've turned the mode on.
+fn encode_key(key: &KeyEvent, newline: &[u8], app_cursor: bool) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -2333,16 +2340,39 @@ fn encode_key(key: &KeyEvent, newline: &[u8]) -> Option<Vec<u8>> {
         // from Windows console records, while terminals on Unix report them via
         // xterm/Kitty escape sequences. Dropping the modifiers here turned
         // Alt+arrow and Ctrl+arrow into plain arrows in nested prompt editors.
-        KeyCode::Left => csi_key(b'D', key.modifiers),
-        KeyCode::Right => csi_key(b'C', key.modifiers),
-        KeyCode::Up => csi_key(b'A', key.modifiers),
-        KeyCode::Down => csi_key(b'B', key.modifiers),
-        KeyCode::Home => csi_key(b'H', key.modifiers),
-        KeyCode::End => csi_key(b'F', key.modifiers),
+        KeyCode::Left => cursor_key(b'D', key.modifiers, app_cursor),
+        KeyCode::Right => cursor_key(b'C', key.modifiers, app_cursor),
+        KeyCode::Up => cursor_key(b'A', key.modifiers, app_cursor),
+        KeyCode::Down => cursor_key(b'B', key.modifiers, app_cursor),
+        KeyCode::Home => cursor_key(b'H', key.modifiers, app_cursor),
+        KeyCode::End => cursor_key(b'F', key.modifiers, app_cursor),
         KeyCode::Delete => csi_tilde_key(3, key.modifiers),
         KeyCode::Insert => csi_tilde_key(2, key.modifiers),
         KeyCode::PageUp => csi_tilde_key(5, key.modifiers),
         KeyCode::PageDown => csi_tilde_key(6, key.modifiers),
+        KeyCode::F(n) => {
+            let code = match n {
+                1..=4 => n + 10, // 11..14
+                5 => 15,
+                6 => 17,
+                7 => 18,
+                8 => 19,
+                9 => 20,
+                10 => 21,
+                11 => 23,
+                12 => 24,
+                13 => 25,
+                14 => 26,
+                15 => 28,
+                16 => 29,
+                17 => 31,
+                18 => 32,
+                19 => 33,
+                20 => 34,
+                _ => return None,
+            };
+            csi_tilde_key(code, key.modifiers)
+        }
         _ => return None,
     };
     Some(bytes)
@@ -2350,6 +2380,18 @@ fn encode_key(key: &KeyEvent, newline: &[u8]) -> Option<Vec<u8>> {
 
 fn csi(final_byte: u8) -> Vec<u8> {
     vec![0x1b, b'[', final_byte]
+}
+
+/// Encode a cursor key (arrows / Home / End). In application cursor mode
+/// (DECCKM, `ESC[?1h`) an unmodified key is SS3 (`ESC O <letter>`) — the exact
+/// bytes a real terminal sends after the app turned the mode on. Modified keys
+/// keep the CSI `1;<mod>` form, since SS3 carries no modifier parameter.
+fn cursor_key(final_byte: u8, modifiers: KeyModifiers, app_cursor: bool) -> Vec<u8> {
+    if app_cursor && key_modifier_param(modifiers) == 1 {
+        vec![0x1b, b'O', final_byte]
+    } else {
+        csi_key(final_byte, modifiers)
+    }
 }
 
 /// Xterm's modifier parameter: 1 + Shift + 2*Alt + 4*Ctrl + 8*Super +
@@ -2435,7 +2477,7 @@ mod tests {
     fn shift_enter_sends_a_newline_not_a_submit() {
         // The default newline sequence is `ESC CR`.
         let nl = b"\x1b\r";
-        let enter = |m: KeyModifiers| encode_key(&KeyEvent::new(KeyCode::Enter, m), nl);
+        let enter = |m: KeyModifiers| encode_key(&KeyEvent::new(KeyCode::Enter, m), nl, false);
         assert_eq!(
             enter(KeyModifiers::NONE),
             Some(b"\r".to_vec()),
@@ -2453,7 +2495,11 @@ mod tests {
         );
         // Ctrl+Enter keeps the legacy submit byte — agents bind it to submit.
         assert_eq!(
-            encode_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), nl),
+            encode_key(
+                &KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+                nl,
+                false
+            ),
             Some(b"\r".to_vec())
         );
     }
@@ -2463,19 +2509,19 @@ mod tests {
     #[test]
     fn shift_enter_sequence_is_configurable() {
         let shift = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
-        assert_eq!(encode_key(&shift, b"\n"), Some(b"\n".to_vec()));
+        assert_eq!(encode_key(&shift, b"\n", false), Some(b"\n".to_vec()));
         assert_eq!(
-            encode_key(&shift, b"\x1b[13;2u"),
+            encode_key(&shift, b"\x1b[13;2u", false),
             Some(b"\x1b[13;2u".to_vec())
         );
         // Plain Enter ignores the newline sequence and always submits.
         let plain = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(encode_key(&plain, b"\n"), Some(b"\r".to_vec()));
+        assert_eq!(encode_key(&plain, b"\n", false), Some(b"\r".to_vec()));
     }
 
     #[test]
     fn navigation_keys_preserve_modifiers_for_nested_prompt_editors() {
-        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r");
+        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", false);
 
         // The existing unmodified sequences stay byte-for-byte compatible.
         assert_eq!(
@@ -2519,8 +2565,50 @@ mod tests {
     }
 
     #[test]
+    fn application_cursor_mode_uses_ss3_cursor_keys() {
+        // When the pane enabled DECCKM (`ESC[?1h`), unmodified cursor keys go out
+        // as SS3 (`ESC O <letter>`) — the bytes a real terminal sends once the
+        // app turned the mode on. `less` is strict about this and ignores CSI.
+        let app = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", true);
+        assert_eq!(
+            app(KeyCode::Up, KeyModifiers::NONE),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            app(KeyCode::Down, KeyModifiers::NONE),
+            Some(b"\x1bOB".to_vec())
+        );
+        assert_eq!(
+            app(KeyCode::Left, KeyModifiers::NONE),
+            Some(b"\x1bOD".to_vec())
+        );
+        assert_eq!(
+            app(KeyCode::Right, KeyModifiers::NONE),
+            Some(b"\x1bOC".to_vec())
+        );
+        assert_eq!(
+            app(KeyCode::Home, KeyModifiers::NONE),
+            Some(b"\x1bOH".to_vec())
+        );
+        assert_eq!(
+            app(KeyCode::End, KeyModifiers::NONE),
+            Some(b"\x1bOF".to_vec())
+        );
+        // SS3 carries no modifier parameter, so a modified cursor key keeps the
+        // CSI `1;<mod>` form even in application cursor mode.
+        assert_eq!(
+            app(KeyCode::Up, KeyModifiers::SHIFT),
+            Some(b"\x1b[1;2A".to_vec())
+        );
+        assert_eq!(
+            app(KeyCode::Home, KeyModifiers::CONTROL),
+            Some(b"\x1b[1;5H".to_vec())
+        );
+    }
+
+    #[test]
     fn tilde_navigation_keys_preserve_modifiers() {
-        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r");
+        let key = |code, modifiers| encode_key(&KeyEvent::new(code, modifiers), b"\x1b\r", false);
         assert_eq!(
             key(KeyCode::Delete, KeyModifiers::NONE),
             Some(b"\x1b[3~".to_vec())
@@ -2533,6 +2621,26 @@ mod tests {
             key(KeyCode::Insert, KeyModifiers::SHIFT | KeyModifiers::ALT),
             Some(b"\x1b[2;4~".to_vec())
         );
+    }
+
+    #[test]
+    fn function_keys_encode_to_tilde_codes() {
+        let key =
+            |n, modifiers| encode_key(&KeyEvent::new(KeyCode::F(n), modifiers), b"\x1b\r", false);
+        // F1–F4 and F5–F12 carry the standard xterm CSI-tilde codes.
+        assert_eq!(key(1, KeyModifiers::NONE), Some(b"\x1b[11~".to_vec()));
+        assert_eq!(key(4, KeyModifiers::NONE), Some(b"\x1b[14~".to_vec()));
+        assert_eq!(key(5, KeyModifiers::NONE), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(key(10, KeyModifiers::NONE), Some(b"\x1b[21~".to_vec()));
+        assert_eq!(key(12, KeyModifiers::NONE), Some(b"\x1b[24~".to_vec()));
+        // Extended function keys continue the same tilde-code numbering.
+        assert_eq!(key(15, KeyModifiers::NONE), Some(b"\x1b[28~".to_vec()));
+        assert_eq!(key(20, KeyModifiers::NONE), Some(b"\x1b[34~".to_vec()));
+        // Modifiers ride in the `;mod` parameter like every other tilde key.
+        assert_eq!(key(10, KeyModifiers::SHIFT), Some(b"\x1b[21;2~".to_vec()));
+        assert_eq!(key(6, KeyModifiers::CONTROL), Some(b"\x1b[17;5~".to_vec()));
+        // Keys past the recognized range are dropped rather than guessed at.
+        assert_eq!(key(21, KeyModifiers::NONE), None);
     }
 
     #[test]

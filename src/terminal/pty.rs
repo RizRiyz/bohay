@@ -617,6 +617,16 @@ impl Pane {
         self.engine.lock().map(|e| e.alt_screen()).unwrap_or(false)
     }
 
+    /// Whether the child enabled application cursor mode (DECCKM). When it has,
+    /// the key encoder sends SS3 (`ESC O` + letter) cursor-key codes so apps
+    /// like `less` that are strict about the mode recognize the keys.
+    pub fn application_cursor(&self) -> bool {
+        self.engine
+            .lock()
+            .map(|e| e.application_cursor())
+            .unwrap_or(false)
+    }
+
     /// `(mouse_report, sgr)` — whether the child tracks the mouse, and whether
     /// it wants SGR-encoded reports. Read together under one lock.
     /// The app's mouse-tracking state, read under **one** engine lock — callers
@@ -641,11 +651,7 @@ impl Pane {
     pub fn host_page_keys(&self) -> bool {
         self.engine
             .lock()
-            .map(|e| {
-                !e.alt_screen()
-                    && !e.mouse_report()
-                    && (!e.application_cursor() || e.bracketed_paste())
-            })
+            .map(|e| !e.alt_screen() && !e.mouse_report() && !e.application_cursor())
             .unwrap_or(false)
     }
 
