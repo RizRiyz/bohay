@@ -9,6 +9,21 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
 
+/// Is this a real `Ctrl` chord, or is it AltGr typing a character?
+///
+/// The Windows console reports AltGr as `CONTROL | ALT` — the layout driver
+/// presses left-Ctrl together with right-Alt — so anything that only asks
+/// `modifiers.contains(CONTROL)` swallows every AltGr character. On the Spanish
+/// layout that is `\ @ # [ ] { } | ~ €`: typing a Windows path into a pane sent
+/// `0x1c` instead of `\`, and `[` sent a bare `ESC`.
+///
+/// Only Windows needs the distinction: X11/macOS terminals deliver an AltGr
+/// character with no modifiers at all, and there `Ctrl+Alt+<key>` really is a
+/// chord the user meant, so it must keep working.
+pub fn is_ctrl_chord(mods: KeyModifiers) -> bool {
+    mods.contains(KeyModifiers::CONTROL) && !(cfg!(windows) && mods.contains(KeyModifiers::ALT))
+}
+
 /// A prefix-mode command — the thing a key triggers after `Ctrl+Space`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cmd {

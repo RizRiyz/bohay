@@ -3,7 +3,7 @@
 //! entry point; the UI overlay and the `search` socket/CLI verb are thin
 //! front-ends over `App::search_all`.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 
 use super::App;
@@ -411,7 +411,7 @@ impl App {
 
     /// Keyboard handling while the overlay owns input.
     pub fn search_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl = super::keys::is_ctrl_chord(key.modifiers); // not AltGr
         match key.code {
             KeyCode::Esc => self.close_search(),
             KeyCode::Enter => self.search_activate(),

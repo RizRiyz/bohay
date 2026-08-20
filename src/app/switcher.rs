@@ -4,7 +4,7 @@
 //! `Tab`) to narrow to one category. Big tap targets on a narrow phone where the
 //! sidebar and tiled panes don't fit, and a fast quick-jump palette on desktop.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app::{App, SwitcherRow, SwitcherScope, SwitcherTarget};
 
@@ -278,7 +278,7 @@ impl App {
                 self.switcher_cursor = 0;
                 self.switcher_scroll = 0;
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if !super::keys::is_ctrl_chord(key.modifiers) => {
                 self.switcher_query.push(c);
                 self.switcher_cursor = 0;
                 self.switcher_scroll = 0;
