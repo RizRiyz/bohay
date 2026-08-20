@@ -440,23 +440,23 @@ fn opencode_base() -> PathBuf {
 
 // ── Claude Code ─────────────────────────────────────────────────────────────
 // Conversations live at `<base>/projects/<encoded-cwd>/<session-uuid>.jsonl`,
-// where the cwd is encoded by replacing every `/` and `.` with `-`.
+// where the cwd is encoded by replacing every character that is not
+// ASCII-alphanumeric with `-`.
 
 pub(crate) fn claude_project_dir(base: &Path, cwd: &Path) -> PathBuf {
     let enc: String = cwd
         .to_string_lossy()
         .chars()
-        .map(|c| {
-            // `:` matters on Windows: Claude itself encodes `C:\Users\me` as
-            // `C--Users-me`, and leaving the colon in also makes `join` treat the
-            // component as a *drive-relative* path, so the lookup silently
-            // escaped `base` and landed next to the process working directory.
-            if matches!(c, '/' | '\\' | '.' | ':') {
-                '-'
-            } else {
-                c
-            }
-        })
+        // Claude collapses *everything* outside `[A-Za-z0-9]`, not just the
+        // separators: spaces, underscores and non-ASCII letters go too, as its
+        // own directories show (`…\ETLS\JV_CO2_ETL_WSC` → `-ETLS-JV-CO2-ETL-WSC`,
+        // `…\Área Interna` → `--rea-Interna`). Encoding only `/ \ . :` kept the
+        // space, so every project whose path has one — on Windows, most of them
+        // — still missed. The colon matters twice over: leaving it in also makes
+        // `join` treat the component as a *drive-relative* path, so the lookup
+        // silently escaped `base` and landed next to the process working
+        // directory.
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     base.join("projects").join(enc)
 }
@@ -1198,6 +1198,32 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Claude collapses every non-alphanumeric character of the cwd, not just
+    /// the separators. Encoding only `/ \ . :` kept the space in `Codigo fuente`
+    /// and no Windows project with a space in its path was ever found.
+    #[test]
+    fn claude_project_dir_encodes_every_non_alphanumeric() {
+        let enc = |cwd: &str| {
+            claude_project_dir(Path::new("/base"), Path::new(cwd))
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(enc(r"C:\Users\me\proj"), "C--Users-me-proj", "drive colon");
+        assert_eq!(
+            enc(r"D:\Users\me\Codigo fuente\Personal"),
+            "D--Users-me-Codigo-fuente-Personal",
+            "the space too"
+        );
+        assert_eq!(
+            enc("/home/me/JV_CO2_ETL"),
+            "-home-me-JV-CO2-ETL",
+            "underscore"
+        );
+        assert_eq!(enc("/home/me/Área"), "-home-me--rea", "non-ASCII letter");
     }
 
     // docs/54 MC-2: sum a Claude transcript's usage into tokens/context/cost.
