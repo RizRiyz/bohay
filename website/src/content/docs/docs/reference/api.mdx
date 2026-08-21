@@ -201,6 +201,10 @@ with `[[bars]]`, then publish structured segments. Luvus validates, caches,
 themes, compresses, and renders them; raw ANSI and arbitrary terminal drawing
 are never accepted.
 
+Start with the [Luvus Bar guide](/docs/guides/bar/) for installation,
+placement, CLI use, and troubleshooting. This section documents the underlying
+socket contract.
+
 | Method | Params | Result |
 |---|---|---|
 | `ui.bar.push` | `{owner?, id, region?, content, compact_content?, priority?}` | `{type:"ok", changed, key}` |

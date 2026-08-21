@@ -73,6 +73,7 @@ export default defineConfig({
           label: 'Guides',
           items: [
             { label: 'Panes, Tabs & Workspaces', slug: 'docs/guides/layout' },
+            { label: 'Luvus Bar', slug: 'docs/guides/bar' },
             { label: 'Working with Agents', slug: 'docs/guides/agents' },
             { label: 'Agents Talking to Agents', slug: 'docs/guides/agent-messaging' },
             { label: 'Control Luvus from Codex', slug: 'docs/guides/codex-plugin' },
