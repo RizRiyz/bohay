@@ -561,5 +561,12 @@ mod tests {
             .expect("urgent state survives when narrow");
         assert_eq!(item.representation, Representation::Compact);
         assert_eq!(candidates[agents].widget.compact_content.len(), 1);
+        assert!(
+            matches!(
+                &candidates[agents].widget.compact_content[0].kind,
+                crate::bar::BarSegmentKind::State { state, .. } if state == "blocked"
+            ),
+            "the most urgent state is the one retained"
+        );
     }
 }

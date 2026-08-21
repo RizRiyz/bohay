@@ -526,6 +526,29 @@ impl App {
         if let Some(menu) = &self.dock_menu {
             return first(&menu.rects);
         }
+        let modal_owns_mouse = self.file_prompt.is_some()
+            || self.file_delete.is_some()
+            || self.worktree_delete.is_some()
+            || self.worktree_prompt.is_some()
+            || self.tab_rename.is_some()
+            || self.ws_rename.is_some()
+            || self.pane_rename.is_some();
+        if modal_owns_mouse {
+            return [self.modal_commit_rect, self.modal_cancel_rect]
+                .into_iter()
+                .flatten()
+                .find(|rect| hit(*rect));
+        }
+
+        if self.switcher {
+            return self
+                .switcher_rects
+                .iter()
+                .map(|(_, rect)| *rect)
+                .chain(self.switcher_scope_rects.iter().map(|(_, rect)| *rect))
+                .find(|rect| hit(*rect));
+        }
+
         if let Some(popup) = self.bar.overflow.as_ref() {
             return hit(popup.rect).then_some(popup.rect);
         }
@@ -538,23 +561,6 @@ impl App {
             .find(|rect| hit(*rect))
         {
             return Some(rect);
-        }
-
-        let modal = [self.modal_commit_rect, self.modal_cancel_rect]
-            .into_iter()
-            .flatten()
-            .find(|rect| hit(*rect));
-        if modal.is_some() {
-            return modal;
-        }
-
-        if self.switcher {
-            return self
-                .switcher_rects
-                .iter()
-                .map(|(_, rect)| *rect)
-                .chain(self.switcher_scope_rects.iter().map(|(_, rect)| *rect))
-                .find(|rect| hit(*rect));
         }
 
         self.file_tree_rects
@@ -787,14 +793,6 @@ impl App {
             }
             return;
         }
-        // Bar actions and the read-only overflow popup own their rendered
-        // rectangles. An open popup consumes the next click, closing when it is
-        // outside, so input never falls through to a pane behind it.
-        let bar_press = matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
-            || (self.bar.overflow.is_some() && matches!(m.kind, MouseEventKind::Down(_)));
-        if bar_press && self.bar_click(m.column, m.row) {
-            return;
-        }
         if self.file_prompt.is_some() {
             if let Some(k) = self.modal_button_key(&m) {
                 self.file_prompt_key(k);
@@ -857,6 +855,16 @@ impl App {
             if let Some(k) = self.modal_button_key(&m) {
                 self.handle_pane_rename_key(k);
             }
+            return;
+        }
+        // Bar actions and the read-only overflow popup own their rendered
+        // rectangles. This sits below every modal guard: while a modal is open,
+        // it owns the screen and a click must never invoke a hidden bar action.
+        // An open overflow popup still consumes the next click, closing when it
+        // is outside, so input never falls through to a pane behind it.
+        let bar_press = matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+            || (self.bar.overflow.is_some() && matches!(m.kind, MouseEventKind::Down(_)));
+        if bar_press && self.bar_click(m.column, m.row) {
             return;
         }
         // Track which divider (if any) the cursor is over, for the hover
@@ -2536,6 +2544,21 @@ fn csi_tilde_key(code: u8, modifiers: KeyModifiers) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_modal_suppresses_hover_from_covered_bar_geometry() {
+        let _env = crate::persist::test_env("modal-bar-hover");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.worktree_prompt = Some(String::new());
+        app.bar.overflow = Some(crate::bar::OverflowPopup {
+            region: crate::bar::BarRegion::BottomRight,
+            keys: vec![crate::bar::CORE_RUNTIME.to_string()],
+            rect: Rect::new(60, 20, 10, 3),
+        });
+
+        assert!(app.rendered_hover_rect(Some((61, 21))).is_none());
+    }
 
     /// A resize event forces the next frame to be a full repaint, so a terminal
     /// damaged by a window move/resize/expose heals instead of keeping stale cells

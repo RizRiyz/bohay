@@ -79,7 +79,12 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     // Preserve one active tab plus the fixed arrows/new-tab allowance, then let
     // Luvus Bar use the remaining lane up to its 100-column cap. Extra tabs use
     // the existing scroll window before bar content is compressed.
-    let fixed = tog_w.saturating_add(right_tog_w).saturating_add(7);
+    const ARROW: u16 = 2;
+    const PLUS: u16 = 3;
+    const NAV_RESERVE: u16 = PLUS + 2 * ARROW;
+    let fixed = tog_w
+        .saturating_add(right_tog_w)
+        .saturating_add(NAV_RESERVE);
     let flex = area.width.saturating_sub(fixed);
     let top_budget = flex
         .saturating_sub(crate::bar::MIN_TOP_TAB_FLEX_WIDTH)
@@ -132,8 +137,6 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     const PAD: u16 = 2; // one blank column each side of the label
     const CLOSE: u16 = 2; // the `✕ ` slot, reserved on every tab
     const GAP: u16 = 1;
-    const ARROW: u16 = 2;
-    let plus_w: u16 = 3;
     let left = area.x + 1 + tog_w;
     let right = area
         .right()
@@ -157,11 +160,11 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     };
 
     // Do all tabs fit without scroll arrows (leaving room for the "+")?
-    let need_scroll = strip(0, n) > total.saturating_sub(plus_w);
+    let need_scroll = strip(0, n) > total.saturating_sub(PLUS);
     let avail = if need_scroll {
-        total.saturating_sub(plus_w + 2 * ARROW)
+        total.saturating_sub(PLUS + 2 * ARROW)
     } else {
-        total.saturating_sub(plus_w)
+        total.saturating_sub(PLUS)
     };
     // Scroll the window so the active tab stays visible: pack leftward from the
     // active tab, then spend whatever room is left extending to the right. With
@@ -245,8 +248,8 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     }
 
     // "+" new-tab button (clickable; index == tab count).
-    if x + plus_w <= right {
-        let rect = Rect::new(x, area.y, plus_w, 1);
+    if x + PLUS <= right {
+        let rect = Rect::new(x, area.y, PLUS, 1);
         f.render_widget(
             Paragraph::new(Span::styled(
                 " + ",

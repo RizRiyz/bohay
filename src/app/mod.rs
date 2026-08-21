@@ -5179,6 +5179,33 @@ mod tests {
     }
 
     #[test]
+    fn text_modal_swallowing_a_click_does_not_close_bar_overflow() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let _env = crate::persist::test_env("modal-before-bar");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.worktree_prompt = Some(String::new());
+        app.bar.overflow = Some(crate::bar::OverflowPopup {
+            region: crate::bar::BarRegion::BottomRight,
+            keys: vec![crate::bar::CORE_RUNTIME.to_string()],
+            rect: Rect::new(60, 20, 10, 3),
+        });
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+
+        assert!(app.worktree_prompt.is_some());
+        assert!(
+            app.bar.overflow.is_some(),
+            "the modal owns the click before hidden bar hit targets"
+        );
+    }
+
+    #[test]
     fn close_tab_removes_it_and_its_panes() {
         let _env = crate::persist::test_env("close-tab");
         let (tx, _rx) = std::sync::mpsc::channel();

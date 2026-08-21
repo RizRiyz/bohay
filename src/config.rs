@@ -138,6 +138,35 @@ impl BarConfig {
         }
     }
 
+    /// Whether `key` already has exactly this persisted placement.
+    ///
+    /// This deliberately differs from [`Self::region_for`]: an undeclared
+    /// preference can currently resolve to the requested fallback, but the
+    /// first explicit move still needs to be saved so a later module-default
+    /// change does not move the user's bar.
+    pub fn is_explicitly_placed(&self, key: &str, region: Option<crate::bar::BarRegion>) -> bool {
+        let top = self
+            .top_right
+            .iter()
+            .filter(|candidate| candidate.as_str() == key)
+            .count();
+        let bottom = self
+            .bottom_right
+            .iter()
+            .filter(|candidate| candidate.as_str() == key)
+            .count();
+        let off = self
+            .off
+            .iter()
+            .filter(|candidate| candidate.as_str() == key)
+            .count();
+        match region {
+            Some(crate::bar::BarRegion::TopRight) => top == 1 && bottom == 0 && off == 0,
+            Some(crate::bar::BarRegion::BottomRight) => top == 0 && bottom == 1 && off == 0,
+            None => top == 0 && bottom == 0 && off == 1,
+        }
+    }
+
     pub fn place(&mut self, key: &str, region: Option<crate::bar::BarRegion>) {
         self.top_right.retain(|candidate| candidate != key);
         self.bottom_right.retain(|candidate| candidate != key);
@@ -532,5 +561,32 @@ mod tests {
         assert_eq!(back.theme, "mono");
         assert!(back.notifications.sound_on_done);
         assert!(!back.notifications.sound_on_blocked);
+    }
+
+    #[test]
+    fn explicit_bar_placement_is_distinct_from_a_default_fallback() {
+        let mut bars = BarConfig {
+            top_right: Vec::new(),
+            bottom_right: Vec::new(),
+            off: Vec::new(),
+        };
+        let key = "you.ci:status";
+
+        assert_eq!(
+            bars.region_for(key, crate::bar::BarRegion::TopRight),
+            Some(crate::bar::BarRegion::TopRight)
+        );
+        assert!(
+            !bars.is_explicitly_placed(key, Some(crate::bar::BarRegion::TopRight)),
+            "an effective default is not yet a persisted user preference"
+        );
+
+        bars.place(key, Some(crate::bar::BarRegion::TopRight));
+        assert!(bars.is_explicitly_placed(key, Some(crate::bar::BarRegion::TopRight)));
+
+        // A malformed duplicate is not treated as idempotent: the next place
+        // operation should be allowed to normalize it back to one entry.
+        bars.top_right.push(key.to_string());
+        assert!(!bars.is_explicitly_placed(key, Some(crate::bar::BarRegion::TopRight)));
     }
 }

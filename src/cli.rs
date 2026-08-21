@@ -164,7 +164,7 @@ search:
 bars:
   bar list                   list declared Luvus Bar widgets and live content
   bar push --id <id> [--region top-right|bottom-right] --content <json>
-                             publish validated persistent widget segments;
+                             publish validated live widget segments;
                              --content-file, --compact-content, --text and --state supported
   bar move --id <id> --region top-right|bottom-right|off
   bar remove --id <id>       clear live widget content, preserving placement

@@ -13,6 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 pub const CORE_RUNTIME: &str = "core:runtime-status";
 pub const CORE_AGENTS: &str = "core:agent-summary";
+pub const UNOWNED_NOTIFICATION_OWNER: &str = "core-notification";
 pub const MAX_WIDGETS: usize = 64;
 pub const MAX_WIDGETS_PER_MODULE: usize = 16;
 pub const MAX_SEGMENTS: usize = 16;
@@ -500,7 +501,7 @@ impl BarState {
         self.next_notification = self.next_notification.wrapping_add(1);
         let widget = BarWidget::new(
             BarWidgetKey::new(
-                owner.as_deref().unwrap_or("core-notification"),
+                owner.as_deref().unwrap_or(UNOWNED_NOTIFICATION_OWNER),
                 id.to_string(),
             ),
             BarRegion::BottomRight,
@@ -779,7 +780,7 @@ impl crate::app::App {
         let Some(hit) = self.bar.hits.iter().find(|hit| hit_rect(hit.rect)).cloned() else {
             return false;
         };
-        if hit.key.owner == "core" || hit.key.owner == "core-notification" {
+        if hit.key.owner == "core" || hit.key.owner == UNOWNED_NOTIFICATION_OWNER {
             return true;
         }
         let mut extra = vec![
@@ -917,8 +918,9 @@ fn lower_priority(
         let new_priority = survival_priority(new);
         let old_priority = survival_priority(old);
         new_priority < old_priority
-            || (new_priority == old_priority
-                && (index > current || (index == current && new.key > old.key)))
+            // Equal priority: the later candidate is compacted/hidden first,
+            // preserving stable survival order for a fixed candidate list.
+            || (new_priority == old_priority && index > current)
     })
 }
 

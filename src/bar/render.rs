@@ -48,9 +48,7 @@ pub fn draw_region(
                 rect,
                 segment,
                 spinner,
-                candidate.widget.key.owner == "core"
-                    && candidate.widget.key.id == "runtime-status"
-                    && segment_index == 0,
+                candidate.key == super::CORE_RUNTIME && segment_index == 0,
                 t,
             );
             if let Some(action) = segment.action.as_ref() {

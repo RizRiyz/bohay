@@ -1472,11 +1472,14 @@ impl App {
                         ))
                     }
                 };
-                self.config.bars.place(&declaration.key.canonical(), region);
-                crate::config::save(&self.config);
-                self.bar.clear_geometry();
+                let key = declaration.key.canonical();
+                if !self.config.bars.is_explicitly_placed(&key, region) {
+                    self.config.bars.place(&key, region);
+                    crate::config::save(&self.config);
+                    self.bar.clear_geometry();
+                }
                 Ok(
-                    json!({"type":"ok","key":declaration.key.canonical(),"region":region.map(crate::bar::BarRegion::as_str)}),
+                    json!({"type":"ok","key":key,"region":region.map(crate::bar::BarRegion::as_str)}),
                 )
             }
             "ui.bar.remove" => {
@@ -1501,15 +1504,20 @@ impl App {
                 let action = opt_str(p, "action");
                 if let Some(owner) = owner.as_deref() {
                     validate_bar_action(self, owner, action.as_deref())?;
-                    self.bar
-                        .allow_push(owner, Instant::now())
-                        .map_err(|error| ("rate_limited".into(), error))?;
                 } else if action.is_some() {
                     return Err((
                         "invalid_request".into(),
                         "an actionable notification requires its module owner".into(),
                     ));
                 }
+                self.bar
+                    .allow_push(
+                        owner
+                            .as_deref()
+                            .unwrap_or(crate::bar::UNOWNED_NOTIFICATION_OWNER),
+                        Instant::now(),
+                    )
+                    .map_err(|error| ("rate_limited".into(), error))?;
                 let ttl_ms = match p.get("ttl_ms") {
                     None => 4_000,
                     Some(value) => value.as_u64().ok_or_else(|| {
@@ -2670,8 +2678,35 @@ command = ["true"]
                 .region_for("you.ci:status", crate::bar::BarRegion::TopRight),
             Some(crate::bar::BarRegion::BottomRight)
         );
+        app.config.bars.bottom_right.push("other:widget".into());
+        let order = app.config.bars.bottom_right.clone();
+        app.dispatch(
+            "ui.bar.move",
+            &json!({"owner":"you.ci","id":"status","region":"bottom-right"}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.config.bars.bottom_right, order,
+            "an identical move must not rewrite or reorder persisted placement"
+        );
         app.module_set_enabled("you.ci", false).unwrap();
         assert!(!app.bar.widgets.contains_key("you.ci:status"));
+    }
+
+    #[test]
+    fn unowned_notifications_share_the_same_rate_limit() {
+        let _env = crate::persist::test_env("anonymous-notification-rate");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let request = json!({"text":"build finished"});
+
+        for _ in 0..30 {
+            app.dispatch("ui.notification.push", &request).unwrap();
+        }
+        let error = app
+            .dispatch("ui.notification.push", &request)
+            .expect_err("the shared anonymous bucket must be bounded");
+        assert_eq!(error.0, "rate_limited");
     }
 
     #[test]

@@ -284,7 +284,7 @@ fn draw_content(
                 }
                 if i == bar_start {
                     vis.push(V::Blank);
-                    vis.push(V::Divider("Luvus Bar"));
+                    vis.push(V::Divider(cat.tab_luvus_bar));
                 }
                 vis.push(V::Ctl(i));
             }
@@ -1219,6 +1219,7 @@ fn bar_row(
         declaration.region
     });
     let region = app.config.bars.region_for(key, fallback);
+    let cat = app.catalog;
     f.render_widget(
         Paragraph::new(Span::styled(
             format!("  {title}"),
@@ -1227,13 +1228,17 @@ fn bar_row(
         row,
     );
     let buttons = [
-        (" Top ", -1, region == Some(crate::bar::BarRegion::TopRight)),
         (
-            " Bottom ",
+            format!(" {} ", cat.side_top),
+            -1,
+            region == Some(crate::bar::BarRegion::TopRight),
+        ),
+        (
+            format!(" {} ", cat.side_bottom),
             1,
             region == Some(crate::bar::BarRegion::BottomRight),
         ),
-        (" Off ", 2, region.is_none()),
+        (format!(" {} ", cat.side_off), 2, region.is_none()),
     ];
     let total = buttons
         .iter()
@@ -1242,7 +1247,7 @@ fn bar_row(
         .saturating_sub(1);
     let mut x = row.right().saturating_sub(total + 2);
     for (label, delta, active) in buttons {
-        let width = display_width(label) as u16;
+        let width = display_width(&label) as u16;
         let rect = Rect::new(x, y, width, 1);
         let style = if active {
             Style::new().fg(t.crust).bg(t.accent).bold()
