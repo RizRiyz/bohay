@@ -354,9 +354,15 @@ pub fn run() -> Result<()> {
             activity = true;
             foreground_activity = true;
         }
+        if app.tick_bar_notifications(now) {
+            activity = true;
+            foreground_activity = true;
+        }
         // Animate the sidebar spinner while any agent is working: advance the
         // frame and mark dirty so the diff sends only the changed dot cell.
-        if last_spin.elapsed() >= SPIN_INTERVAL && app.any_working() {
+        if last_spin.elapsed() >= SPIN_INTERVAL
+            && (app.any_working() || app.bar.has_visible_working(&app.config.bars, app.compact))
+        {
             app.spinner = app.spinner.wrapping_add(1);
             last_spin = Instant::now();
             dirty = true;

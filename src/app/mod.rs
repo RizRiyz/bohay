@@ -1218,6 +1218,9 @@ pub struct App {
     pub module_docks: std::collections::HashMap<String, ModuleDock>,
     /// Clickable rows of module docks this frame: (dock id, row index, rect).
     pub module_dock_rects: Vec<(String, usize, Rect)>,
+    /// Server-owned Luvus Bar registry, notifications, and active-attachment
+    /// hit geometry. Rendering representations remain viewport-local.
+    pub bar: crate::bar::BarState,
     pub zoomed: bool,
     pub should_quit: bool,
     /// True when this `App` is owned by the background server. A server session
@@ -1506,6 +1509,9 @@ pub struct App {
     /// Rebuilt each frame from the rows actually on screen, so scrolling a link
     /// out of view takes its click target with it.
     pub changelog_link_rects: Vec<(Rect, String)>,
+    /// Copyable installer/update command rows at the top of the changelog modal.
+    /// Each hit stores the exact untruncated command written to the clipboard.
+    pub changelog_copy_rects: Vec<(Rect, String)>,
     /// Cached display rows for the changelog modal, keyed by `(body width, theme
     /// name)`. Flattening the notes into wrapped, styled rows allocates, and the
     /// modal redraws every frame — so it is built once per open and reused until
@@ -1555,6 +1561,9 @@ impl App {
         let shell = crate::platform::resolve_shell(&config.shell);
         let keymap = keys::build_keymap(&config.keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
+        let modules = crate::module::registry::load();
+        let mut bar = crate::bar::BarState::default();
+        bar.sync_modules(&modules);
 
         let id = PaneId::alloc();
         let pane = Pane::spawn(
@@ -1622,6 +1631,7 @@ impl App {
             sidebars,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
+            bar,
             zoomed: false,
             should_quit: false,
             server_mode: false,
@@ -1757,6 +1767,7 @@ impl App {
             changelog_close_rect: None,
             changelog_check_rect: None,
             changelog_link_rects: Vec::new(),
+            changelog_copy_rects: Vec::new(),
             changelog_rows: None,
             settings_icon_rect: None,
             settings_close_rect: None,
@@ -1764,7 +1775,7 @@ impl App {
             settings_tab_rects: Vec::new(),
             settings_ctl_rects: Vec::new(),
             settings_arrow_rects: Vec::new(),
-            modules: crate::module::registry::load(),
+            modules,
             module_logs: Vec::new(),
             module_panes: HashMap::new(),
             module_startup_done: std::collections::HashSet::new(),
@@ -1773,6 +1784,7 @@ impl App {
         // A fresh start still loads `orch.json` — its pane bindings belong to a
         // previous server run, so rebind/clear them (same as `from_snapshot`).
         app.orch_reconcile();
+        app.refresh_core_bar_widgets();
         Ok(app)
     }
 
@@ -2006,6 +2018,8 @@ impl App {
         let theme = crate::ui::theme::by_name(&config.theme);
         let catalog = crate::i18n::by_code(&config.language);
         let sidebars = Sidebars::from_config(&config.sidebars());
+        let mut bar = crate::bar::BarState::default();
+        bar.sync_modules(&modules);
         // Restore live pane names, minus any whose pane failed to come back.
         let agent_names: HashMap<String, PaneId> = restored_names
             .into_iter()
@@ -2052,6 +2066,7 @@ impl App {
             sidebars,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
+            bar,
             zoomed: false,
             should_quit: false,
             server_mode: false,
@@ -2187,6 +2202,7 @@ impl App {
             changelog_close_rect: None,
             changelog_check_rect: None,
             changelog_link_rects: Vec::new(),
+            changelog_copy_rects: Vec::new(),
             changelog_rows: None,
             settings_icon_rect: None,
             settings_close_rect: None,
@@ -2204,6 +2220,7 @@ impl App {
         // the previous server are stale — rebind them to the restored panes (by
         // worktree cwd) or clear them, so the board never lies (docs/22).
         app.orch_reconcile();
+        app.refresh_core_bar_widgets();
         Some(app)
     }
 
@@ -4453,6 +4470,13 @@ impl App {
     /// split's border/gap stays grabbable. It never reaches into the sidebar body,
     /// where dock rows own the width, so it can't steal a workspace/agent click.
     fn sidebar_seam_at(&self, c: u16, r: u16) -> Option<Side> {
+        // The seam spans the full frame visually, but only the pane lane is a
+        // resize target. The tab and status rows own their cells; in particular,
+        // an overflowing tab strip places its left navigation arrow directly on
+        // the left seam column.
+        if r < self.last_pane_area.y || r >= self.last_pane_area.bottom() {
+            return None;
+        }
         for (seam, side) in [(self.left_seam, Side::Left), (self.right_seam, Side::Right)] {
             let Some(seam) = seam else { continue };
             if r < seam.y || r >= seam.bottom() {
@@ -8415,6 +8439,9 @@ mod tests {
         // Language tab was previously clipped off the right edge).
         let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let modal = app.settings_modal_rect.expect("settings modal is rendered");
+        assert_eq!(modal.height, 28, "the taller modal uses the available room");
+        assert!(modal.width <= 120 && modal.right() <= 120);
         assert_eq!(
             app.settings_tab_rects.len(),
             7,
@@ -8426,6 +8453,13 @@ mod tests {
                 .any(|(t, _)| *t == SettingsTab::Language),
             "the Language tab is present"
         );
+
+        // Small terminals still clamp the enlarged modal to the viewport.
+        let mut narrow = Terminal::new(TestBackend::new(32, 12)).unwrap();
+        narrow.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let modal = app.settings_modal_rect.expect("narrow settings modal");
+        assert!(modal.width <= 32 && modal.height <= 12);
+        assert!(modal.right() <= 32 && modal.bottom() <= 12);
     }
 
     #[test]

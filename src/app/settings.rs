@@ -94,6 +94,7 @@ pub enum LayoutRow {
     RightVisible,
     RightWidth,
     Dock(DockKind),
+    Bar(String),
 }
 
 /// A selectable row in the General tab: the app-wide preferences that are not
@@ -170,7 +171,24 @@ impl App {
         for k in self.available_docks() {
             v.push(LayoutRow::Dock(k));
         }
+        for key in self.bar_setting_keys() {
+            v.push(LayoutRow::Bar(key));
+        }
         v
+    }
+
+    fn bar_setting_keys(&self) -> Vec<String> {
+        // Settings rows describe declarations, not their placement. Keeping
+        // this order stable prevents a Top/Bottom click from moving the row
+        // under the pointer while the user is arranging widgets.
+        self.bar.declarations.keys().cloned().collect()
+    }
+
+    pub fn bar_section_start(&self) -> usize {
+        self.layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::Bar(_)))
+            .unwrap_or(usize::MAX)
     }
 
     /// Index of the first dock-section row (where the `── Docks ──` divider goes).
@@ -348,6 +366,7 @@ impl App {
                     Some(LayoutRow::SidebarWidth)
                         | Some(LayoutRow::RightWidth)
                         | Some(LayoutRow::Dock(_))
+                        | Some(LayoutRow::Bar(_))
                 ),
                 // The file-open chooser only moves via its `‹ ›` arrows.
                 Some(SettingsTab::General) => {
@@ -737,6 +756,27 @@ impl App {
                     self.unmount_dock(&kind);
                 }
             }
+            LayoutRow::Bar(key) => {
+                let region = if delta < 0 {
+                    Some(crate::bar::BarRegion::TopRight)
+                } else if delta == 1 {
+                    Some(crate::bar::BarRegion::BottomRight)
+                } else {
+                    None
+                };
+                self.config.bars.place(&key, region);
+                self.bar.clear_geometry();
+                config::save(&self.config);
+                if let Some(next) = self
+                    .layout_rows()
+                    .iter()
+                    .position(|row| matches!(row, LayoutRow::Bar(candidate) if candidate == &key))
+                {
+                    if let Some(settings) = self.settings.as_mut() {
+                        settings.cursor = next;
+                    }
+                }
+            }
         }
     }
 
@@ -766,6 +806,32 @@ impl App {
                     // Both full: the dock can't be placed, so cycling leaves it off.
                 }
             },
+            Some(LayoutRow::Bar(key)) => {
+                let fallback = self
+                    .bar
+                    .declaration(&key)
+                    .map(|declaration| declaration.region)
+                    .unwrap_or(crate::bar::BarRegion::BottomRight);
+                let next = match self.config.bars.region_for(&key, fallback) {
+                    Some(crate::bar::BarRegion::TopRight) => {
+                        Some(crate::bar::BarRegion::BottomRight)
+                    }
+                    Some(crate::bar::BarRegion::BottomRight) => None,
+                    None => Some(crate::bar::BarRegion::TopRight),
+                };
+                self.config.bars.place(&key, next);
+                self.bar.clear_geometry();
+                config::save(&self.config);
+                if let Some(cursor) = self
+                    .layout_rows()
+                    .iter()
+                    .position(|row| matches!(row, LayoutRow::Bar(candidate) if candidate == &key))
+                {
+                    if let Some(settings) = self.settings.as_mut() {
+                        settings.cursor = cursor;
+                    }
+                }
+            }
             _ => self.adjust_layout(cursor, 1),
         }
     }
@@ -925,6 +991,32 @@ fn lang_cursor(code: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bar_settings_rows_stay_stable_when_placement_changes() {
+        let _env = crate::persist::test_env("bar-settings-stable");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let declaration = crate::bar::BarDeclaration {
+            key: crate::bar::BarWidgetKey::new("example", "ci"),
+            title: "CI status".into(),
+            region: crate::bar::BarRegion::TopRight,
+            priority: 50,
+        };
+        app.bar
+            .declarations
+            .insert(declaration.key.canonical(), declaration);
+        let expected = app.bar_setting_keys();
+
+        for region in [
+            Some(crate::bar::BarRegion::TopRight),
+            Some(crate::bar::BarRegion::BottomRight),
+            None,
+        ] {
+            app.config.bars.place("example:ci", region);
+            assert_eq!(app.bar_setting_keys(), expected);
+        }
+    }
 
     /// The docs/62 switch: whether resume replays each agent's own CLI options,
     /// or falls back to the plain resume command luvus used before the feature.

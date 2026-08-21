@@ -145,9 +145,13 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let settings_ctl_rects = std::mem::take(&mut app.settings_ctl_rects);
     let settings_arrow_rects = std::mem::take(&mut app.settings_arrow_rects);
     let changelog_link_rects = std::mem::take(&mut app.changelog_link_rects);
+    let changelog_copy_rects = std::mem::take(&mut app.changelog_copy_rects);
     let switcher_rects = std::mem::take(&mut app.switcher_rects);
     let switcher_scope_rects = std::mem::take(&mut app.switcher_scope_rects);
     let mission_rows = std::mem::take(&mut app.mission_rows);
+    let bar_hits = std::mem::take(&mut app.bar.hits);
+    let bar_overflow_hits = std::mem::take(&mut app.bar.overflow_hits);
+    let bar_overflow = app.bar.overflow.clone();
     let search_rects = app
         .search
         .as_mut()
@@ -251,9 +255,13 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.settings_ctl_rects = settings_ctl_rects;
     app.settings_arrow_rects = settings_arrow_rects;
     app.changelog_link_rects = changelog_link_rects;
+    app.changelog_copy_rects = changelog_copy_rects;
     app.switcher_rects = switcher_rects;
     app.switcher_scope_rects = switcher_scope_rects;
     app.mission_rows = mission_rows;
+    app.bar.hits = bar_hits;
+    app.bar.overflow_hits = bar_overflow_hits;
+    app.bar.overflow = bar_overflow;
     if let (Some(rects), Some(search)) = (search_rects, app.search.as_mut()) {
         search.rects = rects;
     }
@@ -319,6 +327,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let cat = app.catalog;
     let area = f.area();
     f.render_widget(Block::new().style(Style::new().bg(t.mantle)), area);
+    app.bar.hits.clear();
+    app.bar.overflow_hits.clear();
 
     // An absurdly small window can't hold the chrome — say so instead of
     // drawing degraded fragments. (Every draw fn is underflow-safe regardless;
@@ -358,6 +368,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // it can also drop the bottom status bar (a dense, keyboard-oriented row that
     // just eats space on a phone) and give that row back to the content.
     app.compact = area.width < app.config.layout.compact_width;
+    app.refresh_core_bar_widgets();
     let status_h = if app.compact { 0 } else { 1 };
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(status_h)]).areas(area);
@@ -583,6 +594,10 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         };
     status::draw_status(f, status, app, &t);
 
+    // Read-only overflow is attachment-local geometry over server-owned bar
+    // content. Draw it above chrome and panes, below modal workflows.
+    crate::bar::render::draw_overflow(f, area, &mut app.bar, &t);
+
     // The Settings modal draws last, on top of everything, and owns the cursor.
     let settings_hits = app
         .settings
@@ -625,6 +640,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.changelog_close_rect = None;
         app.changelog_check_rect = None;
         app.changelog_link_rects.clear();
+        app.changelog_copy_rects.clear();
     }
     // The running-command overlay (click a pane title) draws above that.
     if let Some(c) = app.cmd_inspect.as_ref() {
@@ -763,6 +779,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
 
     let cursor = if settings_hits.is_some()
         || picker_open
+        || app.bar.overflow.is_some()
         || app.help_open
         || app.worktree_prompt.is_some()
         || app.tab_rename.is_some()
@@ -854,7 +871,7 @@ pub(super) fn hint_line(pairs: &[(&str, &str)], t: &Theme) -> Line<'static> {
 /// Display width of `s` in terminal columns (CJK = 2 cells, etc.). Fixed-width
 /// chrome must measure with this, not `chars().count()`, so translated/CJK labels
 /// align (docs/21).
-pub(super) fn display_width(s: &str) -> usize {
+pub(crate) fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     s.width()
 }
@@ -863,7 +880,7 @@ pub(super) fn display_width(s: &str) -> usize {
 /// fit. Width-aware like `display_width` (a CJK glyph counts as two, and is never
 /// split), so a narrowed sidebar clips long node/agent/branch names gracefully
 /// instead of hard-cutting mid-glyph (docs/29).
-pub(super) fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
@@ -998,5 +1015,39 @@ fn short_path(p: &Path, max: u16) -> String {
         format!("…{tail}")
     } else {
         s
+    }
+}
+
+#[cfg(test)]
+mod bar_projection_tests {
+    use super::*;
+
+    #[test]
+    fn secondary_viewport_preserves_active_bar_geometry_and_popup() {
+        let _env = crate::persist::test_env("bar-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let hit = crate::bar::BarHit {
+            key: crate::bar::BarWidgetKey::new("module", "status"),
+            segment: 0,
+            rect: Rect::new(90, 29, 4, 1),
+            action: "open".into(),
+            value: Some("active".into()),
+        };
+        app.bar.hits = vec![hit.clone()];
+        app.bar.overflow = Some(crate::bar::OverflowPopup {
+            region: crate::bar::BarRegion::BottomRight,
+            keys: vec!["module:hidden".into()],
+            rect: Rect::new(70, 20, 24, 6),
+        });
+        let expected_popup = app.bar.overflow.as_ref().unwrap().rect;
+
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+        render_projection(&mut target, &mut app);
+
+        assert_eq!(app.bar.hits, vec![hit]);
+        assert_eq!(app.bar.overflow.as_ref().unwrap().rect, expected_popup);
     }
 }

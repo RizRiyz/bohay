@@ -49,7 +49,7 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
-| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` |
+| ui / server | `ui.sidebar` · `ui.dock.push` · `ui.dock.list` · `ui.dock.move` · `ui.bar.push` · `ui.bar.list` · `ui.bar.move` · `ui.bar.remove` · `ui.notification.push` · `ui.notification.clear` · `ui.toast` · `ping` · `server.stop` · `events.subscribe` |
 
 Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
@@ -192,6 +192,73 @@ also set `LUVUS_MODULE_ACTION_ID`, so one script can handle the whole menu.
 
 The CLI wrappers are `luvus ui dock push|list|move` (`push` also reads its rows
 from stdin).
+
+## Luvus Bar
+
+Luvus Bar is the bounded single-row extension surface beside tabs and between
+the fixed bottom guidance and version control. Modules declare widget ownership
+with `[[bars]]`, then publish structured segments. Luvus validates, caches,
+themes, compresses, and renders them; raw ANSI and arbitrary terminal drawing
+are never accepted.
+
+| Method | Params | Result |
+|---|---|---|
+| `ui.bar.push` | `{owner?, id, region?, content, compact_content?, priority?}` | `{type:"ok", changed, key}` |
+| `ui.bar.list` | `{}` | `{type:"bar_list", widgets:[...]}` |
+| `ui.bar.move` | `{owner?, id, region:"top-right"\|"bottom-right"\|"off"}` | `{type:"ok", key, region}` |
+| `ui.bar.remove` | `{owner?, id}` | `{type:"ok", removed}` |
+| `ui.notification.push` | `{owner?, text, level?, ttl_ms?, action?, value?, dedupe_key?}` | `{type:"ok"}` |
+| `ui.notification.clear` | `{owner?, dedupe_key?}` | `{type:"ok", removed}` |
+
+`owner` is injected automatically as `$LUVUS_MODULE_ID` when a module calls the
+CLI. A raw client may omit it only when the local widget id resolves
+unambiguously. `push` atomically replaces a widget's complete live content;
+invalid input leaves the previous valid value intact. `remove` clears only live
+content, while `move` persists presentation. Disabling, unlinking, or
+uninstalling a module clears its widgets and notifications.
+
+`content` and `compact_content` are arrays of these tagged segment shapes:
+
+```json
+[
+  {"type":"text", "text":"CI", "tone":"muted"},
+  {"type":"symbol", "symbol":"✓", "tone":"success"},
+  {"type":"state", "state":"done", "label":"passing"},
+  {"type":"badge", "text":"2", "tone":"error",
+   "action":"details", "value":"run-1842"},
+  {"type":"progress", "value":3, "total":7, "width":8},
+  {"type":"spacer", "width":1},
+  {"type":"separator"}
+]
+```
+
+Tones are `normal`, `muted`, `accent`, `success`, `warning`, and `error`.
+States are `blocked`, `working`, `done`, `idle`, and `unknown`. An action must
+belong to the widget's enabled module. Clicks expose
+`LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and optional
+`LUVUS_MODULE_BAR_VALUE` to that action.
+
+Limits are intentionally small: 16 segments and 256 display columns per
+widget, 16 live widgets per module, 64 live widgets globally, and 30 updates per
+module per second. Text/value fields are capped at 256 bytes and reject control
+characters. Notification TTL is clamped to 500–60,000 ms, the queue is capped
+at 32, and a matching `(owner, dedupe_key)` replaces the older notification.
+Top and Bottom rendering are each capped at 100 display columns for the region
+and 100 for one widget. The current viewport may provide less because tabs,
+tab navigation, shortcut guidance, and the fixed version retain their protected
+space. Extra inactive tabs use the existing tab-scroll window.
+
+The equivalent wrappers are:
+
+```sh
+luvus ui bar list
+luvus ui bar push --id status --region top-right --content '[{"type":"text","text":"CI"}]'
+luvus ui bar push --id status --content-file ./bar.json
+luvus ui bar move --id status --region bottom-right
+luvus ui bar remove --id status
+luvus ui notification push --text "CI passed" --level success --ttl-ms 4000
+luvus ui notification clear --dedupe-key ci-main
+```
 
 ## The event stream
 

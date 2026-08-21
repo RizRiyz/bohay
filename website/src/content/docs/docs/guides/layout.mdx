@@ -146,6 +146,35 @@ running agents, while *All* also lists the resumable sessions luvus found on dis
 one to reopen it). See [Working with Agents](/docs/guides/agents/).
 :::
 
+## Luvus Bar
+
+Luvus Bar lets built-ins and modules use the otherwise flexible space beside
+the tabs and in the middle of the bottom status row. It never adds a row or
+changes pane/PTY dimensions. Tabs, sidebar toggles, the left prefix guidance,
+and the clickable version always keep priority.
+
+Arrange declared widgets in **Settings → Layout → Luvus Bar**:
+
+- **Top** places a compact widget beside the tabs.
+- **Bottom** places it between the fixed shortcut hint and version.
+- **Off** hides it without deleting module state or its placement declaration.
+
+The declaration rows stay in a stable order while you change placement, so the
+selected widget does not jump under the pointer.
+
+The built-in **Runtime status** widget shows `NORMAL · 1 pane · tab 2/4` in
+Bottom by default and can be moved or hidden. At narrow widths, widgets use
+their compact content and then move into a read-only `… +N` overflow popup;
+they never overlap navigation. See [Writing a Module](/docs/extend/writing-modules/#bars-compact-chrome-widgets)
+for creating custom widgets.
+
+Both Top and Bottom are capped at 100 display columns. They may be narrower when
+the viewport has less room: Top reserves the active tab, scroll arrows, and
+new-tab button, while Bottom reserves the fixed shortcut guidance and version.
+Extra tabs enter their existing scroll window. A single widget may use all 100
+columns when its region has room. These are terminal columns rather than
+Unicode character counts; wide glyphs such as CJK and many emoji consume two.
+
 ## Selecting text
 
 Drag across any pane to select, and releasing **auto-copies** to your clipboard. Full

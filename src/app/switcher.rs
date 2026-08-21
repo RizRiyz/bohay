@@ -514,7 +514,7 @@ mod tests {
     /// least-urgent (idle) first when the width can't hold them all (docs/18).
     #[test]
     fn compact_summary_drops_least_urgent_first() {
-        use crate::ui::switcher::compact_agent_summary;
+        use crate::bar::{compose, BarRegion, Representation, CORE_AGENTS};
         use crate::ui::theme::State;
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -534,12 +534,32 @@ mod tests {
             s.state = *st;
         }
         assert_eq!(app.agent_state_counts(), [1, 1, 1, 1]);
+        app.refresh_core_bar_widgets();
+        let candidates = app
+            .bar
+            .widgets_for(BarRegion::TopRight, &app.config.bars, true);
+        let agents = candidates
+            .iter()
+            .position(|candidate| candidate.key == CORE_AGENTS)
+            .expect("agent summary is routed through Luvus Bar");
 
         // Wide: all four fit.
-        let wide = compact_agent_summary(&app, 40);
-        assert_eq!(wide.spans.len(), 4, "all states shown when wide");
+        let wide = compose(&candidates, 40, 24);
+        let item = wide
+            .items
+            .iter()
+            .find(|item| item.candidate == agents)
+            .expect("summary visible when wide");
+        assert_eq!(item.representation, Representation::Full);
+        assert_eq!(candidates[agents].widget.content.len(), 8);
         // Narrow: only the first (most-urgent, blocked) survives.
-        let narrow = compact_agent_summary(&app, 4);
-        assert_eq!(narrow.spans.len(), 1, "least-urgent dropped when narrow");
+        let narrow = compose(&candidates, 4, 24);
+        let item = narrow
+            .items
+            .iter()
+            .find(|item| item.candidate == agents)
+            .expect("urgent state survives when narrow");
+        assert_eq!(item.representation, Representation::Compact);
+        assert_eq!(candidates[agents].widget.compact_content.len(), 1);
     }
 }

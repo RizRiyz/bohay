@@ -35,14 +35,15 @@ pub(super) fn draw_settings(
     // Width must fit the whole tab bar — translated labels (esp. CJK) can be much
     // wider than English, so size to the tabs instead of a fixed cap. The tabs
     // are ` {icon} {label} ` pills; the loop starts at inner.x+1 (1 left margin),
-    // and the modal adds 2 border columns → need = tabs + 3. Floor 46 for content,
-    // capped at the terminal width.
+    // and the modal adds 2 border columns. Keep a little breathing room beyond
+    // the toolbar so wide controls (notably Luvus Bar placement) do not crowd
+    // the border. Both dimensions remain capped to the current viewport.
     let tabs_w: u16 = SettingsTab::ALL
         .iter()
         .map(|st| display_width(&format!(" {} {} ", st.icon(), st.label(app.catalog))) as u16)
         .sum();
-    let w = (tabs_w + 4).max(46).min(area.width);
-    let h = area.height.saturating_sub(4).clamp(14, 24).min(area.height);
+    let w = (tabs_w + 12).max(54).min(area.width);
+    let h = area.height.saturating_sub(2).clamp(16, 30).min(area.height);
     let modal = centered_rect(area, w, h);
 
     f.render_widget(Clear, modal);
@@ -267,18 +268,23 @@ fn draw_content(
             // visible (docs/29), so a long registry of plugin docks stays reachable.
             let rows = app.layout_rows();
             let dock_start = app.dock_section_start();
+            let bar_start = app.bar_section_start();
             let l = &app.config.layout;
             // Visual sequence: control rows plus a blank + divider before the docks.
             enum V {
                 Ctl(usize),
                 Blank,
-                Divider,
+                Divider(&'static str),
             }
             let mut vis = Vec::new();
             for i in 0..rows.len() {
                 if i == dock_start {
                     vis.push(V::Blank);
-                    vis.push(V::Divider);
+                    vis.push(V::Divider(cat.tab_docks));
+                }
+                if i == bar_start {
+                    vis.push(V::Blank);
+                    vis.push(V::Divider("Luvus Bar"));
                 }
                 vis.push(V::Ctl(i));
             }
@@ -294,14 +300,19 @@ fn draw_content(
                 let y = area.y + (row_i - scroll) as u16;
                 let i = match v {
                     V::Blank => continue,
-                    V::Divider => {
+                    V::Divider(label) => {
                         hline(f, area.x, y, area.width, t);
                         f.render_widget(
                             Paragraph::new(Span::styled(
-                                format!(" {} ", cat.tab_docks),
+                                format!(" {label} "),
                                 Style::new().fg(t.subtext0).bg(t.surface0),
                             )),
-                            Rect::new(area.x + 2, y, 12.min(area.width), 1),
+                            Rect::new(
+                                area.x + 2,
+                                y,
+                                (display_width(label) as u16 + 2).min(area.width),
+                                1,
+                            ),
                         );
                         continue;
                     }
@@ -441,6 +452,9 @@ fn draw_content(
                     }
                     LayoutRow::Dock(kind) => {
                         ctls.push(dock_row(f, area, y, i, cursor, app, kind, t, &mut arrows));
+                    }
+                    LayoutRow::Bar(key) => {
+                        ctls.push(bar_row(f, area, y, i, cursor, app, key, t, &mut arrows));
                     }
                 }
             }
@@ -1178,6 +1192,66 @@ fn dock_row(
         );
         arrows.push((idx, delta, r));
         bx += w + 1;
+    }
+    (idx, row)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bar_row(
+    f: &mut RenderTarget,
+    area: Rect,
+    y: u16,
+    idx: usize,
+    cursor: usize,
+    app: &App,
+    key: &str,
+    t: &Theme,
+    arrows: &mut Vec<(usize, i32, Rect)>,
+) -> (usize, Rect) {
+    let row = Rect::new(area.x, y, area.width, 1);
+    let selected = idx == cursor;
+    if selected {
+        fill_bg(f, row, t.sel_bg);
+    }
+    let declaration = app.bar.declaration(key);
+    let title = declaration.map_or(key, |declaration| declaration.title.as_str());
+    let fallback = declaration.map_or(crate::bar::BarRegion::BottomRight, |declaration| {
+        declaration.region
+    });
+    let region = app.config.bars.region_for(key, fallback);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("  {title}"),
+            Style::new().fg(if selected { t.text } else { t.subtext1 }),
+        )),
+        row,
+    );
+    let buttons = [
+        (" Top ", -1, region == Some(crate::bar::BarRegion::TopRight)),
+        (
+            " Bottom ",
+            1,
+            region == Some(crate::bar::BarRegion::BottomRight),
+        ),
+        (" Off ", 2, region.is_none()),
+    ];
+    let total = buttons
+        .iter()
+        .map(|(label, _, _)| display_width(label) as u16 + 1)
+        .sum::<u16>()
+        .saturating_sub(1);
+    let mut x = row.right().saturating_sub(total + 2);
+    for (label, delta, active) in buttons {
+        let width = display_width(label) as u16;
+        let rect = Rect::new(x, y, width, 1);
+        let style = if active {
+            Style::new().fg(t.crust).bg(t.accent).bold()
+        } else {
+            Style::new().fg(t.subtext0).bg(t.surface1)
+        };
+        f.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        arrows.push((idx, delta, rect));
+        x = x.saturating_add(width + 1);
     }
     (idx, row)
 }

@@ -464,6 +464,12 @@ impl App {
             "workspace.list",
             "node.list",
             "worktree.open",
+            "ui.bar.list",
+            "ui.bar.push",
+            "ui.bar.move",
+            "ui.bar.remove",
+            "ui.notification.push",
+            "ui.notification.clear",
         ];
         if self.workspaces.is_empty() && !WITHOUT_NODE.contains(&req.method.as_str()) {
             return json!({ "id": req.id, "error": { "code": "no_session", "message": "no active session" } }).to_string();
@@ -1347,6 +1353,195 @@ impl App {
                     Ok(json!({"type":"error","message":"sidebar is full (max 3 docks)"}))
                 }
             }
+            "ui.bar.list" => {
+                let widgets: Vec<Value> = self
+                    .bar
+                    .declarations
+                    .iter()
+                    .map(|(key, declaration)| {
+                        let live = self.bar.widgets.get(key);
+                        let region = self
+                            .config
+                            .bars
+                            .region_for(key, declaration.region)
+                            .map(crate::bar::BarRegion::as_str);
+                        json!({
+                            "id": declaration.key.id,
+                            "owner": declaration.key.owner,
+                            "key": key,
+                            "title": declaration.title,
+                            "region": region,
+                            "default_region": declaration.region.as_str(),
+                            "priority": live.map_or(declaration.priority, |widget| widget.priority),
+                            "live": live.is_some(),
+                            "content": live.map(|widget| &widget.content),
+                            "compact_content": live.map(|widget| &widget.compact_content),
+                        })
+                    })
+                    .collect();
+                Ok(json!({"type":"bar_list","widgets":widgets}))
+            }
+            "ui.bar.push" => {
+                let id = req_str(p, "id")?;
+                let owner = p.get("owner").and_then(Value::as_str);
+                let declaration = self
+                    .bar
+                    .resolve_declaration(owner, id)
+                    .map_err(module_err)?
+                    .clone();
+                if declaration.key.owner == "core" {
+                    return Err(module_err("core bar widgets cannot be updated".into()));
+                }
+                let content: Vec<crate::bar::BarSegment> = serde_json::from_value(
+                    p.get("content")
+                        .cloned()
+                        .ok_or_else(|| ("invalid_request".into(), "content is required".into()))?,
+                )
+                .map_err(|error| {
+                    (
+                        "invalid_request".into(),
+                        format!("invalid content: {error}"),
+                    )
+                })?;
+                let compact: Vec<crate::bar::BarSegment> = match p.get("compact_content") {
+                    Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                        (
+                            "invalid_request".into(),
+                            format!("invalid compact_content: {error}"),
+                        )
+                    })?,
+                    None => Vec::new(),
+                };
+                validate_bar_actions(self, &declaration.key.owner, &content)?;
+                validate_bar_actions(self, &declaration.key.owner, &compact)?;
+                let region = match p.get("region").and_then(Value::as_str) {
+                    Some("top-right" | "top") => crate::bar::BarRegion::TopRight,
+                    Some("bottom-right" | "bottom") => crate::bar::BarRegion::BottomRight,
+                    Some(other) => {
+                        return Err((
+                            "invalid_request".into(),
+                            format!("unknown bar region {other}"),
+                        ))
+                    }
+                    None => declaration.region,
+                };
+                let priority = match p.get("priority") {
+                    None => declaration.priority,
+                    Some(value) => value
+                        .as_u64()
+                        .filter(|value| *value <= u8::MAX as u64)
+                        .map(|value| value as u8)
+                        .ok_or_else(|| {
+                            (
+                                "invalid_request".into(),
+                                "priority must be an integer from 0 to 255".into(),
+                            )
+                        })?,
+                };
+                let widget = crate::bar::BarWidget::new(
+                    declaration.key.clone(),
+                    region,
+                    content,
+                    compact,
+                    priority,
+                )
+                .map_err(|error| ("invalid_request".into(), error))?;
+                self.bar
+                    .allow_push(&declaration.key.owner, Instant::now())
+                    .map_err(|error| ("rate_limited".into(), error))?;
+                let changed = self
+                    .bar
+                    .push_widget(widget)
+                    .map_err(|error| ("limit_exceeded".into(), error))?;
+                Ok(json!({"type":"ok","changed":changed,"key":declaration.key.canonical()}))
+            }
+            "ui.bar.move" => {
+                let declaration = self
+                    .bar
+                    .resolve_declaration(p.get("owner").and_then(Value::as_str), req_str(p, "id")?)
+                    .map_err(module_err)?
+                    .clone();
+                let region = match req_str(p, "region")? {
+                    "top-right" | "top" => Some(crate::bar::BarRegion::TopRight),
+                    "bottom-right" | "bottom" => Some(crate::bar::BarRegion::BottomRight),
+                    "off" => None,
+                    other => {
+                        return Err((
+                            "invalid_request".into(),
+                            format!("unknown bar region {other}"),
+                        ))
+                    }
+                };
+                self.config.bars.place(&declaration.key.canonical(), region);
+                crate::config::save(&self.config);
+                self.bar.clear_geometry();
+                Ok(
+                    json!({"type":"ok","key":declaration.key.canonical(),"region":region.map(crate::bar::BarRegion::as_str)}),
+                )
+            }
+            "ui.bar.remove" => {
+                let declaration = self
+                    .bar
+                    .resolve_declaration(p.get("owner").and_then(Value::as_str), req_str(p, "id")?)
+                    .map_err(module_err)?
+                    .clone();
+                if declaration.key.owner == "core" {
+                    return Err(module_err("core bar widgets cannot be removed".into()));
+                }
+                let removed = self.bar.remove_widget(&declaration.key.canonical());
+                Ok(json!({"type":"ok","removed":removed}))
+            }
+            "ui.notification.push" => {
+                let owner = p.get("owner").and_then(Value::as_str).map(String::from);
+                let text = req_str(p, "text")?.to_string();
+                let level: crate::bar::NotificationLevel = serde_json::from_value(
+                    p.get("level").cloned().unwrap_or_else(|| json!("info")),
+                )
+                .map_err(|error| ("invalid_request".into(), format!("invalid level: {error}")))?;
+                let action = opt_str(p, "action");
+                if let Some(owner) = owner.as_deref() {
+                    validate_bar_action(self, owner, action.as_deref())?;
+                    self.bar
+                        .allow_push(owner, Instant::now())
+                        .map_err(|error| ("rate_limited".into(), error))?;
+                } else if action.is_some() {
+                    return Err((
+                        "invalid_request".into(),
+                        "an actionable notification requires its module owner".into(),
+                    ));
+                }
+                let ttl_ms = match p.get("ttl_ms") {
+                    None => 4_000,
+                    Some(value) => value.as_u64().ok_or_else(|| {
+                        (
+                            "invalid_request".into(),
+                            "ttl_ms must be a positive integer".into(),
+                        )
+                    })?,
+                };
+                self.bar
+                    .push_notification(
+                        crate::bar::NotificationPush {
+                            owner,
+                            text,
+                            level,
+                            ttl_ms,
+                            action,
+                            value: opt_str(p, "value"),
+                            dedupe_key: opt_str(p, "dedupe_key"),
+                        },
+                        Instant::now(),
+                    )
+                    .map_err(|error| ("invalid_request".into(), error))?;
+                Ok(json!({"type":"ok"}))
+            }
+            "ui.notification.clear" => {
+                let owner = p.get("owner").and_then(Value::as_str);
+                let removed = self
+                    .bar
+                    .clear_notifications(owner, p.get("dedupe_key").and_then(Value::as_str));
+                Ok(json!({"type":"ok","removed":removed}))
+            }
             // ── modules (docs/13) ──
             "module.list" => {
                 let arr: Vec<Value> = self.modules.modules.iter().map(module_json).collect();
@@ -1374,6 +1569,8 @@ impl App {
                         .map(|a| json!({"id": a.id, "title": a.title, "contexts": a.contexts})).collect::<Vec<_>>(),
                     "panes": m.manifest.panes.iter()
                         .map(|pe| json!({"id": pe.id, "title": pe.title, "placement": pe.placement})).collect::<Vec<_>>(),
+                    "bars": m.manifest.bars.iter()
+                        .map(|bar| json!({"id": bar.id, "title": bar.title, "region": bar.region.as_str(), "priority": bar.priority})).collect::<Vec<_>>(),
                     "events": m.manifest.events.iter().map(|e| e.on.clone()).collect::<Vec<_>>(),
                     "build_steps": m.manifest.build.len(),
                 }))
@@ -2273,6 +2470,35 @@ fn module_err(e: String) -> (String, String) {
     ("module_error".to_string(), e)
 }
 
+fn validate_bar_actions(
+    app: &App,
+    owner: &str,
+    segments: &[crate::bar::BarSegment],
+) -> Result<(), (String, String)> {
+    for segment in segments {
+        validate_bar_action(app, owner, segment.action.as_deref())?;
+    }
+    Ok(())
+}
+
+fn validate_bar_action(
+    app: &App,
+    owner: &str,
+    action: Option<&str>,
+) -> Result<(), (String, String)> {
+    let module = app
+        .modules
+        .find(owner)
+        .filter(|module| module.is_runnable())
+        .ok_or_else(|| module_err(format!("module {owner} is unavailable")))?;
+    if let Some(action) = action {
+        if module.manifest.action(action).is_none() {
+            return Err(module_err(format!("module {owner} has no action {action}")));
+        }
+    }
+    Ok(())
+}
+
 /// Require a non-empty string param.
 fn req_str<'a>(p: &'a Value, key: &str) -> Result<&'a str, (String, String)> {
     p.get(key)
@@ -2320,6 +2546,7 @@ fn module_json(m: &crate::module::InstalledModule) -> Value {
         "source": m.source,
         "actions": m.manifest.actions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
         "panes": m.manifest.panes.iter().map(|pe| pe.id.clone()).collect::<Vec<_>>(),
+        "bars": m.manifest.bars.iter().map(|bar| bar.id.clone()).collect::<Vec<_>>(),
         "warning": m.warning,
     })
 }
@@ -2376,6 +2603,76 @@ fn state_str(s: State) -> &'static str {
 mod tests {
     use super::*;
     use crate::app::App;
+
+    #[test]
+    fn bar_api_validates_ownership_and_preserves_the_last_valid_widget() {
+        let _env = crate::persist::test_env("bar-api");
+        let module =
+            std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("bar-module");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(
+            module.join("luvus-module.toml"),
+            r#"
+id = "you.ci"
+name = "CI"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+
+[[bars]]
+id = "status"
+title = "CI status"
+region = "top-right"
+priority = 60
+
+[[actions]]
+id = "details"
+title = "Details"
+command = ["true"]
+"#,
+        )
+        .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.module_link_with(&module, true, None).unwrap();
+
+        let valid = json!({
+            "owner": "you.ci",
+            "id": "status",
+            "content": [
+                {"type":"text","text":"CI"},
+                {"type":"state","state":"done","action":"details","value":"run-1"}
+            ],
+            "compact_content": [{"type":"state","state":"done"}]
+        });
+        let result = app.dispatch("ui.bar.push", &valid).unwrap();
+        assert_eq!(result["changed"], true);
+        let before = app.bar.widgets["you.ci:status"].clone();
+
+        let mut invalid = valid;
+        invalid["content"] = json!([{"type":"text","text":"\u{1b}[31mraw"}]);
+        assert!(app.dispatch("ui.bar.push", &invalid).is_err());
+        assert_eq!(app.bar.widgets["you.ci:status"], before);
+
+        let mut wrong_action = invalid;
+        wrong_action["content"] =
+            json!([{"type":"text","text":"bad","action":"other-module-action"}]);
+        assert!(app.dispatch("ui.bar.push", &wrong_action).is_err());
+        assert_eq!(app.bar.widgets["you.ci:status"], before);
+
+        app.dispatch(
+            "ui.bar.move",
+            &json!({"owner":"you.ci","id":"status","region":"bottom-right"}),
+        )
+        .unwrap();
+        assert_eq!(
+            app.config
+                .bars
+                .region_for("you.ci:status", crate::bar::BarRegion::TopRight),
+            Some(crate::bar::BarRegion::BottomRight)
+        );
+        app.module_set_enabled("you.ci", false).unwrap();
+        assert!(!app.bar.widgets.contains_key("you.ci:status"));
+    }
 
     #[test]
     fn strip_title_icon_drops_a_leading_glyph_only() {

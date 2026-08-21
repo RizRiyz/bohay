@@ -93,6 +93,14 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
+  ui bar list                list declared Luvus Bar widgets and live content
+  ui bar push --id <id> [--region top-right|bottom-right] --content <json>
+                             publish validated persistent widget segments;
+                             --content-file, --compact-content, --text and --state supported
+  ui bar move --id <id> --region top-right|bottom-right|off
+  ui bar remove --id <id>    clear live widget content, preserving placement
+  ui notification push --text <text> [--level info|success|warning|error]
+  ui notification clear [--dedupe-key <key>]
   ui toast <text>            flash a one-line message in the UI
 
 modules (extensions):
