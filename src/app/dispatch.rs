@@ -204,6 +204,17 @@ impl App {
             let Some(pane) = self.panes.get(&id) else {
                 continue;
             };
+            let detection_rows = detect::screen_rows(
+                self.status
+                    .get(&id)
+                    .map(|status| status.agent.as_str())
+                    .unwrap_or(""),
+                self.proc_commands
+                    .get(&id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                &self.manifests,
+            );
             let (last_generation, force_detect) = self
                 .status
                 .get(&id)
@@ -216,7 +227,7 @@ impl App {
                         Some((
                             generation,
                             engine.title().map(Arc::<str>::from),
-                            Arc::<str>::from(engine.detection_text(14)),
+                            Arc::<str>::from(engine.detection_text(detection_rows)),
                         ))
                     } else {
                         None
