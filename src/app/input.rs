@@ -401,8 +401,19 @@ impl App {
     /// all single-line fields.
     fn paste_into_modal(&mut self, s: &str) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The folder picker has no text field to fill: a pasted path *is* the
+        // navigation. Pasting a path is how you reach a deep folder, so this is
+        // the one modal where the text means "go here" rather than "type here".
+        if self.picker.as_ref().is_some_and(|p| p.creating.is_none()) {
+            self.picker_goto(s);
+            return true;
+        }
         let handler: fn(&mut Self, KeyEvent) = if self.module_setting_edit.is_some() {
             Self::handle_module_setting_key
+        } else if self.search.is_some() {
+            Self::search_key
+        } else if self.picker.is_some() {
+            Self::handle_picker_key // the new-folder name sub-mode
         } else if self.worktree_prompt.is_some() {
             Self::handle_worktree_prompt_key
         } else if self.tab_rename.is_some() {

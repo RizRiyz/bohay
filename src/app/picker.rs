@@ -154,6 +154,51 @@ impl App {
         }
     }
 
+    /// Jump the picker to a pasted path — the way you get to a folder that is
+    /// twenty levels deep or on another drive without walking there row by row.
+    ///
+    /// Accepts what a file manager or a shell actually puts on the clipboard:
+    /// surrounding whitespace and quotes are stripped, and a pasted *file* lands
+    /// on its parent folder (dragging a file in is a normal way to mean "this
+    /// project"). A relative path resolves against the folder being browsed, so
+    /// pasting `src/app` walks down from here — and a bare `Cargo.toml` can't
+    /// leave the picker on the empty parent path. Anything that doesn't resolve
+    /// leaves the browsed folder alone and reports it in the modal rather than
+    /// silently doing nothing.
+    pub fn picker_goto(&mut self, raw: &str) {
+        let text = raw.trim().trim_matches(['"', '\'']).trim();
+        if text.is_empty() {
+            return;
+        }
+        let path = PathBuf::from(text);
+        let path = match self.picker.as_ref() {
+            Some(p) if path.is_relative() => p.path.join(path),
+            _ => path,
+        };
+        let target = if path.is_dir() {
+            Some(path)
+        } else if path.is_file() {
+            path.parent().map(PathBuf::from)
+        } else {
+            None
+        };
+        match target {
+            Some(dir) => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.path = dir;
+                    p.cursor = 0;
+                    p.error = None;
+                }
+                self.picker_refresh();
+            }
+            None => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.error = Some(format!("no such folder: {text}"));
+                }
+            }
+        }
+    }
+
     /// Key handling while the folder picker is open.
     pub fn handle_picker_key(&mut self, key: KeyEvent) {
         // New-folder name input sub-mode.
@@ -384,6 +429,60 @@ mod tests {
         );
         assert_eq!(app.workspaces.len(), workspaces_before + 2);
         assert_eq!(app.workspaces.last().unwrap().cwd, tmp.join("fresh"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A pasted path navigates the picker instead of leaking into the pane
+    /// behind it — the only way to reach a deep folder without walking there.
+    #[test]
+    fn pasting_a_path_jumps_the_picker_there() {
+        let tmp = std::env::temp_dir().join(format!("luvus-pickpaste-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let deep = tmp.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("f.txt"), "hi").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_folder_picker();
+
+        // Quoted, with trailing whitespace — what a file manager actually pastes.
+        app.handle_event(crate::event::AppEvent::Paste(format!(
+            "\"{}\"  ",
+            deep.display()
+        )));
+        assert_eq!(
+            app.picker.as_ref().unwrap().path,
+            deep,
+            "jumped to the path"
+        );
+
+        // A pasted *file* means its folder.
+        app.handle_event(crate::event::AppEvent::Paste(
+            deep.join("f.txt").display().to_string(),
+        ));
+        assert_eq!(app.picker.as_ref().unwrap().path, deep);
+
+        // Nonsense reports itself and leaves the browsed folder alone.
+        app.handle_event(crate::event::AppEvent::Paste("nope-not-a-path".into()));
+        assert_eq!(app.picker.as_ref().unwrap().path, deep);
+        assert!(app.picker.as_ref().unwrap().error.is_some());
+
+        // A relative path resolves against the browsed folder — including a bare
+        // filename, whose parent is the empty path and would otherwise strand
+        // the picker on a folder that does not exist.
+        app.handle_event(crate::event::AppEvent::Paste("f.txt".into()));
+        assert_eq!(app.picker.as_ref().unwrap().path, deep);
+        assert!(app.picker.as_ref().unwrap().error.is_none());
+        app.picker.as_mut().unwrap().path = tmp.clone();
+        app.picker_refresh();
+        app.handle_event(crate::event::AppEvent::Paste("a/b".into()));
+        assert_eq!(
+            app.picker.as_ref().unwrap().path,
+            deep,
+            "walked down from here"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
