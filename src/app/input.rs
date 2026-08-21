@@ -70,7 +70,16 @@ fn append_selected_row(
     ((start_row, start_col), (end_row, end_col)): ((usize, usize), (usize, usize)),
 ) {
     let chars: Vec<char> = line.chars().collect();
-    let left = if row == start_row { start_col } else { 0 };
+    // A drag that starts beside the visible text must not grow leftward on
+    // middle rows: that otherwise copies the blank cell between the pane edge
+    // and every list item. Keep the drag's leftmost edge for those rows while
+    // preserving the exact start point on the first row.
+    let middle_left = start_col.min(end_col);
+    let left = if row == start_row {
+        start_col
+    } else {
+        middle_left
+    };
     let right = if row == end_row {
         end_col
     } else {
@@ -99,8 +108,26 @@ fn finish_selected_text(mut out: String) -> Option<String> {
     (!out.trim().is_empty()).then_some(out)
 }
 
-/// Extract a linear terminal selection from logical rows. Both mouse and
-/// keyboard selection feed this function, keeping clipboard semantics aligned.
+/// Drop the one blank cell which can sit between a pane edge and uniformly
+/// aligned prose. This is deliberately narrow: code with its usual two- or
+/// four-space indentation is retained exactly as selected.
+fn strip_uniform_single_cell_margin(text: String) -> String {
+    let mut saw_text = false;
+    let uniform_margin = text.lines().filter(|line| !line.is_empty()).all(|line| {
+        saw_text = true;
+        line.starts_with(' ') && !line.starts_with("  ")
+    });
+    if !saw_text || !uniform_margin {
+        return text;
+    }
+    text.lines()
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Extract a terminal selection from logical rows. Both mouse and keyboard
+/// selection feed this function, keeping clipboard semantics aligned.
 fn extract_rows_selection(
     rows: &[String],
     ((start_row, start_col), (end_row, end_col)): ((usize, usize), (usize, usize)),
@@ -1463,7 +1490,7 @@ impl App {
 
     /// Begin keyboard copy mode at the visible viewport's top-left cell. The
     /// selection uses absolute history rows, so scrolling cannot invalidate it.
-    fn begin_copy_mode(&mut self) -> bool {
+    pub(super) fn begin_copy_mode(&mut self) -> bool {
         let id = self.layout().focus;
         let Some(pane) = self.panes.get(&id) else {
             return false;
@@ -1522,10 +1549,14 @@ impl App {
     }
 
     /// Copy the keyboard selection by the same clipboard queue as drag-to-copy.
-    fn finish_copy_mode(&mut self) {
+    pub(super) fn finish_copy_mode(&mut self) {
         let Some(copy) = self.copy_mode.take() else {
             return;
         };
+        let is_codex = self
+            .status
+            .get(&copy.pane)
+            .is_some_and(|status| status.agent == "codex");
         let text = self.panes.get(&copy.pane).and_then(|pane| {
             let range = copy.ordered();
             let mut output = String::new();
@@ -1542,7 +1573,13 @@ impl App {
             });
             finish_selected_text(output)
         });
-        if let Some(text) = text {
+        if let Some(text) = text.map(|text| {
+            if is_codex {
+                strip_uniform_single_cell_margin(text)
+            } else {
+                text
+            }
+        }) {
             self.pending_clipboard = Some(text);
             let msg = self.catalog.copied;
             self.show_toast(msg);
@@ -1554,7 +1591,7 @@ impl App {
         }
     }
 
-    /// Copy-mode navigation. `Shift+V` starts it, then hjkl/arrows, word jumps,
+    /// Copy-mode navigation starts from the configured prefix command, then hjkl/arrows, word jumps,
     /// page keys, Home/End, and g/G move the visual selection; y copies it.
     fn handle_copy_mode_key(&mut self, key: KeyEvent) -> bool {
         let Some(mut copy) = self.copy_mode else {
@@ -1714,7 +1751,7 @@ impl App {
             .visible_rows();
         let ((sx, sy), (ex, ey)) = sel.ordered();
         let (cx, cy) = (sel.content.x, sel.content.y);
-        extract_rows_selection(
+        let text = extract_rows_selection(
             &rows,
             (
                 (
@@ -1726,7 +1763,20 @@ impl App {
                     (ex as usize).saturating_sub(cx as usize),
                 ),
             ),
-        )
+        )?;
+        // A drag may begin in the single blank pane cell before uniformly
+        // aligned prose. Codex also emits that one-cell transcript gutter even
+        // when the drag starts on its first visible character. It remains
+        // visibly selected, but is padding rather than useful clipboard text.
+        let is_codex = self
+            .status
+            .get(&sel.pane)
+            .is_some_and(|status| status.agent == "codex");
+        Some(if sx == cx || is_codex {
+            strip_uniform_single_cell_margin(text)
+        } else {
+            text
+        })
     }
 
     /// Show a transient toast (e.g. "Copied") bottom-center for ~1.4s.
@@ -2149,14 +2199,6 @@ impl App {
                 let focus = self.layout().focus;
                 if self.views.contains_key(&focus) {
                     return self.handle_file_key(focus, key);
-                }
-                // `Shift+V` starts a visual, keyboard-driven selection. It is a
-                // host action (not terminal input), like Shift+Up scroll mode.
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
-                    && self.begin_copy_mode()
-                {
-                    return true;
                 }
                 // `Shift+↑` / `Shift+PageUp` enter keyboard scroll mode (no prefix,
                 // works on a stock Mac keyboard). From there plain keys navigate.
@@ -3257,5 +3299,120 @@ mod link_click_tests {
             Some("abc\ndef"),
             "a skipped first row must not produce a leading newline"
         );
+    }
+
+    #[test]
+    fn multi_line_copy_keeps_the_drag_left_edge() {
+        // The first column is blank pane-side space before a Markdown list. A
+        // drag beginning on `-` must not add that blank to every middle row.
+        let rows = vec![
+            " - first".to_string(),
+            " - second".to_string(),
+            " - third".to_string(),
+        ];
+        assert_eq!(
+            extract_rows_selection(&rows, ((0, 1), (2, 7))).as_deref(),
+            Some("- first\n- second\n- third")
+        );
+    }
+
+    #[test]
+    fn mouse_copy_drops_a_uniform_one_cell_pane_margin() {
+        assert_eq!(
+            strip_uniform_single_cell_margin(
+                " Hello, rain on a windowpane\n Hello, wind with a traveling name\n Hello, all things we almost miss"
+                    .into()
+            ),
+            "Hello, rain on a windowpane\nHello, wind with a traveling name\nHello, all things we almost miss"
+        );
+        assert_eq!(
+            strip_uniform_single_cell_margin(
+                "    let preserved = true;\n    run(preserved);".into()
+            ),
+            "    let preserved = true;\n    run(preserved);",
+            "normal code indentation must stay intact"
+        );
+    }
+
+    #[test]
+    fn mouse_drag_copy_drops_the_pane_edge_margin_from_terminal_text() {
+        let _env = crate::persist::test_env("mouse-copy-pane-margin");
+        let source = " Morning arrives without ceremony,\r\n a thin gold line on the edge of the glass.\r\n The kettle speaks in its private language,";
+        let (mut app, mut term, _) = fixture_showing(source, 0);
+        // Hide the sidebars so the test deliberately starts at the pane's
+        // leftmost content cell, matching the screenshot case.
+        app.sidebars.left.visible = false;
+        app.sidebars.right.visible = false;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        let start = (content.x, content.y);
+        let end = (
+            start.0
+                + " The kettle speaks in its private language,"
+                    .chars()
+                    .count() as u16
+                - 1,
+            start.1 + 2,
+        );
+
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            end,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.selection.is_some(), "the drag created a selection");
+        assert_eq!(
+            app.selection_text().as_deref(),
+            Some(
+                "Morning arrives without ceremony,\na thin gold line on the edge of the glass.\nThe kettle speaks in its private language,"
+            )
+        );
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            end,
+            KeyModifiers::NONE,
+        ));
+
+        assert_eq!(
+            app.pending_clipboard.as_deref(),
+            Some(
+                "Morning arrives without ceremony,\na thin gold line on the edge of the glass.\nThe kettle speaks in its private language,"
+            )
+        );
+    }
+
+    #[test]
+    fn codex_copy_drops_its_one_cell_transcript_gutter() {
+        let _env = crate::persist::test_env("codex-copy-gutter");
+        let (mut app, _term, _) = fixture_showing("  hello\r\n  world", 0);
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        // The drag starts one cell in, so this verifies Codex detection rather
+        // than the generic pane-edge case above.
+        app.selection = Some(crate::app::Selection {
+            pane,
+            content,
+            anchor: (content.x + 1, content.y),
+            cursor: (content.x + 6, content.y + 1),
+        });
+
+        assert_eq!(app.selection_text().as_deref(), Some("hello\nworld"));
     }
 }

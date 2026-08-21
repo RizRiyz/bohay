@@ -1005,8 +1005,8 @@ impl Selection {
         }
     }
 
-    /// Whether terminal cell `(x, y)` is inside the linear selection (and the
-    /// pane's content area) — drives the render highlight.
+    /// Whether terminal cell `(x, y)` is inside the selection (and the pane's
+    /// content area) — drives the render highlight.
     pub fn contains(&self, x: u16, y: u16) -> bool {
         let c = self.content;
         if x < c.x || x >= c.right() || y < c.y || y >= c.bottom() {
@@ -1016,7 +1016,9 @@ impl Selection {
         if y < sy || y > ey {
             return false;
         }
-        let left = if y == sy { sx } else { c.x };
+        // Middle rows keep the drag's left edge instead of expanding into the
+        // pane margin. This keeps the highlighted range and copied text aligned.
+        let left = if y == sy { sx } else { sx.min(ex) };
         let right = if y == ey {
             ex
         } else {
@@ -4823,7 +4825,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_spans_lines_linearly() {
+    fn selection_keeps_the_drag_left_edge_between_lines() {
         // Content rect at (x=2, y=1), 10 wide × 5 tall.
         let content = Rect::new(2, 1, 10, 5);
         let sel = Selection {
@@ -4836,8 +4838,10 @@ mod tests {
         assert!(sel.contains(4, 1));
         assert!(sel.contains(11, 1)); // last column (right() == 12)
         assert!(!sel.contains(3, 1)); // before the anchor
-                                      // Middle row: the full width.
-        assert!(sel.contains(2, 2) && sel.contains(11, 2));
+                                      // Middle row: it keeps the drag's left edge instead of
+                                      // expanding into the pane's left margin.
+        assert!(!sel.contains(2, 2));
+        assert!(sel.contains(4, 2) && sel.contains(11, 2));
         // Last row: up to the cursor column.
         assert!(sel.contains(6, 3));
         assert!(!sel.contains(7, 3)); // past the cursor
@@ -9052,8 +9056,12 @@ mod tests {
         };
         let offset = |app: &App| app.panes.get(&id).unwrap().scroll_state().0;
 
-        send(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
-        assert!(app.copy_mode.is_some(), "Shift+V enters keyboard copy mode");
+        send(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        send(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(
+            app.copy_mode.is_some(),
+            "the default prefix then y enters keyboard copy mode"
+        );
         send(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
         send(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
         send(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
@@ -9064,11 +9072,91 @@ mod tests {
 
         app.panes.get(&id).unwrap().scroll(8);
         let saved = offset(&app);
-        send(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+        send(&mut app, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        send(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
         send(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         send(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(app.copy_mode.is_none(), "q cancels copy mode");
         assert_eq!(offset(&app), saved, "cancel restores the prior viewport");
+    }
+
+    #[test]
+    fn keyboard_copy_trims_a_codex_transcript_gutter() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("engine")
+            .advance(b"\x1b[H\x1b[2J Hello\r\n world");
+        app.copy_mode = Some(CopyMode {
+            pane,
+            anchor: (1, 0),
+            cursor: (2, 5),
+            saved_scroll: 0,
+        });
+
+        app.finish_copy_mode();
+
+        assert_eq!(app.pending_clipboard.as_deref(), Some("Hello\nworld"));
+    }
+
+    #[test]
+    fn shift_v_never_enters_copy_mode() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("engine")
+            .advance(b"terminal input");
+
+        assert!(
+            !app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char('V'),
+                KeyModifiers::SHIFT,
+            ))),
+            "forwarded terminal input waits for child output to repaint"
+        );
+        assert!(
+            app.copy_mode.is_none(),
+            "uppercase V never enters copy mode"
+        );
+    }
+
+    #[test]
+    fn prefix_y_starts_copy_mode() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 8, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
+        app.panes
+            .get(&pane)
+            .expect("pane")
+            .engine
+            .lock()
+            .expect("engine")
+            .advance(b"build finished successfully");
+
+        assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+            ))),
+            "the default prefix then y starts copy mode over a Codex transcript"
+        );
+        assert!(app.copy_mode.is_some());
     }
 }
 
