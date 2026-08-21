@@ -878,9 +878,13 @@ fn doctor() -> i32 {
             println!("  ✓ keys    Shift+Enter works (terminal reports modified keys)");
         }
         KeyProto::Unsupported => {
-            println!("  ✗ keys    Shift+Enter can't be distinguished from Enter here");
-            println!("           ↳ use Option+Enter instead, or switch to a terminal with");
-            println!("             the keyboard protocol (Ghostty · Kitty · WezTerm · iTerm2)");
+            let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
+                || std::env::var_os("WSL_INTEROP").is_some();
+            let in_windows_terminal = std::env::var_os("WT_SESSION").is_some();
+            let (detail, action) = unsupported_key_guidance(is_wsl, in_windows_terminal);
+            println!("  ! keys    Shift+Enter isn't distinguishable here · optional");
+            println!("           ↳ {detail}");
+            println!("             {action}");
         }
     }
 
@@ -902,6 +906,30 @@ enum KeyProto {
     /// Queried from inside a luvus pane, which answers for *luvus's* PTY rather
     /// than the real terminal — so the result would be misleading.
     InsidePane,
+}
+
+/// Reassure users that a missing modified-key protocol is not a Luvus failure,
+/// then provide the repair that matches the terminal path they are actually
+/// using. Windows Terminal gained the protocol in 1.25; older releases can
+/// send Luvus's existing newline sequence with a `sendInput` binding.
+fn unsupported_key_guidance(
+    is_wsl: bool,
+    in_windows_terminal: bool,
+) -> (&'static str, &'static str) {
+    match (is_wsl, in_windows_terminal) {
+        (true, true) => (
+            "WSL in Windows Terminal detected; all other features still work",
+            "update Windows Terminal to 1.25+, or bind Shift+Enter to ESC CR",
+        ),
+        (true, false) => (
+            "WSL detected; all other features still work",
+            "use Windows Terminal 1.25+ or bind Shift+Enter to ESC CR",
+        ),
+        (false, _) => (
+            "Luvus still works; only the modified-Enter shortcut is affected",
+            "use Alt/Option+Enter or a terminal with the keyboard protocol",
+        ),
+    }
 }
 
 /// Ask the terminal whether it supports progressive keyboard enhancement. The
@@ -2860,6 +2888,22 @@ mod tests {
         let (m, p) = parse(&argv("luvus worktree remove /tmp/wt")).unwrap();
         assert_eq!(m, "worktree.remove");
         assert_eq!(p.get("path").and_then(|v| v.as_str()), Some("/tmp/wt"));
+    }
+
+    #[test]
+    fn unsupported_keys_explain_wsl_repairs_without_calling_luvus_broken() {
+        let (detail, action) = unsupported_key_guidance(true, true);
+        assert!(detail.contains("all other features still work"));
+        assert!(action.contains("Windows Terminal to 1.25+"));
+        assert!(action.contains("ESC CR"));
+
+        let (detail, action) = unsupported_key_guidance(true, false);
+        assert!(detail.starts_with("WSL detected"));
+        assert!(action.contains("Windows Terminal 1.25+"));
+
+        let (detail, action) = unsupported_key_guidance(false, false);
+        assert!(detail.contains("only the modified-Enter shortcut is affected"));
+        assert!(action.contains("Alt/Option+Enter"));
     }
 
     // The docs site's CLI reference (website/…/reference/cli.mdx) carries the

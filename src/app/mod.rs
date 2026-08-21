@@ -40,7 +40,7 @@ pub use search::{GlobalSearch, SearchFlash, SearchHit};
 
 pub use keys::{key_reference_rows, presets, Cmd, KEY_REFERENCE};
 pub use modules::ModuleMenuAction;
-pub use picker::{FolderPicker, Row};
+pub use picker::{FolderPicker, PickerHit, Row};
 pub use settings::{
     GeneralRow, LayoutRow, ModuleRow, SettingsTab, SettingsUi, KEYS_HEADER_ROWS, KEYS_PREFIX_ROW,
     KEYS_PRESET_ROW,
@@ -1154,8 +1154,9 @@ pub struct App {
     pub settings: Option<SettingsUi>,
     /// The open folder picker (workspace chooser), if any (captures input).
     pub picker: Option<FolderPicker>,
-    /// Clickable rows in the open folder picker (row index → rect).
-    pub picker_rects: Vec<(usize, Rect)>,
+    /// Clickable targets in the open folder picker. Specific controls precede
+    /// the modal body in hit-test order.
+    pub picker_rects: Vec<(PickerHit, Rect)>,
     /// Whether the keyboard-shortcut cheat-sheet overlay is open (`Ctrl+Space ?`).
     pub help_open: bool,
     /// Whether the changelog modal is open (click the status-line version number).
@@ -5176,6 +5177,7 @@ mod tests {
             entries: Vec::new(),
             cursor: 0,
             creating: None,
+            going_to: None,
             error: None,
             is_repo,
         };

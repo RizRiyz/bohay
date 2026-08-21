@@ -694,9 +694,11 @@ impl App {
                         .find(|(_, rect)| {
                             c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom()
                         })
-                        .map(|(i, _)| *i);
+                        .map(|(hit, _)| *hit);
                     match hit {
-                        Some(i) => self.picker_click(i),
+                        Some(PickerHit::Row(i)) => self.picker_click(i),
+                        Some(PickerHit::GoTo) => self.picker_start_go_to(),
+                        Some(PickerHit::Modal) => {}
                         None => self.close_folder_picker(), // click outside cancels
                     }
                 }
