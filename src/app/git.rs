@@ -38,9 +38,16 @@ impl App {
             let pane_cwd = self.focused_cwd();
             if pane_cwd != ws_root {
                 let pane_check = local::repo_check(&pane_cwd);
-                if matches!(pane_check, local::RepoCheck::Repo) {
-                    root = pane_cwd;
-                    check = pane_check;
+                match pane_check {
+                    local::RepoCheck::Repo => {
+                        root = pane_cwd;
+                        check = pane_check;
+                    }
+                    // The pane cwd itself failed to check (bad permissions, a
+                    // broken `git`, ...): that's worth surfacing even if the
+                    // workspace root was just an ordinary non-repo folder.
+                    local::RepoCheck::Error(_) => check = pane_check,
+                    local::RepoCheck::NotRepo => {}
                 }
             }
         }

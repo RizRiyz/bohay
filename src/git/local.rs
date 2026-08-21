@@ -63,7 +63,18 @@ pub fn repo_check(cwd: &Path) -> RepoCheck {
                 RepoCheck::NotRepo
             }
         }
-        Ok(_) => RepoCheck::NotRepo, // ran fine, exited non-zero: not a repo
+        // Exited non-zero: git's own "not a git repository" is the ordinary
+        // case and stays quiet, but any other failure (malformed config, a
+        // corrupt `.git`, permission errors) is a real problem and must
+        // surface instead of being folded into the same silent no-op.
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("not a git repository") {
+                RepoCheck::NotRepo
+            } else {
+                RepoCheck::Error(stderr.trim().to_string())
+            }
+        }
     }
 }
 
@@ -617,6 +628,30 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A `.git` with a malformed config makes `git rev-parse` exit non-zero
+    /// for a reason that isn't "not a git repository". That's a real problem,
+    /// not an ordinary non-repo folder, so it must surface as `Error`, not
+    /// get folded into the same silent `NotRepo`.
+    #[test]
+    fn repo_check_surfaces_malformed_git_config_as_error() {
+        use super::{repo_check, RepoCheck};
+
+        let dir = std::env::temp_dir().join(format!("luvus-rc-badcfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::process::Command::new("git")
+            .args(["init", "-q", dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::fs::write(dir.join(".git/config"), "[core\n").unwrap(); // unterminated section
+
+        match repo_check(&dir) {
+            RepoCheck::Error(e) => assert!(!e.is_empty()),
+            _ => panic!("expected Error for a malformed git config"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The origin slug parser accepts ssh + https GitHub URLs and rejects others,
