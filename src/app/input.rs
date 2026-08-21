@@ -478,6 +478,14 @@ impl App {
         if self.changelog_open {
             return self.changelog_check_rect.filter(|rect| hit(*rect));
         }
+        if let Some(menu) = &self.tab_menu {
+            return menu
+                .items
+                .iter()
+                .map(|(_, rect)| *rect)
+                .chain(menu.swap_rects.iter().map(|(_, rect)| *rect))
+                .find(|rect| hit(*rect));
+        }
         if let Some(menu) = &self.pane_menu {
             return menu
                 .items
@@ -700,6 +708,13 @@ impl App {
             }
             return;
         }
+        // The tab context menu owns the mouse while open.
+        if self.tab_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.tab_menu_click(m.column, m.row);
+            }
+            return;
+        }
         // The workspace context menu / rename modal own the mouse while open.
         if self.ws_menu.is_some() {
             if let MouseEventKind::Down(_) = m.kind {
@@ -804,15 +819,14 @@ impl App {
         // highlight (docs/27, RESIZE-4), plus the sidebar edge seam (docs/29).
         self.update_hover_divider(m.column, m.row);
         self.update_hover_sidebar(m.column, m.row);
-        // Right-click a pane tab to rename it (docs/28), a WORKSPACES row for its
-        // context menu (rename / worktree / close), or inside a pane for the pane
-        // menu (split / close).
+        // Right-click a pane tab, WORKSPACES row, agent, file, dock row, or pane
+        // to open the matching context menu.
         if let MouseEventKind::Down(MouseButton::Right) = m.kind {
             let (c, r) = (m.column, m.row);
             let hit =
                 |rect: Rect| c >= rect.x && c < rect.right() && r >= rect.y && r < rect.bottom();
             if let Some((i, _)) = self.tab_rects.iter().find(|(_, rect)| hit(*rect)) {
-                self.open_tab_rename(*i);
+                self.open_tab_menu(*i, c, r);
             } else if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_ws_menu(*i, c, r);
             } else if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {
@@ -2040,6 +2054,11 @@ impl App {
             self.handle_tab_rename_key(key);
             return true;
         }
+        // The tab context menu captures input while open.
+        if self.tab_menu.is_some() {
+            self.handle_tab_menu_key(key);
+            return true;
+        }
         // The workspace context menu / rename modal capture all input while open.
         if self.ws_menu.is_some() {
             self.handle_ws_menu_key(key);
@@ -3092,6 +3111,69 @@ mod link_click_tests {
         assert!(
             app.handle_event(mouse(MouseEventKind::Moved, second, KeyModifiers::NONE)),
             "crossing rows moves the highlight"
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_tab_opens_its_menu_instead_of_rename() {
+        let _env = crate::persist::test_env("tab-right-click-menu");
+        let Fixture { mut app, .. } = fixture();
+        let tab = Rect::new(4, 0, 10, 1);
+        app.tab_rects = vec![(0, tab)];
+
+        assert!(app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            (tab.x + 1, tab.y),
+            KeyModifiers::NONE,
+        )));
+        assert!(app.tab_menu.is_some());
+        assert!(app.tab_rename.is_none());
+    }
+
+    #[test]
+    fn tab_menu_renders_swap_with_submenu_for_other_tabs() {
+        let _env = crate::persist::test_env("tab-switch-submenu");
+        let Fixture {
+            mut app, mut term, ..
+        } = fixture();
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let first_tab = app
+            .tab_rects
+            .iter()
+            .find(|(index, _)| *index == 0)
+            .map(|(_, rect)| *rect)
+            .expect("first tab is visible");
+
+        assert!(app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            (first_tab.x + 1, first_tab.y),
+            KeyModifiers::NONE,
+        )));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let switch_row = app
+            .tab_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(item, _)| *item == TabMenuItem::SwapWith)
+            .map(|(_, rect)| *rect)
+            .expect("Swap With row");
+
+        assert!(app.handle_event(mouse(
+            MouseEventKind::Moved,
+            (switch_row.x + 1, switch_row.y),
+            KeyModifiers::NONE,
+        )));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(
+            app.tab_menu.as_ref().unwrap().swap_rects.len(),
+            1,
+            "the other tab is available in the submenu"
         );
     }
 

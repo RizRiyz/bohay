@@ -45,21 +45,32 @@ special dashboard, such as the `⎇ git` tab or the `◇ orch` board).
 | New tab | the `+` on the tab bar | `Ctrl+Space c` |
 | Next / previous tab | click a tab | `Ctrl+Space n` / `p` / `⇥` |
 | Close a tab | the `×` on the tab | `Ctrl+Space x` (on a dashboard) |
-| **Rename a tab** | **right-click the tab**, type a name, `⏎` | n/a |
+| Rename a tab | right-click the tab → **Rename**, type a name, `⏎` | `luvus tab rename <name>` |
+| Move a tab one position | right-click the tab → **Move Left** / **Move Right** | `luvus tab move left` / `right` |
+| Swap two tab positions | right-click a tab → **Swap With**, choose the other tab | `luvus tab swap <first> <second>` |
 
 A renamed tab shows your label instead of its number (empty reverts to the
-number). The `⎇ git` and `◇ orch` tabs keep their fixed labels.
+number). Dashboard tabs keep their fixed labels. **Swap With** lists every
+other tab in the workspace, including tabs hidden by tab-bar overflow. Choosing
+one exchanges its position with the right-clicked tab without changing which tab
+is active.
 
 The CLI exposes the same pane move plus tab reordering for scripts and agents:
 
 ```sh
 luvus pane move 7 --tab 2       # existing tab in pane 7's workspace
 luvus pane move 7 --new-tab     # append a fresh tab for pane 7
+luvus tab focus 4               # focus exact tab 4
+luvus tab move left             # move the active tab one position left
+luvus tab move right --tab 4    # move exact tab 4 one position right
 luvus tab move 3 1              # move current workspace tab 3 to position 1
+luvus tab swap 1 4              # exchange the tabs in positions 1 and 4
 ```
 
-All tab numbers are 1-based. A pane move keeps its process running and follows
-it with focus. Tab reordering preserves whichever tab was active.
+All tab numbers are 1-based and validated; missing, zero, or out-of-range
+positions fail instead of silently selecting a different tab. A pane move keeps
+its process running and follows it with focus. Tab reordering uses the requested
+final position and preserves whichever tab was active.
 
 ## Workspaces
 

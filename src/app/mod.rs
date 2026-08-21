@@ -364,14 +364,52 @@ pub struct CmdInspect {
 }
 
 /// The tab-rename modal (docs/28): the tab being renamed + its editable buffer,
-/// pre-filled with the current name. Opened by right-clicking a pane tab.
+/// pre-filled with the current name. Opened from a pane tab's context menu.
 pub struct TabRename {
-    pub index: usize,
+    pub target: TabMenuTarget,
     pub buffer: String,
 }
 
+/// Stable-enough identity for a tab context-menu target. A tab's complete leaf
+/// set is unique inside a live session, including dashboard placeholder leaves.
+/// Resolving this snapshot at click time prevents an intervening API reorder
+/// from making the menu act on whichever tab later occupies the old index.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TabMenuTarget {
+    pub workspace: usize,
+    pub leaves: Vec<PaneId>,
+}
+
+/// A right-click context menu on a tab. Reorder availability and module actions
+/// are snapshotted when it opens, while target identities are resolved against
+/// the live tab order when the user clicks.
+pub struct TabMenu {
+    pub target: TabMenuTarget,
+    pub anchor: (u16, u16),
+    pub items: Vec<(TabMenuItem, Rect)>,
+    pub module_actions: Vec<ModuleMenuAction>,
+    pub can_rename: bool,
+    pub can_move_left: bool,
+    pub can_move_right: bool,
+    /// Every other tab, snapshotted for the Swap With submenu.
+    pub swap_targets: Vec<(TabMenuTarget, String)>,
+    pub swap_open: bool,
+    pub swap_rects: Vec<(TabMenuTarget, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabMenuItem {
+    Rename,
+    MoveLeft,
+    MoveRight,
+    SwapWith,
+    Divider,
+    /// The `i`-th module action declaring `contexts = ["tab"]`.
+    Module(usize),
+}
+
 /// Cap a custom tab name so a pathological paste can't bloat the session.
-const TAB_NAME_MAX: usize = 40;
+pub(crate) const TAB_NAME_MAX: usize = 40;
 
 /// A right-click context menu on a WORKSPACES row: rename / worktree / close the
 /// node. Opened by right-clicking a workspace in the sidebar.
@@ -633,6 +671,27 @@ pub struct PaneMoveResult {
 pub enum TabMoveError {
     PositionOutOfRange,
     SamePosition,
+    AlreadyFirst,
+    AlreadyLast,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabMoveDirection {
+    Left,
+    Right,
+}
+
+/// Why an explicit tab focus request could not be applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabFocusError {
+    PositionOutOfRange,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabRenameError {
+    PositionOutOfRange,
+    Dashboard,
+    NameTooLong,
 }
 
 /// Why an existing agent session could not be forked into a sibling pane.
@@ -1119,6 +1178,8 @@ pub struct App {
     pub worktree_prompt: Option<String>,
     /// Active tab-rename modal (docs/28); `None` when closed.
     pub tab_rename: Option<TabRename>,
+    /// Active tab context menu; `None` when closed.
+    pub tab_menu: Option<TabMenu>,
     /// The workspace right-click context menu, and the workspace-rename modal.
     pub ws_menu: Option<WsMenu>,
     /// Armed worktree-delete confirmation: the workspace index of the worktree to
@@ -1544,6 +1605,7 @@ impl App {
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
             tab_rename: None,
+            tab_menu: None,
             ws_menu: None,
             worktree_delete: None,
             pane_menu: None,
@@ -1973,6 +2035,7 @@ impl App {
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
             tab_rename: None,
+            tab_menu: None,
             ws_menu: None,
             worktree_delete: None,
             pane_menu: None,
@@ -2871,10 +2934,13 @@ impl App {
     /// Open the rename modal for tab `index` (docs/28). No-op for the git/orch
     /// dashboards or the `+` button (index past the last tab).
     pub fn open_tab_rename(&mut self, index: usize) {
-        if let Some(tab) = self.ws().tabs.get(index) {
+        let workspace = self.active_ws;
+        if let Some(tab) = self.workspaces[workspace].tabs.get(index) {
             if tab.is_renameable() {
                 let buffer = tab.name.clone().unwrap_or_default();
-                self.tab_rename = Some(TabRename { index, buffer });
+                if let Some(target) = self.tab_menu_target(workspace, index) {
+                    self.tab_rename = Some(TabRename { target, buffer });
+                }
             }
         }
     }
@@ -2886,13 +2952,12 @@ impl App {
             KeyCode::Esc => self.tab_rename = None,
             KeyCode::Enter => {
                 if let Some(r) = self.tab_rename.take() {
-                    let name = r.buffer.trim();
-                    let value = (!name.is_empty()).then(|| name.to_string());
-                    let ws = &mut self.workspaces[self.active_ws];
-                    if let Some(tab) = ws.tabs.get_mut(r.index) {
-                        tab.name = value;
+                    let target = self.resolve_tab_menu_target(&r.target);
+                    if let Some((workspace, index)) = target {
+                        let _ = self.rename_tab_in_workspace(workspace, index, &r.buffer);
+                    } else {
+                        self.show_toast(self.catalog.tab_changed_rename_cancelled);
                     }
-                    self.session_dirty = true;
                 }
             }
             KeyCode::Backspace => {
@@ -2908,6 +2973,196 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    // ── tab context menu (right-click a tab) ──
+
+    fn tab_menu_target(&self, workspace: usize, index: usize) -> Option<TabMenuTarget> {
+        let tab = self.workspaces.get(workspace)?.tabs.get(index)?;
+        Some(TabMenuTarget {
+            workspace,
+            leaves: tab.layout.leaves(),
+        })
+    }
+
+    fn resolve_tab_menu_target(&self, target: &TabMenuTarget) -> Option<(usize, usize)> {
+        let ws = self.workspaces.get(target.workspace)?;
+        let index = ws
+            .tabs
+            .iter()
+            .position(|tab| tab.layout.leaves() == target.leaves)?;
+        Some((target.workspace, index))
+    }
+
+    fn tab_menu_label(tab: &Tab, index: usize) -> String {
+        if let Some(name) = tab.name.as_deref() {
+            name.to_string()
+        } else if tab.is_git() {
+            "git".to_string()
+        } else if tab.is_orch() {
+            "orch".to_string()
+        } else if tab.is_mission() {
+            "ctrl".to_string()
+        } else {
+            format!("#{}", index + 1)
+        }
+    }
+
+    /// Open the context menu for the exact tab that was right-clicked. The `+`
+    /// button shares `tab_rects`, so an index past the real tabs is rejected.
+    pub fn open_tab_menu(&mut self, index: usize, col: u16, row: u16) {
+        let workspace = self.active_ws;
+        let Some(target) = self.tab_menu_target(workspace, index) else {
+            return;
+        };
+        let ws = &self.workspaces[workspace];
+        let tab = &ws.tabs[index];
+        let can_rename = tab.is_renameable();
+        let can_move_left = index > 0;
+        let can_move_right = index + 1 < ws.tabs.len();
+        let swap_targets = ws
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter_map(|(other, tab)| {
+                self.tab_menu_target(workspace, other)
+                    .map(|target| (target, Self::tab_menu_label(tab, other)))
+            })
+            .collect();
+        self.tab_menu = Some(TabMenu {
+            target,
+            anchor: (col, row),
+            items: Vec::new(),
+            module_actions: self.module_menu_actions("tab"),
+            can_rename,
+            can_move_left,
+            can_move_right,
+            swap_targets,
+            swap_open: false,
+            swap_rects: Vec::new(),
+        });
+    }
+
+    /// Stable rows for the open tab menu. Availability is snapshotted at open so
+    /// a background socket request cannot shift which action an old hitbox means.
+    pub fn tab_menu_items(&self) -> Vec<TabMenuItem> {
+        let Some(menu) = self.tab_menu.as_ref() else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        if menu.can_rename {
+            items.push(TabMenuItem::Rename);
+        }
+        if menu.can_move_left {
+            items.push(TabMenuItem::MoveLeft);
+        }
+        if menu.can_move_right {
+            items.push(TabMenuItem::MoveRight);
+        }
+        if !menu.swap_targets.is_empty() {
+            items.push(TabMenuItem::SwapWith);
+        }
+        if !menu.module_actions.is_empty() {
+            if !items.is_empty() {
+                items.push(TabMenuItem::Divider);
+            }
+            items.extend((0..menu.module_actions.len()).map(TabMenuItem::Module));
+        }
+        items
+    }
+
+    /// Route a click to the Swap With submenu or the main tab-menu rows.
+    pub fn tab_menu_click(&mut self, col: u16, row: u16) {
+        let in_rect = |r: &Rect| col >= r.x && col < r.right() && row >= r.y && row < r.bottom();
+        let swap_hit = self.tab_menu.as_ref().and_then(|menu| {
+            menu.swap_rects
+                .iter()
+                .find(|(_, rect)| in_rect(rect))
+                .map(|(target, _)| (menu.target.clone(), target.clone()))
+        });
+        if let Some((source, target)) = swap_hit {
+            self.tab_menu = None;
+            let source = self.resolve_tab_menu_target(&source);
+            let target = self.resolve_tab_menu_target(&target);
+            match (source, target) {
+                (Some((workspace, from)), Some((target_workspace, to)))
+                    if workspace == target_workspace =>
+                {
+                    let _ = self.swap_tabs_in_workspace(workspace, from, to);
+                }
+                _ => self.show_toast(self.catalog.tab_changed_reopen_menu),
+            }
+            return;
+        }
+
+        let hit = self.tab_menu.as_ref().and_then(|menu| {
+            menu.items
+                .iter()
+                .find(|(_, rect)| in_rect(rect))
+                .map(|(item, _)| *item)
+        });
+        match hit {
+            Some(TabMenuItem::SwapWith) => {
+                if let Some(menu) = self.tab_menu.as_mut() {
+                    menu.swap_open = true;
+                }
+            }
+            Some(TabMenuItem::Divider) => {}
+            Some(item) => self.tab_menu_action(item),
+            None => self.tab_menu = None,
+        }
+    }
+
+    /// Run a tab-menu action on the snapshotted tab, then close the menu.
+    pub fn tab_menu_action(&mut self, item: TabMenuItem) {
+        let Some((target, actions)) = self
+            .tab_menu
+            .as_ref()
+            .map(|menu| (menu.target.clone(), menu.module_actions.clone()))
+        else {
+            return;
+        };
+        self.tab_menu = None;
+        let Some((workspace, index)) = self.resolve_tab_menu_target(&target) else {
+            self.show_toast(self.catalog.tab_changed_reopen_menu);
+            return;
+        };
+        match item {
+            TabMenuItem::Rename => {
+                if workspace == self.active_ws {
+                    self.open_tab_rename(index);
+                }
+            }
+            TabMenuItem::MoveLeft => {
+                if self
+                    .move_tab_direction_in_workspace(workspace, index, TabMoveDirection::Left)
+                    .is_err()
+                {
+                    self.show_toast(self.catalog.tab_cannot_move_left);
+                }
+            }
+            TabMenuItem::MoveRight => {
+                if self
+                    .move_tab_direction_in_workspace(workspace, index, TabMoveDirection::Right)
+                    .is_err()
+                {
+                    self.show_toast(self.catalog.tab_cannot_move_right);
+                }
+            }
+            TabMenuItem::SwapWith | TabMenuItem::Divider => {}
+            TabMenuItem::Module(i) => {
+                if let Some(action) = actions.get(i).cloned() {
+                    self.run_module_menu_action("tab", action, Target::tab(workspace, index));
+                }
+            }
+        }
+    }
+
+    pub fn handle_tab_menu_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.tab_menu = None;
         }
     }
 
@@ -3390,7 +3645,70 @@ impl App {
     /// final positions. The active tab follows the same tab object rather than
     /// staying on the old numeric slot.
     pub fn move_tab(&mut self, from: usize, to: usize) -> Result<usize, TabMoveError> {
-        let len = self.ws().tabs.len();
+        self.move_tab_in_workspace(self.active_ws, from, to)
+    }
+
+    /// Swap two tab positions in the active workspace. The active tab follows
+    /// the same tab object when either swapped position contains it.
+    pub fn swap_tabs(&mut self, first: usize, second: usize) -> Result<usize, TabMoveError> {
+        self.swap_tabs_in_workspace(self.active_ws, first, second)
+    }
+
+    /// Move one tab by one adjacent position. `from = None` targets the active
+    /// tab, which powers `luvus tab move left|right`; an explicit zero-based
+    /// source powers `--tab N` and the right-click menu.
+    pub fn move_tab_direction(
+        &mut self,
+        from: Option<usize>,
+        direction: TabMoveDirection,
+    ) -> Result<(usize, usize, usize), TabMoveError> {
+        let from = from.unwrap_or(self.ws().active_tab);
+        let to = self.adjacent_tab_position(self.active_ws, from, direction)?;
+        let active = self.move_tab_in_workspace(self.active_ws, from, to)?;
+        Ok((from, to, active))
+    }
+
+    fn move_tab_direction_in_workspace(
+        &mut self,
+        workspace: usize,
+        from: usize,
+        direction: TabMoveDirection,
+    ) -> Result<usize, TabMoveError> {
+        let to = self.adjacent_tab_position(workspace, from, direction)?;
+        self.move_tab_in_workspace(workspace, from, to)
+    }
+
+    fn adjacent_tab_position(
+        &self,
+        workspace: usize,
+        from: usize,
+        direction: TabMoveDirection,
+    ) -> Result<usize, TabMoveError> {
+        let len = self
+            .workspaces
+            .get(workspace)
+            .map(|ws| ws.tabs.len())
+            .ok_or(TabMoveError::PositionOutOfRange)?;
+        if from >= len {
+            return Err(TabMoveError::PositionOutOfRange);
+        }
+        match direction {
+            TabMoveDirection::Left => from.checked_sub(1).ok_or(TabMoveError::AlreadyFirst),
+            TabMoveDirection::Right if from + 1 < len => Ok(from + 1),
+            TabMoveDirection::Right => Err(TabMoveError::AlreadyLast),
+        }
+    }
+
+    fn move_tab_in_workspace(
+        &mut self,
+        workspace: usize,
+        from: usize,
+        to: usize,
+    ) -> Result<usize, TabMoveError> {
+        let Some(ws) = self.workspaces.get(workspace) else {
+            return Err(TabMoveError::PositionOutOfRange);
+        };
+        let len = ws.tabs.len();
         if from >= len || to >= len {
             return Err(TabMoveError::PositionOutOfRange);
         }
@@ -3398,9 +3716,9 @@ impl App {
             return Err(TabMoveError::SamePosition);
         }
 
-        let active = self.ws().active_tab;
+        let active = ws.active_tab;
         let new_active = {
-            let ws = &mut self.workspaces[self.active_ws];
+            let ws = &mut self.workspaces[workspace];
             let tab = ws.tabs.remove(from);
             ws.tabs.insert(to, tab);
             ws.active_tab = if active == from {
@@ -3418,9 +3736,52 @@ impl App {
         self.emit_event(
             "tab.moved",
             serde_json::json!({
+                "workspace": workspace.to_string(),
                 "from": (from + 1).to_string(),
                 "to": (to + 1).to_string(),
                 "active": (new_active + 1).to_string(),
+            }),
+        );
+        Ok(new_active)
+    }
+
+    fn swap_tabs_in_workspace(
+        &mut self,
+        workspace: usize,
+        first: usize,
+        second: usize,
+    ) -> Result<usize, TabMoveError> {
+        let Some(ws) = self.workspaces.get(workspace) else {
+            return Err(TabMoveError::PositionOutOfRange);
+        };
+        if first >= ws.tabs.len() || second >= ws.tabs.len() {
+            return Err(TabMoveError::PositionOutOfRange);
+        }
+        if first == second {
+            return Err(TabMoveError::SamePosition);
+        }
+
+        let new_active = {
+            let ws = &mut self.workspaces[workspace];
+            ws.tabs.swap(first, second);
+            ws.active_tab = if ws.active_tab == first {
+                second
+            } else if ws.active_tab == second {
+                first
+            } else {
+                ws.active_tab
+            };
+            ws.active_tab
+        };
+        self.session_dirty = true;
+        self.emit_event(
+            "tab.moved",
+            serde_json::json!({
+                "workspace": workspace.to_string(),
+                "from": (first + 1).to_string(),
+                "to": (second + 1).to_string(),
+                "active": (new_active + 1).to_string(),
+                "mode": "swap",
             }),
         );
         Ok(new_active)
@@ -3627,11 +3988,59 @@ impl App {
         }
     }
 
-    fn switch_tab(&mut self, i: usize) {
-        let ws = &mut self.workspaces[self.active_ws];
-        if i < ws.tabs.len() {
-            ws.active_tab = i;
+    /// Focus an exact zero-based tab position in the active workspace.
+    pub fn focus_tab(&mut self, index: usize) -> Result<(), TabFocusError> {
+        self.focus_tab_in_workspace(self.active_ws, index)
+    }
+
+    /// Rename an exact zero-based tab in the active workspace. Empty text clears
+    /// the custom label; dashboards retain their fixed product labels.
+    pub fn rename_tab(&mut self, index: usize, name: &str) -> Result<(), TabRenameError> {
+        self.rename_tab_in_workspace(self.active_ws, index, name)
+    }
+
+    fn rename_tab_in_workspace(
+        &mut self,
+        workspace: usize,
+        index: usize,
+        name: &str,
+    ) -> Result<(), TabRenameError> {
+        let name = name.trim();
+        if name.chars().count() > TAB_NAME_MAX {
+            return Err(TabRenameError::NameTooLong);
         }
+        let tab = self
+            .workspaces
+            .get_mut(workspace)
+            .and_then(|ws| ws.tabs.get_mut(index))
+            .ok_or(TabRenameError::PositionOutOfRange)?;
+        if !tab.is_renameable() {
+            return Err(TabRenameError::Dashboard);
+        }
+        tab.name = (!name.is_empty()).then(|| name.to_string());
+        self.session_dirty = true;
+        Ok(())
+    }
+
+    fn focus_tab_in_workspace(
+        &mut self,
+        workspace: usize,
+        index: usize,
+    ) -> Result<(), TabFocusError> {
+        if self
+            .workspaces
+            .get(workspace)
+            .is_none_or(|ws| index >= ws.tabs.len())
+        {
+            return Err(TabFocusError::PositionOutOfRange);
+        }
+        self.active_ws = workspace;
+        self.workspaces[workspace].active_tab = index;
+        Ok(())
+    }
+
+    fn switch_tab(&mut self, i: usize) {
+        let _ = self.focus_tab(i);
     }
 
     fn cycle_tab(&mut self, delta: isize) {
@@ -4954,6 +5363,7 @@ mod tests {
             "tab.list",
             "tab.new",
             "tab.move",
+            "tab.swap",
             "tab.close",
             "tab.rename",
             "pane.move",
@@ -7207,6 +7617,135 @@ mod tests {
             .map(|tab| tab.name.clone().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(after, before, "failed tab moves leave the order untouched");
+    }
+
+    #[test]
+    fn tab_move_is_correct_for_every_source_destination_and_active_position() {
+        let _env = crate::persist::test_env("tab-move-exhaustive");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let original = ["a", "b", "c", "d"];
+
+        for active in 0..original.len() {
+            for from in 0..original.len() {
+                for to in 0..original.len() {
+                    if from == to {
+                        continue;
+                    }
+                    app.workspaces[0].tabs = original
+                        .iter()
+                        .map(|name| {
+                            let mut tab = Tab::panes(TileLayout::new(PaneId::alloc()));
+                            tab.name = Some((*name).to_string());
+                            tab
+                        })
+                        .collect();
+                    app.workspaces[0].active_tab = active;
+
+                    let active_name = original[active];
+                    let mut expected = original.to_vec();
+                    let moved = expected.remove(from);
+                    expected.insert(to, moved);
+
+                    let new_active = app.move_tab(from, to).expect("valid permutation");
+                    let actual = app
+                        .ws()
+                        .tabs
+                        .iter()
+                        .map(|tab| tab.name.as_deref().unwrap())
+                        .collect::<Vec<_>>();
+                    assert_eq!(actual, expected, "active={active}, from={from}, to={to}");
+                    assert_eq!(
+                        app.ws().tabs[new_active].name.as_deref(),
+                        Some(active_name),
+                        "active tab identity changed: active={active}, from={from}, to={to}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_context_menu_reorders_swaps_and_renames_its_exact_target() {
+        let _env = crate::persist::test_env("tab-context-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].tabs = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| {
+                let mut tab = Tab::panes(TileLayout::new(PaneId::alloc()));
+                tab.name = Some(name.to_string());
+                tab
+            })
+            .collect();
+        app.workspaces[0].active_tab = 2;
+
+        app.open_tab_menu(1, 10, 2);
+        assert_eq!(
+            app.tab_menu_items(),
+            [
+                TabMenuItem::Rename,
+                TabMenuItem::MoveLeft,
+                TabMenuItem::MoveRight,
+                TabMenuItem::SwapWith,
+            ]
+        );
+        app.tab_menu_action(TabMenuItem::MoveLeft);
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["b", "a", "c"]);
+        assert_eq!(app.ws().active_tab, 2, "active C stays active");
+
+        // The open menu follows B by identity even if an API reorder occurs
+        // before its action is clicked.
+        app.open_tab_menu(0, 10, 2);
+        app.move_tab(0, 2).unwrap();
+        app.tab_menu_action(TabMenuItem::MoveLeft);
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["a", "b", "c"]);
+
+        // Swap With resolves both snapshots after an intervening reorder,
+        // then swaps those exact tabs rather than their old numeric positions.
+        app.open_tab_menu(0, 10, 2);
+        let target = app
+            .tab_menu
+            .as_ref()
+            .unwrap()
+            .swap_targets
+            .iter()
+            .find(|(_, label)| label == "c")
+            .unwrap()
+            .0
+            .clone();
+        app.tab_menu.as_mut().unwrap().swap_rects = vec![(target, Rect::new(20, 4, 8, 1))];
+        app.move_tab(0, 1).unwrap();
+        app.tab_menu_click(21, 4);
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["b", "c", "a"]);
+        assert_eq!(app.ws().active_tab, 1, "active C follows its new position");
+
+        app.open_tab_menu(1, 10, 2);
+        app.tab_menu_action(TabMenuItem::Rename);
+        let rename_target = app.tab_rename.as_ref().unwrap().target.clone();
+        assert_eq!(app.resolve_tab_menu_target(&rename_target), Some((0, 1)));
+
+        app.tab_menu = None;
+        app.open_tab_menu(3, 10, 2); // the tab bar's `+` pseudo-index
+        assert!(app.tab_menu.is_none());
     }
 
     #[test]

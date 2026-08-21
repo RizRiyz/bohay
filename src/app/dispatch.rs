@@ -869,15 +869,42 @@ impl App {
                 Ok(json!({"type":"tab","tab": (self.ws().active_tab + 1).to_string()}))
             }
             "tab.focus" => {
-                if let Some(i) = param_usize(p, "tab") {
-                    self.switch_tab(i.saturating_sub(1));
-                }
+                let index = required_one_based_param(p, "tab")?;
+                self.focus_tab(index).map_err(tab_focus_error)?;
                 Ok(json!({"type":"ok"}))
             }
             "tab.move" => {
-                let from = required_one_based_param(p, "tab")?;
-                let to = required_one_based_param(p, "to")?;
-                let active = self.move_tab(from, to).map_err(tab_move_error)?;
+                let (from, to, active) = if let Some(raw_direction) =
+                    p.get("direction").filter(|direction| !direction.is_null())
+                {
+                    if p.get("to").is_some() {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "direction and to cannot be used together".to_string(),
+                        ));
+                    }
+                    let direction = match raw_direction.as_str() {
+                        Some("left") => TabMoveDirection::Left,
+                        Some("right") => TabMoveDirection::Right,
+                        _ => {
+                            return Err((
+                                "invalid_request".to_string(),
+                                "direction must be left or right".to_string(),
+                            ))
+                        }
+                    };
+                    let from = p
+                        .get("tab")
+                        .map(|_| required_one_based_param(p, "tab"))
+                        .transpose()?;
+                    self.move_tab_direction(from, direction)
+                        .map_err(tab_move_error)?
+                } else {
+                    let from = required_one_based_param(p, "tab")?;
+                    let to = required_one_based_param(p, "to")?;
+                    let active = self.move_tab(from, to).map_err(tab_move_error)?;
+                    (from, to, active)
+                };
                 Ok(json!({
                     "type": "tab_move",
                     "from": (from + 1).to_string(),
@@ -885,26 +912,32 @@ impl App {
                     "active": (active + 1).to_string(),
                 }))
             }
+            "tab.swap" => {
+                let first = required_one_based_param(p, "tab")?;
+                let second = required_one_based_param(p, "with")?;
+                let active = self.swap_tabs(first, second).map_err(tab_move_error)?;
+                Ok(json!({
+                    "type": "tab_swap",
+                    "tab": (first + 1).to_string(),
+                    "with": (second + 1).to_string(),
+                    "active": (active + 1).to_string(),
+                }))
+            }
             // Name a tab from a module (docs/13 §3.9) — the same label the
             // tab-rename modal writes. An empty name clears it back to a number.
             "tab.rename" => {
-                let i = param_usize(p, "tab")
-                    .map(|i| i.saturating_sub(1))
+                let index = p
+                    .get("tab")
+                    .map(|_| required_one_based_param(p, "tab"))
+                    .transpose()?
                     .unwrap_or(self.ws().active_tab);
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
-                let active = self.active_ws;
-                let tab = self.workspaces[active]
-                    .tabs
-                    .get_mut(i)
-                    .ok_or_else(not_found)?;
-                // Git/orch tabs keep their fixed labels (docs/28).
-                if tab.git.is_some() || tab.orch {
-                    return Err(module_err(
-                        "git and orch tabs cannot be renamed".to_string(),
-                    ));
-                }
-                tab.name = (!name.is_empty()).then(|| name.chars().take(40).collect());
-                self.session_dirty = true;
+                let name = p.get("name").and_then(Value::as_str).ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "name must be a string (empty clears the tab name)".to_string(),
+                    )
+                })?;
+                self.rename_tab(index, name).map_err(tab_rename_error)?;
                 Ok(json!({"type":"ok"}))
             }
             "tab.close" => {
@@ -2084,6 +2117,24 @@ fn tab_move_error(err: TabMoveError) -> (String, String) {
     let message = match err {
         TabMoveError::PositionOutOfRange => "tab position is out of range",
         TabMoveError::SamePosition => "source and destination tab positions must differ",
+        TabMoveError::AlreadyFirst => "tab is already at the left edge",
+        TabMoveError::AlreadyLast => "tab is already at the right edge",
+    };
+    ("invalid_request".to_string(), message.to_string())
+}
+
+fn tab_focus_error(err: TabFocusError) -> (String, String) {
+    let message = match err {
+        TabFocusError::PositionOutOfRange => "tab position is out of range",
+    };
+    ("invalid_request".to_string(), message.to_string())
+}
+
+fn tab_rename_error(err: TabRenameError) -> (String, String) {
+    let message = match err {
+        TabRenameError::PositionOutOfRange => "tab position is out of range",
+        TabRenameError::Dashboard => "dashboard tabs cannot be renamed",
+        TabRenameError::NameTooLong => "tab name must be at most 40 characters",
     };
     ("invalid_request".to_string(), message.to_string())
 }
@@ -2937,6 +2988,30 @@ mod tests {
             Some("c")
         );
 
+        let out = app
+            .dispatch("tab.move", &json!({"tab": 3, "to": 1, "direction": null}))
+            .expect("null direction uses explicit tab positions");
+        assert_eq!(
+            out,
+            json!({
+                "type": "tab_move",
+                "from": "3",
+                "to": "1",
+                "active": "3",
+            })
+        );
+        let names = app
+            .ws()
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c")
+        );
+
         for params in [
             json!({"tab": 0, "to": 1}),
             json!({"tab": 1, "to": 1}),
@@ -2948,6 +3023,183 @@ mod tests {
                 .expect_err("invalid tab move must fail");
             assert_eq!(err.0, "invalid_request", "params: {params}");
         }
+    }
+
+    #[test]
+    fn tab_move_api_supports_directional_active_and_explicit_targets() {
+        let _env = crate::persist::test_env("tab-move-direction-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].tabs[0].name = Some("a".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("b".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[2].name = Some("c".into());
+
+        let out = app
+            .dispatch("tab.move", &json!({"direction": "left"}))
+            .expect("active tab moves left");
+        assert_eq!(
+            out,
+            json!({"type":"tab_move", "from":"3", "to":"2", "active":"2"})
+        );
+        let names = |app: &App| {
+            app.ws()
+                .tabs
+                .iter()
+                .map(|tab| tab.name.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&app), ["a", "c", "b"]);
+
+        let out = app
+            .dispatch("tab.move", &json!({"direction": "right", "tab": 1}))
+            .expect("explicit tab moves right");
+        assert_eq!(
+            out,
+            json!({"type":"tab_move", "from":"1", "to":"2", "active":"1"})
+        );
+        assert_eq!(names(&app), ["c", "a", "b"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c"),
+            "active tab identity is preserved"
+        );
+
+        for params in [
+            json!({"direction": "left", "tab": 1}),
+            json!({"direction": "right", "tab": 3}),
+            json!({"direction": "up"}),
+            json!({"direction": "left", "to": 1}),
+            json!({"direction": "right", "tab": 0}),
+        ] {
+            let before = names(&app);
+            let err = app
+                .dispatch("tab.move", &params)
+                .expect_err("invalid directional move must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            assert_eq!(names(&app), before, "failure is atomic: {params}");
+        }
+    }
+
+    #[test]
+    fn tab_swap_api_exchanges_positions_and_preserves_active_identity() {
+        let _env = crate::persist::test_env("tab-swap-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].tabs[0].name = Some("a".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[1].name = Some("b".into());
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+        app.workspaces[0].tabs[2].name = Some("c".into());
+
+        let out = app
+            .dispatch("tab.swap", &json!({"tab": 1, "with": "3"}))
+            .expect("valid tab swap");
+        assert_eq!(
+            out,
+            json!({"type":"tab_swap", "tab":"1", "with":"3", "active":"1"})
+        );
+        let names = |app: &App| {
+            app.ws()
+                .tabs
+                .iter()
+                .map(|tab| tab.name.clone().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&app), ["c", "b", "a"]);
+        assert_eq!(
+            app.ws().tabs[app.ws().active_tab].name.as_deref(),
+            Some("c")
+        );
+
+        for params in [
+            json!({}),
+            json!({"tab": 0, "with": 1}),
+            json!({"tab": 1, "with": 1}),
+            json!({"tab": 1, "with": 9}),
+        ] {
+            let before = names(&app);
+            let err = app
+                .dispatch("tab.swap", &params)
+                .expect_err("invalid tab swap must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            let after = names(&app);
+            assert_eq!(after, before, "failure is atomic: {params}");
+        }
+    }
+
+    #[test]
+    fn tab_focus_api_requires_an_existing_one_based_position() {
+        let _env = crate::persist::test_env("tab-focus-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+
+        assert_eq!(
+            app.dispatch("tab.focus", &json!({"tab": "1"})),
+            Ok(json!({"type": "ok"}))
+        );
+        assert_eq!(app.ws().active_tab, 0);
+
+        for params in [json!({}), json!({"tab": 0}), json!({"tab": 3})] {
+            let before = app.ws().active_tab;
+            let err = app
+                .dispatch("tab.focus", &params)
+                .expect_err("invalid focus must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            assert_eq!(app.ws().active_tab, before, "failure is atomic");
+        }
+    }
+
+    #[test]
+    fn tab_rename_api_validates_target_name_and_dashboard_kind() {
+        let _env = crate::persist::test_env("tab-rename-api");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(crate::app::keys::Cmd::NewTab);
+
+        app.dispatch("tab.rename", &json!({"name": "active"}))
+            .expect("omitting tab targets the active tab");
+        assert_eq!(app.ws().tabs[1].name.as_deref(), Some("active"));
+
+        app.dispatch("tab.rename", &json!({"tab": 1, "name": " first "}))
+            .expect("explicit one-based tab is accepted");
+        assert_eq!(app.ws().tabs[0].name.as_deref(), Some("first"));
+        app.dispatch("tab.rename", &json!({"tab": 1, "name": ""}))
+            .expect("an explicit empty name clears the label");
+        assert_eq!(app.ws().tabs[0].name, None);
+
+        let names = |app: &App| {
+            app.ws()
+                .tabs
+                .iter()
+                .map(|tab| tab.name.clone())
+                .collect::<Vec<_>>()
+        };
+        for params in [
+            json!({"tab": 0, "name": "wrong"}),
+            json!({"tab": "nope", "name": "wrong"}),
+            json!({"tab": 9, "name": "wrong"}),
+            json!({"tab": 1}),
+            json!({"tab": 1, "name": 7}),
+            json!({"tab": 1, "name": "x".repeat(41)}),
+        ] {
+            let before = names(&app);
+            let err = app
+                .dispatch("tab.rename", &params)
+                .expect_err("invalid rename must fail");
+            assert_eq!(err.0, "invalid_request", "params: {params}");
+            assert_eq!(names(&app), before, "failure is atomic: {params}");
+        }
+
+        app.open_mission_control(0);
+        let mission = app.ws().active_tab + 1;
+        let err = app
+            .dispatch("tab.rename", &json!({"tab": mission, "name": "wrong"}))
+            .expect_err("dashboard rename must fail");
+        assert_eq!(err.0, "invalid_request");
+        assert!(app.ws().tabs[mission - 1].name.is_none());
     }
 
     #[test]

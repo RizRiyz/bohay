@@ -115,7 +115,9 @@ tabs:
   tab list                   list tabs in the current workspace
   tab new                    new tab
   tab focus <n>              focus tab n (1-based)
-  tab move <from> <to>       reorder tabs in the current workspace (1-based)
+  tab move <from> <to>       move a tab to an exact position (1-based)
+  tab move left|right        move the active tab one position (--tab N targets one)
+  tab swap <first> <second>  exchange two tab positions (1-based)
   tab rename <name>          name a tab (--tab N to target one; empty clears it)
   tab close [<n>]            close a tab (default: active)
 
@@ -1882,10 +1884,53 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
 
         ("tab", "new") => ("tab.new".into(), json!({})),
-        ("tab", "focus") => ("tab.focus".into(), one("tab", arg0())),
+        ("tab", "focus") => {
+            if rest.len() != 1 {
+                return Err(anyhow!("usage: luvus tab focus <n>"));
+            }
+            let tab = rest[0]
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| anyhow!("tab position must be a positive 1-based number"))?;
+            ("tab.focus".into(), json!({"tab": tab.to_string()}))
+        }
         ("tab", "move") => {
+            let parse_position = |raw: &str| -> Result<String> {
+                raw.parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .map(|n| n.to_string())
+                    .ok_or_else(|| anyhow!("tab positions must be positive 1-based numbers"))
+            };
+            let usage = "usage: luvus tab move <from> <to> | left|right [--tab N]";
+            if rest
+                .first()
+                .is_some_and(|arg| matches!(arg.as_str(), "left" | "right"))
+            {
+                let valid_shape = rest.len() == 1 || (rest.len() == 3 && rest[1] == "--tab");
+                if !valid_shape {
+                    return Err(anyhow!(usage));
+                }
+                let mut params = serde_json::Map::new();
+                params.insert("direction".to_string(), json!(rest[0]));
+                if rest.len() == 3 {
+                    params.insert("tab".to_string(), json!(parse_position(&rest[2])?));
+                }
+                ("tab.move".into(), Value::Object(params))
+            } else {
+                if rest.len() != 2 {
+                    return Err(anyhow!(usage));
+                }
+                let from = parse_position(&rest[0])?;
+                let to = parse_position(&rest[1])?;
+                ("tab.move".into(), json!({"tab": from, "to": to}))
+            }
+        }
+        ("tab", "swap") => {
+            let usage = "usage: luvus tab swap <first> <second>";
             if rest.len() != 2 {
-                return Err(anyhow!("usage: luvus tab move <from> <to>"));
+                return Err(anyhow!(usage));
             }
             let parse_position = |raw: &str| -> Result<String> {
                 raw.parse::<usize>()
@@ -1894,16 +1939,54 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                     .map(|n| n.to_string())
                     .ok_or_else(|| anyhow!("tab positions must be positive 1-based numbers"))
             };
-            let from = parse_position(&rest[0])?;
-            let to = parse_position(&rest[1])?;
-            ("tab.move".into(), json!({"tab": from, "to": to}))
+            let first = parse_position(&rest[0])?;
+            let second = parse_position(&rest[1])?;
+            if first == second {
+                return Err(anyhow!("tab positions must differ"));
+            }
+            ("tab.swap".into(), json!({"tab": first, "with": second}))
         }
         ("tab", "close") => ("tab.close".into(), one("tab", arg0())),
         // `tab rename <name>` names the active tab; `--tab N` targets another.
         ("tab", "rename") => {
+            let mut words = Vec::new();
+            let mut tab = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--tab" => {
+                        if tab.is_some() || i + 1 >= rest.len() {
+                            return Err(anyhow!("usage: luvus tab rename <name> [--tab N]"));
+                        }
+                        let position = rest[i + 1]
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|n| *n > 0)
+                            .ok_or_else(|| {
+                                anyhow!("tab position must be a positive 1-based number")
+                            })?;
+                        tab = Some(position.to_string());
+                        i += 2;
+                    }
+                    arg if arg.starts_with("--") => {
+                        return Err(anyhow!("unknown tab rename option `{arg}`"));
+                    }
+                    _ => {
+                        words.push(rest[i].as_str());
+                        i += 1;
+                    }
+                }
+            }
+            let name = words.join(" ");
+            if name.chars().count() > crate::app::TAB_NAME_MAX {
+                return Err(anyhow!(
+                    "tab name must be at most {} characters",
+                    crate::app::TAB_NAME_MAX
+                ));
+            }
             let mut obj = serde_json::Map::new();
-            obj.insert("name".to_string(), json!(rest_text()));
-            if let Some(n) = flag(args, "--tab") {
+            obj.insert("name".to_string(), json!(name));
+            if let Some(n) = tab {
                 obj.insert("tab".to_string(), json!(n));
             }
             ("tab.rename".into(), Value::Object(obj))
@@ -2447,6 +2530,22 @@ mod tests {
         assert_eq!(m, "tab.move");
         assert_eq!(p, json!({"tab": "3", "to": "1"}));
 
+        let (m, p) = parse(&argv("luvus tab move left")).unwrap();
+        assert_eq!(m, "tab.move");
+        assert_eq!(p, json!({"direction": "left"}));
+
+        let (m, p) = parse(&argv("luvus tab move right --tab 3")).unwrap();
+        assert_eq!(m, "tab.move");
+        assert_eq!(p, json!({"direction": "right", "tab": "3"}));
+
+        let (m, p) = parse(&argv("luvus tab focus 2")).unwrap();
+        assert_eq!(m, "tab.focus");
+        assert_eq!(p, json!({"tab": "2"}));
+
+        let (m, p) = parse(&argv("luvus tab swap 1 3")).unwrap();
+        assert_eq!(m, "tab.swap");
+        assert_eq!(p, json!({"tab": "1", "with": "3"}));
+
         for bad in [
             "luvus pane move 7",
             "luvus pane move 7 --tab 0",
@@ -2458,11 +2557,51 @@ mod tests {
             "luvus tab move 1",
             "luvus tab move 0 1",
             "luvus tab move 1 two",
+            "luvus tab move left --tab 0",
+            "luvus tab move right --tab",
+            "luvus tab move left right",
+            "luvus tab move up",
+            "luvus tab swap 1",
+            "luvus tab swap 0 1",
+            "luvus tab swap 1 two",
+            "luvus tab swap 2 2",
+            "luvus tab swap 1 2 extra",
+            "luvus tab focus",
+            "luvus tab focus 0",
+            "luvus tab focus two",
+            "luvus tab focus 1 extra",
             "luvus pane teleport 7",
             "luvus tab reorder 2 1",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }
+    }
+
+    #[test]
+    fn tab_rename_validates_optional_target_and_name_length() {
+        let (method, params) = parse(&argv("luvus tab rename review notes --tab 2")).unwrap();
+        assert_eq!(method, "tab.rename");
+        assert_eq!(params, json!({"name": "review notes", "tab": "2"}));
+
+        let (method, params) = parse(&argv("luvus tab rename")).unwrap();
+        assert_eq!(method, "tab.rename");
+        assert_eq!(params, json!({"name": ""}));
+
+        for bad in [
+            "luvus tab rename review --tab 0",
+            "luvus tab rename review --tab nope",
+            "luvus tab rename review --tab",
+            "luvus tab rename review --tab 1 --tab 2",
+            "luvus tab rename review --unknown value",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
+
+        let long = format!("luvus tab rename {}", "x".repeat(41));
+        assert!(
+            parse(&argv(&long)).is_err(),
+            "41-character name is rejected"
+        );
     }
 
     #[test]

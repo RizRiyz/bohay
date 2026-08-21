@@ -156,6 +156,13 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
         .ws_menu
         .as_mut()
         .map(|menu| std::mem::take(&mut menu.items));
+    let tab_menu_state = app.tab_menu.as_mut().map(|menu| {
+        (
+            std::mem::take(&mut menu.items),
+            std::mem::take(&mut menu.swap_rects),
+            menu.swap_open,
+        )
+    });
     let pane_menu_state = app.pane_menu.as_mut().map(|menu| {
         (
             std::mem::take(&mut menu.items),
@@ -252,6 +259,13 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     }
     if let (Some(items), Some(menu)) = (ws_menu_items, app.ws_menu.as_mut()) {
         menu.items = items;
+    }
+    if let (Some((items, swap_rects, swap_open)), Some(menu)) =
+        (tab_menu_state, app.tab_menu.as_mut())
+    {
+        menu.items = items;
+        menu.swap_rects = swap_rects;
+        menu.swap_open = swap_open;
     }
     if let (Some((items, tab_rects, move_open)), Some(menu)) =
         (pane_menu_state, app.pane_menu.as_mut())
@@ -648,6 +662,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
+    if app.tab_menu.is_some() {
+        menu::draw_tab_menu(f, area, app, cat, &t);
+    }
     if app.pane_menu.is_some() {
         menu::draw_pane_menu(f, area, app, cat, &t);
     }
@@ -749,6 +766,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || app.help_open
         || app.worktree_prompt.is_some()
         || app.tab_rename.is_some()
+        || app.tab_menu.is_some()
         || app.ws_rename.is_some()
         || app.pane_rename.is_some()
         || app.ws_menu.is_some()

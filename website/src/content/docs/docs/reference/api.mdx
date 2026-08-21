@@ -42,7 +42,7 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 | Family | Methods |
 |---|---|
 | workspaces | `workspace.list` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.close` |
-| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.rename` · `tab.close` |
+| tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.get` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
@@ -88,7 +88,11 @@ Public tab positions are 1-based.
 |---|---|---|
 | `pane.move` | `{pane?, tab}` | `{type:"pane_move", pane, workspace, tab}` |
 | `pane.move` | `{pane?, new_tab:true}` | `{type:"pane_move", pane, workspace, tab}` |
+| `tab.focus` | `{tab}` | `{type:"ok"}` |
 | `tab.move` | `{tab, to}` | `{type:"tab_move", from, to, active}` |
+| `tab.move` | `{direction, tab?}` where direction is `"left"` or `"right"` | `{type:"tab_move", from, to, active}` |
+| `tab.swap` | `{tab, with}` | `{type:"tab_swap", tab, with, active}` |
+| `tab.rename` | `{name, tab?}` | `{type:"ok"}` |
 
 `pane.move` resolves an explicit pane anywhere, then keeps the move inside that
 pane's workspace. The pane's process and PTY stay alive, focus follows it, and
@@ -98,10 +102,18 @@ Pass exactly one of `tab` or `new_tab:true`. The result's `workspace` is the
 same zero-based workspace index used by the other workspace API results; its
 `tab` is the pane's final 1-based position after any empty source tab is removed.
 
-`tab.move` reorders the active workspace's tab vector. `to` is the desired final
-position, and the currently active tab remains active even when its number
-changes. Zero, missing, same-position, and out-of-range values return
+`tab.focus` selects one exact tab in the active workspace. `tab.move` either
+moves a tab to the requested final `to` position or moves it one position using
+`direction`. Directional movement targets the active tab when `tab` is omitted.
+`tab.swap` exchanges the positions identified by `tab` and `with`. The currently
+active tab remains active even when its number changes. Zero, missing,
+out-of-range, same-position, edge, and mixed `direction` + `to` requests return
 `invalid_request` without changing state.
+
+`tab.rename` targets the active tab when `tab` is omitted. `name` must be a
+string of at most 40 characters after trimming; an explicit empty string clears
+the custom label. Invalid, zero, or out-of-range tab positions and all dashboard
+tabs return `invalid_request` without renaming another tab.
 
 ## Pane history metrics
 
