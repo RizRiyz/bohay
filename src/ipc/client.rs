@@ -194,7 +194,8 @@ pub fn remote_bridge(sock: &Path) -> Result<()> {
 
 /// Pump bytes both directions: `input → local_writer` (a background thread) and
 /// `local_reader → output` (this thread). Returns when either side closes.
-/// Protocol-agnostic — it just copies bytes.
+/// Protocol-agnostic — it copies and flushes each available chunk so a
+/// long-lived SSH pipe cannot buffer interactive frames indefinitely.
 pub fn relay<LR, LW, I, O>(
     local_reader: LR,
     local_writer: LW,
@@ -210,11 +211,30 @@ where
     let mut local_writer = local_writer;
     let mut input = input;
     thread::spawn(move || {
-        let _ = std::io::copy(&mut input, &mut local_writer);
+        let _ = copy_and_flush(&mut input, &mut local_writer);
     });
     let mut local_reader = local_reader;
-    std::io::copy(&mut local_reader, &mut output)?;
+    copy_and_flush(&mut local_reader, &mut output)?;
     Ok(())
+}
+
+/// Copy a stream without adding user-space batching latency. `Read` may return
+/// any protocol fragment, so flushing per read preserves byte transparency
+/// while making every currently available chunk visible to the next hop.
+fn copy_and_flush<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io::Result<u64> {
+    let mut buf = [0u8; 16 * 1024];
+    let mut copied = 0u64;
+
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            writer.flush()?;
+            return Ok(copied);
+        }
+        writer.write_all(&buf[..read])?;
+        writer.flush()?;
+        copied += read as u64;
+    }
 }
 
 /// Begin/end a DEC 2026 synchronized update so a frame paints atomically (no
@@ -333,7 +353,7 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::relay;
+    use super::{copy_and_flush, relay};
     use std::io::{Cursor, Read, Write};
     use std::os::unix::net::UnixStream;
     use std::thread;
@@ -397,6 +417,38 @@ mod tests {
 
         assert_eq!(&srv.join().unwrap(), b"hello", "input forwarded to server");
         assert_eq!(output, b"world", "server reply forwarded to output");
+    }
+
+    #[test]
+    fn streaming_copy_flushes_each_available_chunk() {
+        #[derive(Default)]
+        struct BufferedWriter {
+            pending: Vec<u8>,
+            visible: Vec<u8>,
+            flushes: usize,
+        }
+
+        impl Write for BufferedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.pending.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.visible.append(&mut self.pending);
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+
+        let mut reader = Cursor::new(b"interactive frame".to_vec());
+        let mut writer = BufferedWriter::default();
+        let copied = copy_and_flush(&mut reader, &mut writer).unwrap();
+
+        assert_eq!(copied, 17);
+        assert_eq!(writer.visible, b"interactive frame");
+        assert!(writer.pending.is_empty());
+        assert!(writer.flushes >= 1, "frame must be visible before EOF");
     }
 
     /// A real scratch server must negotiate a client-owned terminal palette and
