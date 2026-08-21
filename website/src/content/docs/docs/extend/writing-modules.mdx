@@ -252,7 +252,7 @@ Startup commands get the normal environment plus `LUVUS_MODULE_EVENT=startup`.
 ### `[[bars]]`: compact chrome widgets
 
 A bar declaration reserves one module-owned identity. It does not draw until a
-startup/event/action script publishes structured content with `ui bar push`.
+startup/event/action script publishes structured content with `luvus bar push`.
 Users can place each declaration at Top, Bottom, or Off in
 **Settings → Layout → Luvus Bar**. The declaration list itself stays stable
 while placement changes.
@@ -274,7 +274,7 @@ command = ["sh", "details.sh"]
 ```
 
 ```sh
-"${LUVUS_BIN_PATH:-luvus}" ui bar push \
+"${LUVUS_BIN_PATH:-luvus}" bar push \
   --id ci --region top-right \
   --content '[{"type":"text","text":"CI"},{"type":"state","state":"done","label":"passing"},{"type":"badge","text":"2","action":"details","value":"run-1842"}]' \
   --compact-content '[{"type":"text","text":"CI"},{"type":"state","state":"done","action":"details","value":"run-1842"}]'

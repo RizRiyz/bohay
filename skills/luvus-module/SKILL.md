@@ -29,7 +29,7 @@ platforms = ["macos", "linux"]  # optional; omit = all. Also per-item.
 Then any of these tables, each declaring an argv `command` (a list, run as-is, cwd = the module dir):
 
 - **`[[docks]]`** `id`, `title`, `placement` (`sidebar.left` | `sidebar.right`) — reserve a sidebar dock. luvus renders it; you fill it with `ui.dock.push` (see below).
-- **`[[bars]]`** `id`, `title`, `region` (`top-right` | `bottom-right`), optional `priority` — reserve a bounded one-row Luvus Bar widget. Publish structured segments with `ui.bar.push`; live content is not persisted.
+- **`[[bars]]`** `id`, `title`, `region` (`top-right` | `bottom-right`), optional `priority` — reserve a bounded one-row Luvus Bar widget. Publish structured segments with `luvus bar push` (`ui.bar.push` on the socket API); live content is not persisted.
 - **`[[startup]]`** `command` — run once when the session is up and the socket is listening (and on enable). Dock rows and bar content are **not** persisted, so this is how you repaint them after a restart.
 - **`[[events]]`** `on`, `command` — run when a luvus event fires. Valid `on` values include `workspace.created`/`closed`, `tab.created`/`closed`/`moved`, `pane.created`/`closed`/`forked`/`moved`, `pane.agent_status_changed`, `agent.hook`, and the `task.*`/`lease.*` events (see `KNOWN_EVENTS` in `src/module/manifest.rs` for the full set — an unknown `on` is a hard manifest error).
 - **`[[actions]]`** `id`, `title`, `command`, optional `contexts` — a runnable action. With `contexts = ["pane"|"workspace"|"node"|"agent"|"tab"]` it also appears in that right-click menu, acting on **what was clicked**. Without `contexts` it is CLI-only (`luvus module run <id> <action>`). Dock rows also invoke an action on click.
@@ -55,7 +55,7 @@ luvus puts context in the environment, flat, so a bash module never parses JSON:
 Run the `luvus` CLI from inside the command; it talks to the running server over `$LUVUS_SOCKET_PATH`. Use `"$LUVUS_BIN_PATH"` to guarantee the same binary as the session. Module-facing methods:
 
 - `luvus ui dock push --id <dock> --rows <json>` (or pipe the JSON on stdin) — fill your dock. Rows are `{text, action?, value?}`; a row's `action` invokes one of your `[[actions]]` on click, with the row's `value` in `LUVUS_MODULE_ROW_VALUE`.
-- `luvus ui bar push --id <widget> --content <json>` — atomically publish structured `text`, `symbol`, `state`, `badge`, `progress`, `spacer`, and `separator` segments. Add `--compact-content`; an `action` must name one of your `[[actions]]`.
+- `luvus bar push --id <widget> --content <json>` — atomically publish structured `text`, `symbol`, `state`, `badge`, `progress`, `spacer`, and `separator` segments. Add `--compact-content`; an `action` must name one of your `[[actions]]`.
 - `luvus ui notification push --text <text> --level info|success|warning|error` — publish bounded transient status; use `--dedupe-key` for replacement.
 - `luvus ui toast "<text>"` — flash a one-line confirmation.
 - `luvus ui sidebar` / `ui dock list` / `ui dock move` — sidebar/dock control.

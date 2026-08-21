@@ -251,11 +251,11 @@ space. Extra inactive tabs use the existing tab-scroll window.
 The equivalent wrappers are:
 
 ```sh
-luvus ui bar list
-luvus ui bar push --id status --region top-right --content '[{"type":"text","text":"CI"}]'
-luvus ui bar push --id status --content-file ./bar.json
-luvus ui bar move --id status --region bottom-right
-luvus ui bar remove --id status
+luvus bar list
+luvus bar push --id status --region top-right --content '[{"type":"text","text":"CI"}]'
+luvus bar push --id status --content-file ./bar.json
+luvus bar move --id status --region bottom-right
+luvus bar remove --id status
 luvus ui notification push --text "CI passed" --level success --ttl-ms 4000
 luvus ui notification clear --dedupe-key ci-main
 ```

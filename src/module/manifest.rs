@@ -41,7 +41,7 @@ pub struct ModuleManifest {
     #[serde(default)]
     pub docks: Vec<DockEntry>,
     /// Compact single-row Luvus Bar widgets. A declaration grants ownership;
-    /// content arrives later through `ui.bar.push`.
+    /// content arrives later through `luvus bar push` (`ui.bar.push` on the API).
     #[serde(default)]
     pub bars: Vec<BarWidgetEntry>,
     /// User-editable settings rendered in Settings → Modules (docs/13 §3.6).

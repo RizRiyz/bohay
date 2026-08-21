@@ -19,6 +19,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "workspace"
                 | "tab"
                 | "agent"
+                | "bar"
                 | "ui"
                 | "events"
                 | "module"
@@ -57,6 +58,7 @@ Commands:
   task         Coordinate work across multiple coding agents
   lease        Reserve file paths for active tasks
   module       Find, install, configure, and run extensions
+  bar          Publish and arrange top and bottom status widgets
   ui           Configure sidebars, docks, and notifications
   session      List, attach, stop, and delete server sessions
   server       Inspect and manage the selected background server
@@ -159,6 +161,14 @@ search:
   search <text...> [--case]  find text across every pane's scrollback (docs/63);
                              --case is case-sensitive; returns matches as JSON
 
+bars:
+  bar list                   list declared Luvus Bar widgets and live content
+  bar push --id <id> [--region top-right|bottom-right] --content <json>
+                             publish validated persistent widget segments;
+                             --content-file, --compact-content, --text and --state supported
+  bar move --id <id> --region top-right|bottom-right|off
+  bar remove --id <id>       clear live widget content, preserving placement
+
 appearance:
   ui sidebar [--side left|right] --width <n>     set a sidebar's width (columns)
   ui sidebar [--side left|right] --hide|--show   toggle a sidebar
@@ -167,12 +177,6 @@ appearance:
   ui dock push --id <id> [--title <t>] [--side left|right] [--rows <json>]
                              feed a module's sidebar dock its rows (JSON array,
                              or piped on stdin). See docs/29 + the website
-  ui bar list                list declared Luvus Bar widgets and live content
-  ui bar push --id <id> [--region top-right|bottom-right] --content <json>
-                             publish validated persistent widget segments;
-                             --content-file, --compact-content, --text and --state supported
-  ui bar move --id <id> --region top-right|bottom-right|off
-  ui bar remove --id <id>    clear live widget content, preserving placement
   ui notification push --text <text> [--level info|success|warning|error]
   ui notification clear [--dedupe-key <key>]
   ui toast <text>            flash a one-line message in the UI
@@ -415,6 +419,7 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "task"
             | "lease"
             | "module"
+            | "bar"
             | "ui"
             | "session"
             | "server"
@@ -427,8 +432,8 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
 fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
-        | "lease" | "module" | "ui" | "session" | "server" | "integration" | "skill" | "wait"
-        | "search" | "events" | "ping" | "doctor" | "attach" => Some(topic),
+        | "lease" | "module" | "bar" | "ui" | "session" | "server" | "integration" | "skill"
+        | "wait" | "search" | "events" | "ping" | "doctor" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -486,10 +491,14 @@ fn write_topic_help(
         ),
         "search" => (
             "luvus search <text...> [--case]",
-            detailed_section("search:\n", "\nappearance:\n"),
+            detailed_section("search:\n", "\nbars:\n"),
+        ),
+        "bar" => (
+            "luvus bar <list|push|move|remove> [args]",
+            detailed_section("bars:\n", "\nappearance:\n"),
         ),
         "ui" => (
-            "luvus ui <sidebar|dock|bar|notification|toast> [args]",
+            "luvus ui <sidebar|dock|notification|toast> [args]",
             detailed_section("appearance:\n", "\nmodules (extensions):\n"),
         ),
         "module" => (
@@ -1870,15 +1879,14 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 _ => ("ui.dock.list".into(), json!({})),
             }
         }
-        ("ui", "bar") => {
-            let sub = rest.first().map(String::as_str).unwrap_or("list");
+        ("bar", sub) => {
             let mut obj = serde_json::Map::new();
             if let Ok(owner) = std::env::var("LUVUS_MODULE_ID") {
                 obj.insert("owner".into(), json!(owner));
             }
             match sub {
                 "push" => {
-                    let usage = "usage: luvus ui bar push --id <id> [--region top-right|bottom-right] (--content <json>|--content-file <path>|--text <text>|--state <state>)";
+                    let usage = "usage: luvus bar push --id <id> [--region top-right|bottom-right] (--content <json>|--content-file <path>|--text <text>|--state <state>)";
                     let id = flag(args, "--id").ok_or_else(|| anyhow!(usage))?;
                     obj.insert("id".into(), json!(id));
                     if let Some(region) = flag(args, "--region") {
@@ -1950,7 +1958,11 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                     ("ui.bar.push".into(), Value::Object(obj))
                 }
                 "move" => {
-                    let id = flag(args, "--id").ok_or_else(|| anyhow!("usage: luvus ui bar move --id <id> --region top-right|bottom-right|off"))?;
+                    let id = flag(args, "--id").ok_or_else(|| {
+                        anyhow!(
+                            "usage: luvus bar move --id <id> --region top-right|bottom-right|off"
+                        )
+                    })?;
                     let region =
                         flag(args, "--region").ok_or_else(|| anyhow!("--region is required"))?;
                     if !matches!(
@@ -1965,12 +1977,12 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 }
                 "remove" => {
                     let id = flag(args, "--id")
-                        .ok_or_else(|| anyhow!("usage: luvus ui bar remove --id <id>"))?;
+                        .ok_or_else(|| anyhow!("usage: luvus bar remove --id <id>"))?;
                     obj.insert("id".into(), json!(id));
                     ("ui.bar.remove".into(), Value::Object(obj))
                 }
-                "list" => ("ui.bar.list".into(), Value::Object(obj)),
-                _ => return Err(anyhow!("usage: luvus ui bar list|push|move|remove")),
+                "" | "list" => ("ui.bar.list".into(), Value::Object(obj)),
+                _ => return Err(anyhow!("usage: luvus bar list|push|move|remove")),
             }
         }
         ("ui", "notification") => {
@@ -2869,7 +2881,6 @@ mod tests {
         std::env::set_var("LUVUS_MODULE_ID", "you.ci");
         let args = vec![
             "luvus".into(),
-            "ui".into(),
             "bar".into(),
             "push".into(),
             "--id".into(),
@@ -2885,7 +2896,7 @@ mod tests {
         assert_eq!(params["content"].as_array().unwrap().len(), 2);
 
         let (method, params) =
-            parse(&argv("luvus ui bar move --id status --region bottom-right")).unwrap();
+            parse(&argv("luvus bar move --id status --region bottom-right")).unwrap();
         assert_eq!(method, "ui.bar.move");
         assert_eq!(params["region"], "bottom-right");
 
@@ -2899,8 +2910,9 @@ mod tests {
         std::env::remove_var("LUVUS_MODULE_ID");
 
         for bad in [
-            "luvus ui bar push --id status",
-            "luvus ui bar move --id status --region middle",
+            "luvus bar push --id status",
+            "luvus bar move --id status --region middle",
+            "luvus ui bar list",
             "luvus ui notification push --text bad --level urgent",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");

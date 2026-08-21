@@ -127,7 +127,7 @@ impl App {
             self.bar.sync_modules(&self.modules);
         } else {
             // Make declarations visible before the asynchronous startup command
-            // can call `ui.bar.push`.
+            // can call `luvus bar push` (`ui.bar.push` on the socket API).
             self.bar.sync_modules(&self.modules);
             self.run_module_startup_hooks();
         }

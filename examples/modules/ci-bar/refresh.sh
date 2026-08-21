@@ -6,7 +6,7 @@ set -eu
 
 luvus="${LUVUS_BIN_PATH:-luvus}"
 
-"$luvus" ui bar push \
+"$luvus" bar push \
   --id status \
   --region top-right \
   --priority 60 \
