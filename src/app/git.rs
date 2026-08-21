@@ -34,7 +34,10 @@ impl App {
         let ws_root = self.workspaces[wsi].cwd.clone();
         let mut root = ws_root.clone();
         let mut check = local::repo_check(&root);
-        if !matches!(check, local::RepoCheck::Repo) {
+        // Only fall back on an ordinary "not a repo" root. A workspace-root
+        // `Error` (broken `git`, bad `PATH`, ...) must still surface as a
+        // toast, even when the focused pane happens to be a valid repo.
+        if matches!(check, local::RepoCheck::NotRepo) {
             let pane_cwd = self.focused_cwd();
             if pane_cwd != ws_root {
                 let pane_check = local::repo_check(&pane_cwd);
