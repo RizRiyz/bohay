@@ -60,11 +60,12 @@ import { spawn } from "node:child_process"
 
 export const luvus = async () => {
   let last = ""
+  const luvusBin = process.env.LUVUS_BIN_PATH || "luvus"
   const report = (id) => {
     if (!id || id === last || !process.env.LUVUS_SOCKET_PATH) return
     last = id
     try {
-      spawn("luvus", ["pane", "report", "--agent", "opencode", "--session", String(id)], {
+      spawn(luvusBin, ["pane", "report", "--agent", "opencode", "--session", String(id)], {
         stdio: "ignore",
         detached: true,
       }).unref()
@@ -913,6 +914,10 @@ mod tests {
         let js = fs::read_to_string(&plugin).unwrap();
         assert!(js.contains("session.created"), "hooks the session event");
         assert!(js.contains("--agent"), "reports the session");
+        assert!(
+            js.contains("process.env.LUVUS_BIN_PATH"),
+            "uses the exact server-selected binary before PATH fallback"
+        );
         assert!(js.contains("opencode"));
         assert!(is_installed("opencode"));
 
