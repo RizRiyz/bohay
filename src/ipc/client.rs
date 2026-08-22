@@ -158,9 +158,11 @@ where
     Ok(exit)
 }
 
-/// Replace this thin client process with the same launch mode targeting another
-/// logical session. Re-exec cleanly drops the old terminal-input thread; local
-/// launches and `--remote` retain their existing arguments and SSH options.
+/// Hand this thin client process to the same launch mode targeting another
+/// logical session. Unix replaces the process. Windows starts the successor
+/// and immediately lets this process exit, so the old terminal-input thread is
+/// never left reading alongside the new client. Local launches and `--remote`
+/// retain their existing arguments and SSH options.
 fn switch_session_process(name: &str) -> Result<()> {
     crate::session::validate_name(name).map_err(anyhow::Error::msg)?;
     let raw: Vec<String> = std::env::args().collect();
@@ -178,12 +180,8 @@ fn switch_session_process(name: &str) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let status = command.status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(anyhow!("session client exited with {status}"))
-        }
+        command.spawn()?;
+        Ok(())
     }
 }
 

@@ -86,6 +86,12 @@ impl ServerStartupLock {
 #[derive(Clone)]
 pub struct Conn(Arc<Stream>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimeoutMode {
+    Kernel,
+    Nonblocking,
+}
+
 impl Conn {
     fn new(stream: Stream) -> Self {
         Conn(Arc::new(stream))
@@ -93,11 +99,23 @@ impl Conn {
 
     /// Bound control-plane requests such as cross-session search. Unix local
     /// sockets support kernel timeouts; named pipes may report Unsupported, in
-    /// which case callers still keep one bounded worker per endpoint.
-    pub fn set_timeouts(&self, timeout: Duration) -> io::Result<()> {
+    /// which case the connection becomes nonblocking so the caller can enforce
+    /// an application deadline without leaving a blocked worker behind.
+    pub fn set_timeouts(&self, timeout: Duration) -> io::Result<TimeoutMode> {
         use interprocess::local_socket::traits::Stream as _;
-        self.0.set_recv_timeout(Some(timeout))?;
-        self.0.set_send_timeout(Some(timeout))
+        for result in [
+            self.0.set_recv_timeout(Some(timeout)),
+            self.0.set_send_timeout(Some(timeout)),
+        ] {
+            if let Err(error) = result {
+                if error.kind() != io::ErrorKind::Unsupported {
+                    return Err(error);
+                }
+                self.0.set_nonblocking(true)?;
+                return Ok(TimeoutMode::Nonblocking);
+            }
+        }
+        Ok(TimeoutMode::Kernel)
     }
 }
 

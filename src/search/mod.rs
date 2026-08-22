@@ -131,7 +131,9 @@ pub enum SearchTarget {
         ws: usize,
         tab: usize,
         workspace_cwd: PathBuf,
-        tab_label: String,
+        /// Snapshot of the tab's pane leaves. Unlike the display index, this
+        /// identity survives tab moves and swaps within the live workspace.
+        tab_leaves: Vec<PaneId>,
     },
     Pane {
         pane: PaneId,

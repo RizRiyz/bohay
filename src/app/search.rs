@@ -115,6 +115,22 @@ fn state_name(state: crate::ui::theme::State) -> &'static str {
 }
 
 impl App {
+    fn resolve_search_tab(
+        &self,
+        workspace: usize,
+        workspace_cwd: &std::path::Path,
+        leaves: &[PaneId],
+    ) -> Option<usize> {
+        if self.workspaces.get(workspace)?.cwd != workspace_cwd {
+            return None;
+        }
+        self.resolve_tab_menu_target(&super::TabMenuTarget {
+            workspace,
+            leaves: leaves.to_vec(),
+        })
+        .map(|(_, tab)| tab)
+    }
+
     fn search_recent_files(&self) -> Vec<SearchEntry> {
         let session = crate::session::display_name();
         self.recent_files
@@ -203,7 +219,7 @@ impl App {
                         ws: wi,
                         tab: ti,
                         workspace_cwd: ws.cwd.clone(),
-                        tab_label: tab_name(tab, ti),
+                        tab_leaves: tab.layout.leaves(),
                     },
                     wi == self.active_ws && ti == ws.active_tab,
                 ));
@@ -777,17 +793,11 @@ impl App {
             }
             SearchTarget::Tab {
                 ws,
-                tab,
+                tab: _,
                 workspace_cwd,
-                tab_label,
+                tab_leaves,
             } => {
-                if self.workspaces.get(ws).is_some_and(|workspace| {
-                    workspace.cwd == workspace_cwd
-                        && workspace
-                            .tabs
-                            .get(tab)
-                            .is_some_and(|target| tab_name(target, tab) == tab_label)
-                }) {
+                if let Some(tab) = self.resolve_search_tab(ws, &workspace_cwd, &tab_leaves) {
                     self.active_ws = ws;
                     self.workspaces[ws].active_tab = tab;
                 }
@@ -878,24 +888,31 @@ impl App {
                 }
                 "tab" => {
                     let ws = workspace()?;
-                    let tab = target
+                    // Keep accepting the display position for schema clarity,
+                    // but resolve the live tab from its stable leaf snapshot.
+                    let _tab = target
                         .get("tab")
                         .and_then(serde_json::Value::as_u64)
                         .and_then(|value| usize::try_from(value).ok())
                         .and_then(|value| value.checked_sub(1))
                         .ok_or_else(|| "target.tab must be a 1-based index".to_string())?;
-                    let label = target
-                        .get("tab_label")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| "target.tab_label is required".to_string())?;
-                    if !self.workspaces.get(ws).is_some_and(|workspace| {
-                        workspace
-                            .tabs
-                            .get(tab)
-                            .is_some_and(|target| tab_name(target, tab) == label)
-                    }) {
-                        return Err("target tab no longer exists".to_string());
-                    }
+                    let leaves = target
+                        .get("tab_panes")
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| "target.tab_panes must be an array".to_string())?
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .and_then(|value| value.parse::<u32>().ok())
+                                .map(PaneId)
+                                .ok_or_else(|| "target.tab_panes must contain pane IDs".to_string())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let workspace_cwd = self.workspaces[ws].cwd.clone();
+                    let tab = self
+                        .resolve_search_tab(ws, &workspace_cwd, &leaves)
+                        .ok_or_else(|| "target tab no longer exists".to_string())?;
                     self.active_ws = ws;
                     self.workspaces[ws].active_tab = tab;
                 }
@@ -1343,13 +1360,13 @@ fn search_match_json(found: &SearchMatch) -> serde_json::Value {
             ws,
             tab,
             workspace_cwd,
-            tab_label,
+            tab_leaves,
         } => {
             serde_json::json!({
                 "workspace": ws,
                 "workspace_path": workspace_cwd.to_string_lossy(),
                 "tab": tab + 1,
-                "tab_label": tab_label,
+                "tab_panes": tab_leaves.iter().map(|pane| pane.0.to_string()).collect::<Vec<_>>(),
             })
         }
         SearchTarget::Pane { pane } | SearchTarget::Agent { pane } => {
@@ -1633,6 +1650,47 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&app.handle_search_activate(&bad)).unwrap();
         assert_eq!(value["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn unnamed_tab_target_follows_the_tab_across_reordering() {
+        let _env = crate::persist::test_env("fuzzy-search-tab-identity");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = PaneId::alloc();
+        let second = PaneId::alloc();
+        app.workspaces[0].tabs = [first, second]
+            .into_iter()
+            .map(|pane| super::super::Tab::panes(crate::layout::TileLayout::new(pane)))
+            .collect();
+        app.workspaces[0].active_tab = 0;
+        let cwd = app.workspaces[0].cwd.clone();
+
+        app.move_tab(0, 1).unwrap();
+        assert_eq!(
+            app.resolve_search_tab(0, &cwd, &[first]),
+            Some(1),
+            "the target follows the original unnamed tab instead of index 1"
+        );
+
+        let request = crate::ipc::api::ApiRequest {
+            id: "tab-activate".into(),
+            method: "search.activate".into(),
+            params: serde_json::json!({
+                "kind": "tab",
+                "target": {
+                    "workspace": 0,
+                    "workspace_path": cwd,
+                    "tab": 1,
+                    "tab_panes": [first.0.to_string()],
+                },
+            }),
+            reply: std::sync::mpsc::channel().0,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&app.handle_search_activate(&request)).unwrap();
+        assert_eq!(value["result"]["activated"], true);
+        assert_eq!(app.workspaces[0].active_tab, 1);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -190,24 +190,106 @@ pub fn activate_session(session: &str, kind: SearchKind, target: Value) -> Resul
 fn request(path: &Path, method: &str, params: Value) -> Result<Value, String> {
     let mut stream = crate::ipc::transport::connect(path)
         .map_err(|error| format!("session is unavailable: {error}"))?;
-    let _ = stream.set_timeouts(SESSION_TIMEOUT);
     let request = json!({ "id": "federated-search", "method": method, "params": params });
-    writeln!(stream, "{request}").map_err(|error| error.to_string())?;
-    stream.flush().map_err(|error| error.to_string())?;
-
-    let mut response = String::new();
-    let bytes = stream
-        .take(MAX_SESSION_RESPONSE_BYTES + 1)
-        .read_to_string(&mut response)
-        .map_err(|error| format!("session search timed out or failed: {error}"))?;
-    if bytes as u64 > MAX_SESSION_RESPONSE_BYTES {
-        return Err("session search response exceeded 1 MiB".to_string());
-    }
+    let wire = format!("{request}\n");
+    let response = match stream
+        .set_timeouts(SESSION_TIMEOUT)
+        .map_err(|error| format!("cannot bound session search: {error}"))?
+    {
+        crate::ipc::transport::TimeoutMode::Kernel => {
+            stream
+                .write_all(wire.as_bytes())
+                .map_err(|error| error.to_string())?;
+            stream.flush().map_err(|error| error.to_string())?;
+            let mut response = String::new();
+            let bytes = stream
+                .take(MAX_SESSION_RESPONSE_BYTES + 1)
+                .read_to_string(&mut response)
+                .map_err(|error| format!("session search timed out or failed: {error}"))?;
+            if bytes as u64 > MAX_SESSION_RESPONSE_BYTES {
+                return Err("session search response exceeded 1 MiB".to_string());
+            }
+            response
+        }
+        crate::ipc::transport::TimeoutMode::Nonblocking => {
+            request_nonblocking(&mut stream, wire.as_bytes(), SESSION_TIMEOUT)?
+        }
+    };
     let line = response
         .lines()
         .next()
         .ok_or_else(|| "session returned an empty response".to_string())?;
     serde_json::from_str(line).map_err(|error| format!("invalid session response: {error}"))
+}
+
+fn request_nonblocking(
+    stream: &mut (impl Read + Write),
+    request: &[u8],
+    timeout: Duration,
+) -> Result<String, String> {
+    let deadline = Instant::now() + timeout;
+    let mut written = 0;
+    while written < request.len() {
+        match stream.write(&request[written..]) {
+            Ok(0) => return Err("session closed while receiving search request".to_string()),
+            Ok(bytes) => written += bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                wait_for_io(deadline)?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    loop {
+        match stream.flush() {
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                wait_for_io(deadline)?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) if response.is_empty() => {
+                return Err("session returned an empty response".to_string())
+            }
+            Ok(0) => break,
+            Ok(bytes) => {
+                let room = (MAX_SESSION_RESPONSE_BYTES as usize + 1).saturating_sub(response.len());
+                response.extend_from_slice(&chunk[..bytes.min(room)]);
+                if response.len() as u64 > MAX_SESSION_RESPONSE_BYTES {
+                    return Err("session search response exceeded 1 MiB".to_string());
+                }
+                if response.contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                wait_for_io(deadline)?;
+            }
+            Err(error) => return Err(format!("session search timed out or failed: {error}")),
+        }
+    }
+    String::from_utf8(response).map_err(|error| format!("invalid session response: {error}"))
+}
+
+fn wait_for_io(deadline: Instant) -> Result<(), String> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err("session search timed out".to_string());
+    }
+    std::thread::sleep(
+        deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(2)),
+    );
+    Ok(())
 }
 
 fn parse_kind(kind: &str) -> Result<SearchKind, String> {
@@ -227,10 +309,37 @@ fn parse_kind(kind: &str) -> Result<SearchKind, String> {
 mod tests {
     use super::*;
 
+    struct NeverReady;
+
+    impl Read for NeverReady {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    impl Write for NeverReady {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn kind_schema_is_strict() {
         assert_eq!(parse_kind("folder").unwrap(), SearchKind::Workspace);
         assert!(parse_kind("command").is_err());
+    }
+
+    #[test]
+    fn nonblocking_fallback_has_an_application_deadline() {
+        let started = Instant::now();
+        let error = request_nonblocking(&mut NeverReady, b"request\n", Duration::from_millis(10))
+            .unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

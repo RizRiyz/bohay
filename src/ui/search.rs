@@ -105,14 +105,20 @@ pub(super) fn draw_search(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         Rect::new(inner.x, inner.y + 2, inner.width, 1),
     );
 
+    let list_x = inner.x.saturating_add(1).min(inner.right());
+    let list_y = inner.y.saturating_add(4).min(inner.bottom());
+    let list_right = inner.right().saturating_sub(1).max(inner.x);
+    let list_bottom = inner.bottom().saturating_sub(2).max(inner.y);
     let list = Rect::new(
-        inner.x + 1,
-        inner.y + 4,
-        inner.width.saturating_sub(2),
-        inner.height.saturating_sub(6),
+        list_x,
+        list_y,
+        list_right.saturating_sub(list_x),
+        list_bottom.saturating_sub(list_y),
     );
-    let visible = (list.height / ITEM_HEIGHT).max(1) as usize;
-    let scroll = if search.cursor >= visible {
+    let visible = (list.height / ITEM_HEIGHT) as usize;
+    let scroll = if visible == 0 {
+        0
+    } else if search.cursor >= visible {
         search.cursor - visible + 1
     } else {
         0
@@ -121,7 +127,15 @@ pub(super) fn draw_search(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     for (visible_row, index) in (scroll..search.results.len().min(scroll + visible)).enumerate() {
         let result = &search.results[index];
         let y = list.y + visible_row as u16 * ITEM_HEIGHT;
-        let rect = Rect::new(list.x, y, list.width, ITEM_HEIGHT.min(list.bottom() - y));
+        let rect = Rect::new(
+            list.x,
+            y,
+            list.width,
+            ITEM_HEIGHT.min(list.bottom().saturating_sub(y)),
+        );
+        if rect.is_empty() {
+            continue;
+        }
         let selected = index == search.cursor;
         let base = if selected {
             Style::new().fg(t.text).bg(t.sel_bg)
@@ -176,7 +190,7 @@ pub(super) fn draw_search(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         rects.push((index, rect));
     }
 
-    if search.results.is_empty() {
+    if search.results.is_empty() && !list.is_empty() {
         let text = if search.loading {
             "  searching…"
         } else if search.query.is_empty() {
@@ -296,5 +310,32 @@ mod tests {
             "the kind is aligned to the right: {row:?}"
         );
         assert!(!row.contains('·'), "result kinds do not use glyph icons");
+    }
+
+    #[test]
+    fn short_modal_never_places_result_rows_outside_the_overlay() {
+        let _env = crate::persist::test_env("fuzzy-search-short-modal");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(12, 5, tx).unwrap();
+        app.open_search();
+
+        let area = Rect::new(0, 0, 12, 5);
+        let mut buffer = Buffer::empty(area);
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            draw_search(&mut target, area, &mut app, &Theme::quattro_rally());
+        }
+
+        let rects = &app.search.as_ref().unwrap().rects;
+        assert!(
+            rects.is_empty(),
+            "a five-row terminal has no drawable result row"
+        );
+        assert!(rects.iter().all(|(_, rect)| {
+            rect.y >= area.y
+                && rect.bottom() <= area.bottom()
+                && rect.x >= area.x
+                && rect.right() <= area.right()
+        }));
     }
 }

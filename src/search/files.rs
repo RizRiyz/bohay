@@ -1,12 +1,13 @@
 //! Bounded, off-loop file-path discovery for the global finder (docs/90).
 
 use std::collections::HashSet;
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::{FILE_BYTES_CAP, FILE_COUNT_CAP};
@@ -26,6 +27,7 @@ pub struct FileCatalog {
 
 const CACHE_TTL: Duration = Duration::from_secs(2);
 const CACHE_BYTES_CAP: usize = 32 * 1024 * 1024;
+const GIT_INDEX_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct CacheEntry {
     root: PathBuf,
@@ -35,6 +37,18 @@ struct CacheEntry {
 }
 
 static CACHE: OnceLock<Mutex<Vec<CacheEntry>>> = OnceLock::new();
+
+fn cached_catalog(
+    entries: &mut Vec<CacheEntry>,
+    key: &Path,
+    now: Instant,
+) -> Option<Arc<FileCatalog>> {
+    entries.retain(|entry| now.duration_since(entry.at) <= CACHE_TTL);
+    entries
+        .iter()
+        .find(|entry| entry.root == key)
+        .map(|entry| Arc::clone(&entry.catalog))
+}
 
 pub fn index(root: &Path) -> FileCatalog {
     git_files(root).unwrap_or_else(|| walk_files(root))
@@ -47,11 +61,8 @@ pub fn index_cached(root: &Path) -> Arc<FileCatalog> {
     let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
     if let Ok(mut entries) = cache.lock() {
-        let now = Instant::now();
-        entries.retain(|entry| now.duration_since(entry.at) <= CACHE_TTL);
-        if let Some(entry) = entries.iter_mut().find(|entry| entry.root == key) {
-            entry.at = now;
-            return Arc::clone(&entry.catalog);
+        if let Some(catalog) = cached_catalog(&mut entries, &key, Instant::now()) {
+            return catalog;
         }
     }
 
@@ -81,6 +92,7 @@ pub fn index_cached(root: &Path) -> Arc<FileCatalog> {
 }
 
 fn git_files(root: &Path) -> Option<FileCatalog> {
+    let deadline = Instant::now() + GIT_INDEX_TIMEOUT;
     let mut child = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -90,24 +102,34 @@ fn git_files(root: &Path) -> Option<FileCatalog> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; 16 * 1024];
-    let mut truncated = false;
-    loop {
-        let n = stdout.read(&mut chunk).ok()?;
-        if n == 0 {
-            break;
-        }
-        let room = FILE_BYTES_CAP.saturating_sub(bytes.len());
-        bytes.extend_from_slice(&chunk[..n.min(room)]);
-        if n > room || bytes.len() >= FILE_BYTES_CAP {
-            truncated = true;
-            let _ = child.kill();
-            break;
-        }
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let _ = tx.send(read_git_output(stdout));
+    });
+    let (bytes, mut truncated) =
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(output)) => output,
+            Ok(Err(_)) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+        };
+    if truncated {
+        let _ = child.kill();
     }
-    let status = child.wait().ok()?;
+    let _ = reader.join();
+    let status = if truncated {
+        child.wait().ok()?
+    } else {
+        wait_for_child(&mut child, deadline)?
+    };
     if !status.success() && !truncated {
         return None;
     }
@@ -138,6 +160,40 @@ fn git_files(root: &Path) -> Option<FileCatalog> {
         truncated,
         partial: false,
     })
+}
+
+fn wait_for_child(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                return child.wait().ok();
+            }
+        }
+    }
+}
+
+fn read_git_output(mut stdout: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let n = stdout.read(&mut chunk)?;
+        if n == 0 {
+            return Ok((bytes, false));
+        }
+        let room = FILE_BYTES_CAP.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&chunk[..n.min(room)]);
+        if n > room || bytes.len() >= FILE_BYTES_CAP {
+            return Ok((bytes, true));
+        }
+    }
 }
 
 fn walk_files(root: &Path) -> FileCatalog {
@@ -244,5 +300,35 @@ mod tests {
         let second = index_cached(&root);
         assert!(Arc::ptr_eq(&first, &second));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_ttl_is_measured_from_insertion_not_last_hit() {
+        let inserted = Instant::now();
+        let key = PathBuf::from("workspace");
+        let catalog = Arc::new(FileCatalog::default());
+        let mut entries = vec![CacheEntry {
+            root: key.clone(),
+            at: inserted,
+            bytes: 0,
+            catalog: Arc::clone(&catalog),
+        }];
+
+        let hit = cached_catalog(&mut entries, &key, inserted + CACHE_TTL / 2).unwrap();
+        assert!(Arc::ptr_eq(&hit, &catalog));
+        assert!(cached_catalog(
+            &mut entries,
+            &key,
+            inserted + CACHE_TTL + Duration::from_millis(1)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn git_output_reader_caps_bytes_without_waiting_for_eof() {
+        let data = vec![b'x'; FILE_BYTES_CAP + 1];
+        let (bytes, truncated) = read_git_output(std::io::Cursor::new(data)).unwrap();
+        assert_eq!(bytes.len(), FILE_BYTES_CAP);
+        assert!(truncated);
     }
 }
