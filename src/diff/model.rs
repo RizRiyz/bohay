@@ -241,7 +241,7 @@ fn hex_decode(value: &str) -> Result<Vec<u8>, String> {
     }
     let mut out = Vec::with_capacity(value.len() / 2);
     let bytes = value.as_bytes();
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let hi = hex_nibble(pair[0]).ok_or_else(|| "invalid path encoding".to_string())?;
         let lo = hex_nibble(pair[1]).ok_or_else(|| "invalid path encoding".to_string())?;
         out.push((hi << 4) | lo);
