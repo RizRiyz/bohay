@@ -4819,6 +4819,8 @@ impl App {
     /// server to outlive, so it quits like a normal terminal app.
     fn all_workspaces_closed(&mut self) {
         self.session_dirty = true;
+        self.fail_pending_files_api("no active workspace while FILES was loading");
+        self.fail_pending_diff_api("no active workspace while DIFF was refreshing");
         if self.server_mode {
             self.end_session = true;
         } else {

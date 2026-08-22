@@ -65,6 +65,20 @@ impl App {
         }
     }
 
+    /// Fail every parked DIFF request when its workspace disappears before the
+    /// status worker can complete it.
+    pub(crate) fn fail_pending_diff_api(&mut self, message: &str) {
+        for (_, req) in self.pending_diff_api.drain(..) {
+            let _ = req.reply.send(
+                serde_json::json!({"id":req.id,"error":{
+                    "code":"diff_error",
+                    "message":message
+                }})
+                .to_string(),
+            );
+        }
+    }
+
     pub(crate) fn ensure_diff_snapshot(&self) -> Result<(), String> {
         if self.diff_snapshot_matches_active_workspace() {
             return Ok(());

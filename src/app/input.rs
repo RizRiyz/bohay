@@ -2832,6 +2832,55 @@ mod tests {
         assert!(resp.contains("pong"), "got a real pong, not EOF: {resp}");
     }
 
+    #[test]
+    fn closing_last_workspace_fails_parked_files_and_diff_requests() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let root = app.ws().cwd.clone();
+
+        let (files_reply, files_rx) = std::sync::mpsc::channel();
+        app.pending_file_tree_api.push((
+            root.clone(),
+            crate::ipc::api::ApiRequest {
+                id: "files".into(),
+                method: "files.tree".into(),
+                params: serde_json::Value::Null,
+                reply: files_reply,
+            },
+        ));
+        let (diff_reply, diff_rx) = std::sync::mpsc::channel();
+        app.pending_diff_api.push((
+            root,
+            crate::ipc::api::ApiRequest {
+                id: "diff".into(),
+                method: "diff.list".into(),
+                params: serde_json::Value::Null,
+                reply: diff_reply,
+            },
+        ));
+
+        app.close_workspace(0);
+
+        let files = files_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("FILES waiter failed when its workspace closed");
+        assert!(files.contains("files_error"), "unexpected reply: {files}");
+        assert!(
+            files.contains("no active workspace"),
+            "unexpected reply: {files}"
+        );
+        let diff = diff_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("DIFF waiter failed when its workspace closed");
+        assert!(diff.contains("diff_error"), "unexpected reply: {diff}");
+        assert!(
+            diff.contains("no active workspace"),
+            "unexpected reply: {diff}"
+        );
+        assert!(app.pending_file_tree_api.is_empty());
+        assert!(app.pending_diff_api.is_empty());
+    }
+
     // Agents treat Enter as "submit" and Shift+Enter as "new line". A terminal
     // sends a bare CR for both, so luvus asks for the disambiguating keyboard
     // protocol and forwards the modified form as `ESC CR` — the sequence agent

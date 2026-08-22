@@ -103,6 +103,20 @@ impl App {
         }
     }
 
+    /// Fail every parked FILES request when its workspace can no longer
+    /// produce a directory result, such as when the final workspace closes.
+    pub(crate) fn fail_pending_files_api(&mut self, message: &str) {
+        for (_, req) in self.pending_file_tree_api.drain(..) {
+            let _ = req.reply.send(
+                serde_json::json!({"id":req.id,"error":{
+                    "code":"files_error",
+                    "message":message
+                }})
+                .to_string(),
+            );
+        }
+    }
+
     /// Root and schedule the FILES tree for an explicit API request even when
     /// the dock is hidden. Periodic upkeep deliberately sleeps while no FILES or
     /// DIFF surface is visible, but `files.tree` and `files.refresh` must not
