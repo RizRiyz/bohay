@@ -242,6 +242,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let lock = crate::ipc::transport::acquire_server_startup_lock(&dir).unwrap();
         let path = crate::session::api_socket_path_for(Some("sibling"));
+        // Long macOS socket paths resolve to an owner-scoped short alias outside
+        // the logical session directory. Mirror server startup by creating that
+        // resolved parent before binding the fake sibling session.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let listener = crate::ipc::transport::bind(&path).unwrap();
         let server = std::thread::spawn(move || {
             let mut stream = crate::ipc::transport::incoming(&listener).next().unwrap();
