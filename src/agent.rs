@@ -849,12 +849,17 @@ fn codex_latest(base: &Path, cwd: &Path) -> Option<String> {
     None
 }
 
-/// Every Codex session for `cwd`, newest first. Forked Codex panes share a
-/// working directory, so persistence needs the ranked list to keep the parent
-/// and fork attached to different rollouts after a server restart.
+/// Every Codex session for `cwd`, newest **creation** first. Forked Codex panes
+/// share a working directory, so persistence needs the ranked list to keep the
+/// parent and fork attached to different rollouts after a server restart.
+///
+/// Rollout mtimes cannot provide that order: they change throughout a live
+/// conversation and would make two panes trade sessions according to whichever
+/// agent wrote last. Codex's `sessions/YYYY/MM/DD/rollout-<ISO timestamp>-...`
+/// path is creation-ordered and remains stable for the life of the session.
 fn codex_list(base: &Path, cwd: &Path) -> Vec<String> {
     let mut files = codex_rollout_files(base);
-    files.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+    files.sort_by(|(_, a), (_, b)| b.cmp(a));
     files
         .into_iter()
         .filter_map(|(_, path)| read_codex_session(&path))
@@ -1323,8 +1328,9 @@ mod tests {
         let base = tmp("codex");
         let day = base.join("sessions").join("2025").join("01").join("22");
         fs::create_dir_all(&day).unwrap();
+        let older = day.join("rollout-2025-01-22T10-00-00-aaa.jsonl");
         fs::write(
-            day.join("rollout-2025-01-22T10-00-00-aaa.jsonl"),
+            &older,
             "{\"session_id\":\"aaa\",\"cwd\":\"/work/app\"}\n{\"type\":\"message\"}\n",
         )
         .unwrap();
@@ -1350,6 +1356,21 @@ mod tests {
             codex_latest(&base, Path::new("/work/app")).as_deref(),
             Some("ccc")
         );
+
+        // Rollout mtimes track activity, not session creation. The older pane
+        // can keep working after the newer pane starts, but restart pairing
+        // must still keep the newer session attached to the newer pane.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(
+            &older,
+            "{\"session_id\":\"aaa\",\"cwd\":\"/work/app\"}\n{\"type\":\"message\",\"updated\":true}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            codex_latest(&base, Path::new("/work/app")).as_deref(),
+            Some("aaa"),
+            "latest remains activity-based for the resumable-session list"
+        );
         assert_eq!(
             codex_latest(&base, Path::new("/work/api")).as_deref(),
             Some("bbb")
@@ -1361,7 +1382,7 @@ mod tests {
         assert_eq!(
             codex_list(&base, Path::new("/work/app")),
             vec!["ccc", "aaa"],
-            "fork and parent are both available, newest first"
+            "restart pairing follows stable creation order, not changing mtimes"
         );
     }
 
