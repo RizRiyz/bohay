@@ -164,6 +164,10 @@ panes / agents:
 search:
   search <text...> [--case]  find text across every pane's scrollback (docs/63);
                              --case is case-sensitive; returns matches as JSON
+  search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions]
+                           [--limit <1-200>] [--case] [--json]
+                             rank navigation, file paths, and retained output;
+                             legacy search stays exact unless --fuzzy is passed
 
 themes:
   theme list [--json]       list built-in, installed, and virtual themes
@@ -525,7 +529,7 @@ fn write_topic_help(
             detailed_section("panes / agents:\n", "\nsearch:\n"),
         ),
         "search" => (
-            "luvus search <text...> [--case]",
+            "luvus search <text...> [--case]\n       luvus search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions] [--limit 1-200] [--case] [--json]",
             detailed_section("search:\n", "\nthemes:\n"),
         ),
         "theme" => (
@@ -2009,21 +2013,89 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
     Ok(match (noun, verb) {
         ("ping", _) => ("ping".into(), json!({})),
         ("events", _) => ("events.subscribe".into(), json!({})),
-        // `luvus search <text...> [--case]` — scan every pane's scrollback
-        // (docs/63). Everything after `search`, minus flags, is the query.
+        // Exact scrollback search remains the default for script compatibility.
+        // The universal finder is deliberately opt-in through `--fuzzy`.
         ("search", _) => {
-            let case = args
+            let search_args = &args[2.min(args.len())..];
+            let fuzzy = search_args
                 .iter()
-                .any(|a| a == "--case" || a == "--case-sensitive");
-            let query: Vec<&str> = args[2.min(args.len())..]
-                .iter()
-                .filter(|a| !a.starts_with("--"))
-                .map(String::as_str)
-                .collect();
-            (
-                "search".into(),
-                json!({ "query": query.join(" "), "case_sensitive": case }),
-            )
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| arg == "--fuzzy");
+            let mut query: Vec<String> = Vec::new();
+            let mut case_sensitive = false;
+            let mut scope = "all".to_string();
+            let mut all_sessions = false;
+            let mut limit = crate::search::RESULT_CAP as u64;
+            let mut index = 0;
+            while index < search_args.len() {
+                match search_args[index].as_str() {
+                    "--" => {
+                        query.extend_from_slice(&search_args[index + 1..]);
+                        break;
+                    }
+                    "--fuzzy" | "--json" => index += 1,
+                    "--case" | "--case-sensitive" => {
+                        case_sensitive = true;
+                        index += 1;
+                    }
+                    "--all-sessions" if fuzzy => {
+                        all_sessions = true;
+                        index += 1;
+                    }
+                    "--scope" if fuzzy => {
+                        let value = search_args
+                            .get(index + 1)
+                            .ok_or_else(|| anyhow!("--scope requires a value"))?;
+                        if !matches!(value.as_str(), "all" | "navigate" | "files" | "output") {
+                            return Err(anyhow!("--scope must be all, navigate, files, or output"));
+                        }
+                        scope = value.clone();
+                        index += 2;
+                    }
+                    "--limit" if fuzzy => {
+                        let value = search_args
+                            .get(index + 1)
+                            .ok_or_else(|| anyhow!("--limit requires a value"))?;
+                        limit = value
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|value| (1..=crate::search::RESULT_CAP as u64).contains(value))
+                            .ok_or_else(|| anyhow!("--limit must be between 1 and 200"))?;
+                        index += 2;
+                    }
+                    flag if flag.starts_with("--") => {
+                        return Err(anyhow!("unknown search option: {flag}"));
+                    }
+                    value => {
+                        query.push(value.to_string());
+                        index += 1;
+                    }
+                }
+            }
+            if query.is_empty() {
+                return Err(anyhow!(if fuzzy {
+                    "usage: luvus search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions] [--limit 1-200] [--case] [--json]"
+                } else {
+                    "usage: luvus search <text...> [--case]"
+                }));
+            }
+            if fuzzy {
+                (
+                    "search.query".into(),
+                    json!({
+                        "query": query.join(" "),
+                        "scope": scope,
+                        "all_sessions": all_sessions,
+                        "limit": limit,
+                        "case_sensitive": case_sensitive,
+                    }),
+                )
+            } else {
+                (
+                    "search".into(),
+                    json!({ "query": query.join(" "), "case_sensitive": case_sensitive }),
+                )
+            }
         }
         ("agent", "sessions") => ("agent.sessions".into(), json!({})),
         ("agent", "resume") => ("agent.resume".into(), one("session_id", arg0())),
@@ -3203,6 +3275,64 @@ mod tests {
         assert_eq!(m, "tab.new");
         let (m, _) = parse(&argv("luvus agent list")).unwrap();
         assert_eq!(m, "agent.list");
+    }
+
+    #[test]
+    fn search_keeps_exact_contract_and_fuzzy_is_explicit() {
+        let (method, params) = parse(&argv("luvus search build failed --case")).unwrap();
+        assert_eq!(method, "search");
+        assert_eq!(
+            params,
+            json!({"query": "build failed", "case_sensitive": true})
+        );
+
+        let (method, params) =
+            parse(&argv("luvus search --fuzzy -- --case --scope output")).unwrap();
+        assert_eq!(method, "search.query");
+        assert_eq!(
+            params,
+            json!({
+                "query": "--case --scope output",
+                "scope": "all",
+                "all_sessions": false,
+                "limit": 200,
+                "case_sensitive": false,
+            })
+        );
+
+        let (method, params) = parse(&argv("luvus search -- --fuzzy --case")).unwrap();
+        assert_eq!(method, "search");
+        assert_eq!(
+            params,
+            json!({"query": "--fuzzy --case", "case_sensitive": false})
+        );
+
+        let (method, params) = parse(&argv(
+            "luvus search --fuzzy api auth --scope files --all-sessions --limit 25 --case --json",
+        ))
+        .unwrap();
+        assert_eq!(method, "search.query");
+        assert_eq!(
+            params,
+            json!({
+                "query": "api auth",
+                "scope": "files",
+                "all_sessions": true,
+                "limit": 25,
+                "case_sensitive": true,
+            })
+        );
+
+        for bad in [
+            "luvus search --fuzzy",
+            "luvus search --fuzzy api --scope unknown",
+            "luvus search --fuzzy api --limit 0",
+            "luvus search --fuzzy api --limit 201",
+            "luvus search api --all-sessions",
+            "luvus search api --unknown",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
     }
 
     #[test]

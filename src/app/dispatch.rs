@@ -458,6 +458,7 @@ impl App {
         // *server's* cwd — the very thing §3.3 removed.
         const WITHOUT_NODE: &[&str] = &[
             "ping",
+            "search.capabilities",
             "server.stop",
             "workspace.open",
             "node.open",
@@ -492,6 +493,14 @@ impl App {
                 "version": env!("CARGO_PKG_VERSION"),
                 "protocol":1,
                 "session": crate::session::display_name()
+            })),
+            "search.capabilities" => Ok(json!({
+                "type": "search_capabilities",
+                "version": 1,
+                "methods": ["search.query", "search.activate"],
+                "scopes": ["all", "navigate", "files", "output"],
+                "max_results": crate::search::RESULT_CAP,
+                "max_response_bytes": crate::search::federation::MAX_SESSION_RESPONSE_BYTES,
             })),
             "theme.list" => Ok(self.theme_registry.list_json(&self.config.theme)),
             "theme.path" => Ok(json!({

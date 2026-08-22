@@ -45,10 +45,18 @@ where
         DisableBracketedPaste
     );
     ratatui::restore();
-    result
+    match result? {
+        ClientExit::Done => Ok(()),
+        ClientExit::SwitchSession(name) => switch_session_process(&name),
+    }
 }
 
-fn run_inner<R, W>(reader: R, mut writer: W, terminal: &mut DefaultTerminal) -> Result<()>
+enum ClientExit {
+    Done,
+    SwitchSession(String),
+}
+
+fn run_inner<R, W>(reader: R, mut writer: W, terminal: &mut DefaultTerminal) -> Result<ClientExit>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -113,7 +121,7 @@ where
     // Main thread: paint frames as they arrive. A full frame repaints the screen; a
     // diff writes only its changed cells straight to the terminal (no full re-blit,
     // no reconstructed frame) — so a busy session costs O(changed cells), not O(screen).
-    loop {
+    let exit = loop {
         match protocol::read_message::<_, ServerMessage>(&mut reader) {
             // A full frame repaints the whole screen; a diff writes *only its changed
             // cells* straight to the terminal (O(changed), not a whole re-blit). Each
@@ -139,12 +147,62 @@ where
             Ok(ServerMessage::Sound) => crate::emit_sound(),
             Ok(ServerMessage::Clipboard(text)) => crate::emit_clipboard(&text),
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
-            Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => break,
+            Ok(ServerMessage::SwitchSession { name }) => break ClientExit::SwitchSession(name),
+            Ok(ServerMessage::Detach) | Ok(ServerMessage::ServerShutdown { .. }) => {
+                break ClientExit::Done
+            }
             Ok(_) => {}
-            Err(_) => break, // server gone
+            Err(_) => break ClientExit::Done, // server gone
+        }
+    };
+    Ok(exit)
+}
+
+/// Replace this thin client process with the same launch mode targeting another
+/// logical session. Re-exec cleanly drops the old terminal-input thread; local
+/// launches and `--remote` retain their existing arguments and SSH options.
+fn switch_session_process(name: &str) -> Result<()> {
+    crate::session::validate_name(name).map_err(anyhow::Error::msg)?;
+    let raw: Vec<String> = std::env::args().collect();
+    let args = switched_args(&raw, name);
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(args)
+        .env_remove("LUVUS_SOCKET_PATH")
+        .env_remove("BOHAY_SOCKET_PATH");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec().into())
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("session client exited with {status}"))
         }
     }
-    Ok(())
+}
+
+fn switched_args(raw: &[String], name: &str) -> Vec<String> {
+    let mut out = vec!["--session".to_string(), name.to_string()];
+    let mut index = 1;
+    while index < raw.len() {
+        if raw[index] == "--session" {
+            index = (index + 2).min(raw.len());
+            continue;
+        }
+        if raw[index].starts_with("--session=") {
+            index += 1;
+            continue;
+        }
+        out.push(raw[index].clone());
+        index += 1;
+    }
+    out
 }
 
 fn input_loop<W: Write>(mut writer: W, pending: Vec<Event>) {
@@ -647,6 +705,22 @@ mod render_tests {
     use super::*;
     use ratatui::backend::TestBackend;
 
+    #[test]
+    fn session_handoff_replaces_only_the_session_selector() {
+        let raw = vec![
+            "luvus".to_string(),
+            "--session".to_string(),
+            "old".to_string(),
+            "--remote".to_string(),
+            "host".to_string(),
+            "-p".to_string(),
+            "2222".to_string(),
+        ];
+        assert_eq!(
+            switched_args(&raw, "new"),
+            ["--session", "new", "--remote", "host", "-p", "2222"]
+        );
+    }
     #[test]
     fn incremental_diff_reconstructs_the_screen() {
         let cell = |s: &str| protocol::CellData {

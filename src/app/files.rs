@@ -15,6 +15,8 @@ use crate::files::FileView;
 use crate::ids::PaneId;
 use crate::layout::{Axis, TileLayout};
 
+const RECENT_FILE_CAP: usize = 12;
+
 /// Where a file opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OpenTarget {
@@ -194,6 +196,23 @@ impl App {
         }
     }
 
+    /// Open a fuzzy-finder file result in a whole tab in its owning workspace.
+    /// Reuse an existing whole-file tab, but never redirect the user into a
+    /// preview or split pane that happens to show the same path.
+    pub fn open_file_search_result(&mut self, path: PathBuf) {
+        match self.file_open_editor() {
+            Some(cmd) => self.open_file_in_editor(path, &cmd),
+            None => {
+                self.remember_file(&path);
+                if let Some(id) = self.file_tab_showing(&path) {
+                    self.focus_pane_global(id);
+                } else {
+                    self.create_file_view(path, OpenTarget::Tab);
+                }
+            }
+        }
+    }
+
     /// The configured default open action (docs/38), resolved to an editor
     /// run-command — or `None` for the read-only viewer. A configured editor
     /// that is no longer installed degrades to read-only, so a plain click never
@@ -245,6 +264,7 @@ impl App {
                 // pane with no file view behind it, so without this the tab bar
                 // has nothing to derive a name from and falls back to the number.
                 self.editor_files.insert(id, path.clone());
+                self.remember_file(&path);
                 let ws = &mut self.workspaces[self.active_ws];
                 ws.tabs.push(Tab::panes(TileLayout::new(id)));
                 ws.active_tab = ws.tabs.len() - 1;
@@ -499,11 +519,24 @@ impl App {
             )
     }
 
+    /// A native file view that owns its whole tab, excluding preview/split panes.
+    fn file_tab_showing(&self, path: &std::path::Path) -> Option<PaneId> {
+        self.ws().tabs.iter().find_map(|tab| {
+            let leaves = tab.layout.leaves();
+            let [id] = leaves.as_slice() else {
+                return None;
+            };
+            matches!(self.views.get(id), Some(ViewKind::File(view)) if view.path == path)
+                .then_some(*id)
+        })
+    }
+
     /// Open `path` in a native file view (docs/38 FILE-3). `Preview` reuses the
     /// one preview pane in the active workspace; `Pane` splits a fresh permanent
     /// pane; `Tab` opens a new tab. The file is read on a worker thread and
     /// applied via `FileRead`.
     pub fn open_file_view(&mut self, path: PathBuf, target: OpenTarget) {
+        self.remember_file(&path);
         // Already open? Focus that view instead of opening a duplicate.
         if let Some(id) = self.view_showing(&path) {
             self.focus_pane_global(id);
@@ -518,6 +551,10 @@ impl App {
             }
         }
 
+        self.create_file_view(path, target);
+    }
+
+    fn create_file_view(&mut self, path: PathBuf, target: OpenTarget) {
         let id = PaneId::alloc();
         self.views
             .insert(id, ViewKind::File(FileView::new(path.clone())));
@@ -541,10 +578,20 @@ impl App {
 
     /// Point an existing view leaf at a different file and re-read it.
     fn set_view_file(&mut self, id: PaneId, path: PathBuf) {
+        self.remember_file(&path);
         if let Some(ViewKind::File(v)) = self.views.get_mut(&id) {
             *v = FileView::new(path.clone());
         }
         self.schedule_file_read(id, path);
+    }
+
+    fn remember_file(&mut self, path: &Path) {
+        let workspace = self.ws().cwd.clone();
+        self.recent_files
+            .retain(|(cwd, existing)| cwd != &workspace || existing != path);
+        self.recent_files
+            .push_front((workspace, path.to_path_buf()));
+        self.recent_files.truncate(RECENT_FILE_CAP);
     }
 
     fn schedule_file_read(&mut self, id: PaneId, path: PathBuf) {
@@ -663,6 +710,30 @@ mod tests {
     use super::*;
     use crate::app::{DockKind, FileMenu, FileMenuItem};
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn recent_files_are_deduplicated_newest_first_and_bounded() {
+        let _env = crate::persist::test_env("file-recent-bounded");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        for index in 0..RECENT_FILE_CAP + 3 {
+            app.remember_file(Path::new(&format!("file-{index}.rs")));
+        }
+        assert_eq!(app.recent_files.len(), RECENT_FILE_CAP);
+        assert!(app.recent_files.front().unwrap().1.ends_with("file-14.rs"));
+        assert!(app.recent_files.back().unwrap().1.ends_with("file-3.rs"));
+
+        app.remember_file(Path::new("file-8.rs"));
+        assert_eq!(app.recent_files.len(), RECENT_FILE_CAP);
+        assert!(app.recent_files.front().unwrap().1.ends_with("file-8.rs"));
+        assert_eq!(
+            app.recent_files
+                .iter()
+                .filter(|(_, path)| path.ends_with("file-8.rs"))
+                .count(),
+            1
+        );
+    }
 
     /// A file's context menu leads with open actions (read-only + one per detected
     /// editor); a folder's does not — you don't "open" a directory into an editor.

@@ -45,6 +45,7 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 | tabs | `tab.list` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.get` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
+| search | `search` · `search.capabilities` · `search.query` · `search.activate` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
@@ -57,6 +58,69 @@ Parameter shapes mirror the CLI flags (`luvus task add --paths x` →
 `{"paths": ["x"]}`). For CLI commands, an omitted pane uses
 `$LUVUS_PANE_ID` when available; a raw API request with no pane uses the
 currently focused pane.
+
+## Search
+
+The legacy `search` method remains exact retained-output search. Its existing
+request and response fields do not change.
+
+`search.query` is the typed fuzzy API:
+
+```json
+→ {
+  "id": "find-1",
+  "method": "search.query",
+  "params": {
+    "query": "api auth",
+    "scope": "all",
+    "case_sensitive": false,
+    "all_sessions": true,
+    "limit": 50
+  }
+}
+← {
+  "id": "find-1",
+  "result": {
+    "type": "search_query",
+    "query": "api auth",
+    "scope": "all",
+    "total": 3,
+    "shown": 3,
+    "partial": false,
+    "matches": [
+      {
+        "id": "workspace:0",
+        "kind": "folder",
+        "label": "api-service",
+        "detail": "default › /work/api-service",
+        "score": 4120,
+        "target": { "workspace": 0 }
+      }
+    ]
+  }
+}
+```
+
+`scope` must be `all`, `navigate`, `files`, or `output`. `query` must contain
+1 to 256 bytes after trimming, and `limit` must be 1 to 200. Case sensitivity
+applies to retained output. `all_sessions` defaults to false and queries only
+other running sessions in the selected Luvus home when true. `partial:true`
+means at least one source was capped, unreadable, unavailable, timed out, or
+incompatible.
+
+Every match has a stable result `kind` and structured `target`. Result kinds are
+`session`, `folder`, `tab`, `pane`, `agent`, `file`, and `output`. Consumers
+must not derive an action by parsing `label` or `detail`.
+
+`search.capabilities` returns the search protocol version, supported methods,
+scopes, and response limits. Cross-session callers check it before querying a
+sibling server.
+
+`search.activate` accepts one `kind` and an exact `target` returned by that same
+session. The owner revalidates workspace, tab, pane, file containment, and
+output anchors before focusing or opening anything. It is primarily used by
+Luvus during named-session handoff. Invalid or stale targets return a structured
+`invalid_request` error instead of focusing a different object.
 
 ## Organizing workspaces
 

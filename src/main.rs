@@ -25,6 +25,7 @@ mod module;
 mod orch;
 mod persist;
 mod platform;
+mod search;
 mod session;
 mod skill;
 mod terminal;

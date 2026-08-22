@@ -84,6 +84,10 @@ panes / agents:
 search:
   search <text...> [--case]  find text across every pane's scrollback (docs/63);
                              --case is case-sensitive; returns matches as JSON
+  search --fuzzy <query...> [--scope all|navigate|files|output] [--all-sessions]
+                           [--limit <1-200>] [--case] [--json]
+                             rank navigation, file paths, and retained output;
+                             legacy search stays exact unless --fuzzy is passed
 
 themes:
   theme list [--json]       list built-in, installed, and virtual themes

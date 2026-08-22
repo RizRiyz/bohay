@@ -70,6 +70,37 @@ pub enum AppEvent {
         path: std::path::PathBuf,
         entries: Vec<crate::files::Entry>,
     },
+    /// A bounded global-finder file-path catalog completed off the app loop.
+    SearchFilesIndexed {
+        instance: u64,
+        catalogs: Vec<(
+            usize,
+            String,
+            std::path::PathBuf,
+            crate::search::files::FileCatalog,
+        )>,
+    },
+    /// Fuzzy file/output scoring completed on the finder's dedicated worker.
+    SearchResults {
+        instance: u64,
+        generation: u64,
+        matches: Vec<crate::search::SearchMatch>,
+        total: usize,
+        capped: bool,
+    },
+    /// Bounded result rows returned by other running named-session owners.
+    SearchFederatedResults {
+        instance: u64,
+        generation: u64,
+        matches: Vec<crate::search::SearchMatch>,
+        total: usize,
+        partial: bool,
+    },
+    /// A target in another session was revalidated and focused by its owner.
+    SearchHandoffReady {
+        session: String,
+        result: Result<(), String>,
+    },
     /// One structured Git status scan feeds FILES tint and DIFF (docs/88).
     DiffStatus {
         token: u64,

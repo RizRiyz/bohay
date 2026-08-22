@@ -42,6 +42,15 @@ repository. Note bodies, parsed patches, and agent handoffs are bounded. Source
 context is explicitly framed as untrusted review data before it is sent to an
 agent, and sending requires an explicit target and action.
 
+## Global finder data
+
+The global finder is local and read-only until you activate a result. File
+indexing reads names and paths, not file contents, skips `.git`, and does not
+follow directory symlinks. Retained-output matching uses bounded pane history
+already owned by Luvus. Running named sessions answer bounded queries over
+their owner-only control sockets. Queries and result catalogs are not persisted
+and opening the finder never starts a stopped session.
+
 ## Remote
 
 `--remote` rides plain `ssh`: your keys, your config, no luvus network

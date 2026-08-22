@@ -190,6 +190,35 @@ impl App {
                 self.finish_theme_uninstall(id, result);
                 return true;
             }
+            AppEvent::SearchFilesIndexed { instance, catalogs } => {
+                return self.apply_search_files(instance, catalogs);
+            }
+            AppEvent::SearchResults {
+                instance,
+                generation,
+                matches,
+                total,
+                capped,
+            } => {
+                return self.apply_search_results(instance, generation, matches, total, capped);
+            }
+            AppEvent::SearchFederatedResults {
+                instance,
+                generation,
+                matches,
+                total,
+                partial,
+            } => {
+                return self
+                    .apply_search_federated_results(instance, generation, matches, total, partial);
+            }
+            AppEvent::SearchHandoffReady { session, result } => {
+                match result {
+                    Ok(()) => self.pending_session_switch = Some(session),
+                    Err(error) => self.show_toast(format!("session switch failed: {error}")),
+                }
+                return true;
+            }
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
@@ -205,6 +234,15 @@ impl App {
                     reply,
                 } => return self.handle_theme_reloaded(id, registry, reply),
                 AppEvent::Api(req) => {
+                    if req.method == "search.query" {
+                        self.start_search_api(req);
+                        return true;
+                    }
+                    if req.method == "search.activate" {
+                        let response = self.handle_search_activate(&req);
+                        let _ = req.reply.send(response);
+                        return true;
+                    }
                     let resp = self.handle_api(&req);
                     let _ = req.reply.send(resp);
                     return true;
@@ -278,6 +316,15 @@ impl App {
             // for them immediately (docs/81). Answer inline: like the old
             // server-side drain, an answered request counts as activity.
             AppEvent::Api(req) => {
+                if req.method == "search.query" {
+                    self.start_search_api(req);
+                    return true;
+                }
+                if req.method == "search.activate" {
+                    let response = self.handle_search_activate(&req);
+                    let _ = req.reply.send(response);
+                    return true;
+                }
                 let resp = self.handle_api(&req);
                 let _ = req.reply.send(resp);
                 true
@@ -419,7 +466,11 @@ impl App {
             | AppEvent::ClientDetach { .. }
             | AppEvent::ClientInput { .. } => false,
             // Consumed by the pre-dispatch worker-result branch above.
-            AppEvent::ThemeUninstalled { .. } => unreachable!(),
+            AppEvent::ThemeUninstalled { .. }
+            | AppEvent::SearchFilesIndexed { .. }
+            | AppEvent::SearchResults { .. }
+            | AppEvent::SearchFederatedResults { .. }
+            | AppEvent::SearchHandoffReady { .. } => unreachable!(),
         }
     }
 

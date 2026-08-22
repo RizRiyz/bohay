@@ -313,6 +313,19 @@ pub fn run() -> Result<()> {
                 foreground_activity = true;
             }
         }
+        if let Some(name) = app.pending_session_switch.take() {
+            if let Some(id) = foreground.take() {
+                if let Some(client) = clients.remove(&id) {
+                    let _ = client.send_control(ServerMessage::SwitchSession { name });
+                }
+                foreground = latest_client(&clients);
+                apply_foreground_theme(&mut app, &clients, foreground);
+                activity = true;
+                foreground_activity = true;
+            } else {
+                app.show_toast("no attached client to switch".to_string());
+            }
+        }
 
         if app.session_dirty && last_save.elapsed() > Duration::from_secs(2) {
             persist::save(&app);
@@ -806,7 +819,9 @@ fn handle_client(id: u64, stream: Conn, app_tx: Sender<AppEvent>, terminal_theme
             }
             let stop = matches!(
                 msg,
-                ServerMessage::Detach | ServerMessage::ServerShutdown { .. }
+                ServerMessage::Detach
+                    | ServerMessage::ServerShutdown { .. }
+                    | ServerMessage::SwitchSession { .. }
             );
             match protocol::write_message_counted(&mut writer, &msg) {
                 Ok(bytes) => {

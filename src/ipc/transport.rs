@@ -8,6 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fs2::FileExt;
 use interprocess::local_socket::prelude::*;
@@ -88,6 +89,15 @@ pub struct Conn(Arc<Stream>);
 impl Conn {
     fn new(stream: Stream) -> Self {
         Conn(Arc::new(stream))
+    }
+
+    /// Bound control-plane requests such as cross-session search. Unix local
+    /// sockets support kernel timeouts; named pipes may report Unsupported, in
+    /// which case callers still keep one bounded worker per endpoint.
+    pub fn set_timeouts(&self, timeout: Duration) -> io::Result<()> {
+        use interprocess::local_socket::traits::Stream as _;
+        self.0.set_recv_timeout(Some(timeout))?;
+        self.0.set_send_timeout(Some(timeout))
     }
 }
 

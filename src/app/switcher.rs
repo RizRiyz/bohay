@@ -70,8 +70,19 @@ impl App {
     /// section has at least one matching row.
     pub fn switcher_rows(&self) -> Vec<SwitcherRow> {
         let scope = self.switcher_scope;
-        let q = self.switcher_query.to_lowercase();
-        let matches = |hay: &str| q.is_empty() || hay.to_lowercase().contains(&q);
+        let query = crate::search::FuzzyQuery::new(&self.switcher_query, false);
+        let matches = |hay: &str| {
+            if query.is_empty() {
+                return true;
+            }
+            let prepared = crate::search::PreparedText::new(hay);
+            query
+                .score(&[crate::search::FuzzyField {
+                    text: &prepared,
+                    weight: 0,
+                }])
+                .is_some()
+        };
         let mut rows = Vec::new();
 
         // Agents: one row per pane running an agent, wherever it lives.
@@ -145,7 +156,7 @@ impl App {
                 rows.append(&mut nodes);
             }
             // The "new node" action is only offered when nothing is being filtered.
-            if q.is_empty() {
+            if query.is_empty() {
                 rows.push(SwitcherRow::Action {
                     target: SwitcherTarget::NewWorkspace,
                     label: format!("+ {}", self.catalog.cmd_new_workspace),

@@ -2,7 +2,7 @@
 //! agent detection. Panes are stored flat and referenced by id from the tree
 //! (docs/04). Prefix-key driven.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
@@ -37,7 +37,7 @@ mod search;
 mod settings;
 mod switcher;
 
-pub use search::{GlobalSearch, SearchFlash, SearchHit};
+pub use search::{GlobalSearch, SearchFlash};
 
 pub use keys::{key_reference_rows, presets, Cmd, KEY_REFERENCE};
 pub use modules::ModuleMenuAction;
@@ -1302,6 +1302,10 @@ pub struct App {
     pub last_cursor: Option<(u16, u16)>,
     /// Foreground client asked to detach (prefix+q). Distinct from quit.
     pub detach_requested: bool,
+    /// The foreground client selected another named session in the global
+    /// finder. The server consumes this once and sends a logical handoff only
+    /// to that client.
+    pub pending_session_switch: Option<String>,
     /// The last node was closed, ending the session (docs/43 §3.3). *Every*
     /// client detaches, so the window closes, while the server stays up with no
     /// nodes — distinct from `detach_requested` (one client leaves, session
@@ -1463,6 +1467,9 @@ pub struct App {
     /// persisted — after a restart the pane is no longer that editor, so the
     /// label must not survive it. Untracked in `drop_leaf_runtime`.
     pub editor_files: HashMap<PaneId, PathBuf>,
+    /// Most recently opened files, newest first, scoped by workspace folder.
+    /// This is a small in-memory finder convenience and is never persisted.
+    pub recent_files: VecDeque<(PathBuf, PathBuf)>,
     /// Reused single-click **preview** panes. Each workspace may own one so
     /// browsing FILES or DIFF never focuses and replaces another workspace's
     /// preview.
@@ -1707,6 +1714,7 @@ impl App {
             usage_mtimes: std::collections::HashMap::new(),
             last_cursor: None,
             detach_requested: false,
+            pending_session_switch: None,
             end_session: false,
             force_redraw: false,
             pending_notify: Vec::new(),
@@ -1766,6 +1774,7 @@ impl App {
             diff_menu: None,
             views: HashMap::new(),
             editor_files: HashMap::new(),
+            recent_files: VecDeque::new(),
             preview_views: HashSet::new(),
             file_git_status: HashMap::new(),
             git_status_inflight: false,
@@ -2204,6 +2213,7 @@ impl App {
             usage_mtimes: std::collections::HashMap::new(),
             last_cursor: None,
             detach_requested: false,
+            pending_session_switch: None,
             end_session: false,
             force_redraw: false,
             pending_notify: Vec::new(),
@@ -2263,6 +2273,7 @@ impl App {
             diff_menu: None,
             views,
             editor_files: HashMap::new(),
+            recent_files: VecDeque::new(),
             preview_views: HashSet::new(),
             file_git_status: HashMap::new(),
             git_status_inflight: false,
