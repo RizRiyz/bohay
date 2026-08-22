@@ -1514,9 +1514,12 @@ mod tests {
         app.panes.get_mut(&focus).unwrap().cwd = repo.clone();
 
         app.open_git_tab(0);
-        assert!(
-            app.active_is_git(),
-            "git tab opens using the focused pane's cwd, not the stale workspace root"
+        let view = app
+            .active_git()
+            .expect("git tab opens using the focused pane's cwd, not the stale workspace root");
+        assert_eq!(
+            view.repo_root, repo,
+            "the git tab targets the focused pane's repo, not the workspace root"
         );
     }
 
