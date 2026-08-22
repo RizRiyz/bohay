@@ -80,6 +80,7 @@ export default defineConfig({
             { label: 'Multi-Agent Orchestration', slug: 'docs/guides/orchestration' },
             { label: 'The Git Tab', slug: 'docs/guides/git' },
             { label: 'Browsing & Opening Files', slug: 'docs/guides/files' },
+            { label: 'DIFF Review', slug: 'docs/guides/diff' },
             { label: 'Worktrees', slug: 'docs/guides/worktrees' },
             { label: 'Remote Sessions', slug: 'docs/guides/remote' },
             { label: 'Scrollback & Copy', slug: 'docs/guides/scrollback' },

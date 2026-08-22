@@ -350,11 +350,22 @@ impl App {
                 self.file_tree.apply_dir(path, entries);
                 true
             }
-            AppEvent::FileGitStatus(map) => {
-                self.git_status_inflight = false;
-                let changed = self.file_git_status != map;
-                self.file_git_status = map;
-                changed
+            AppEvent::DiffStatus {
+                token,
+                visible_root,
+                result,
+            } => self.apply_diff_status(token, visible_root, result),
+            AppEvent::DiffLoaded { id, token, result } => self.apply_diff_loaded(id, token, result),
+            AppEvent::DiffNotesLoaded { review_id, result } => {
+                self.apply_diff_notes_loaded(review_id, result)
+            }
+            AppEvent::DiffNoteSaved { note, result } => self.apply_diff_note_saved(note, result),
+            AppEvent::DiffNoteRemoved { id, result } => self.apply_diff_note_removed(id, result),
+            AppEvent::DiffProgressSaved { result } => {
+                if let Err(error) = result {
+                    self.show_toast(format!("review progress not saved: {error}"));
+                }
+                true
             }
             AppEvent::FileChanges { id, changes } => {
                 if let Some(crate::app::ViewKind::File(v)) = self.views.get_mut(&id) {
@@ -566,6 +577,13 @@ impl App {
                 .map(|(_, rect)| *rect)
                 .find(|rect| hit(*rect));
         }
+        if let Some(menu) = &self.diff_menu {
+            return menu
+                .items
+                .iter()
+                .map(|(_, rect)| *rect)
+                .find(|rect| hit(*rect));
+        }
         if let Some(menu) = &self.dock_menu {
             return first(&menu.rects);
         }
@@ -609,6 +627,8 @@ impl App {
         self.file_tree_rects
             .iter()
             .map(|(_, rect)| *rect)
+            .chain(self.files_mode_rects.iter().map(|(_, rect)| *rect))
+            .chain(self.diff_row_rects.iter().map(|(_, rect)| *rect))
             .chain(
                 [
                     self.switcher_button_rect,
@@ -621,6 +641,28 @@ impl App {
                 .flatten(),
             )
             .find(|rect| hit(*rect))
+    }
+
+    fn diff_source_hit_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<(PaneId, usize, crate::diff::DiffSide)> {
+        self.diff_source_rects
+            .iter()
+            .find(|(_, _, _, rect)| {
+                column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+            })
+            .map(|(pane, source_row, side, _)| (*pane, *source_row, *side))
+    }
+
+    fn diff_note_hit_at(&self, column: u16, row: u16) -> Option<(PaneId, String)> {
+        self.diff_note_rects
+            .iter()
+            .find(|(_, _, rect)| {
+                column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+            })
+            .map(|(pane, note_id, _)| (*pane, note_id.clone()))
     }
 
     fn apply_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) {
@@ -829,6 +871,12 @@ impl App {
             }
             return;
         }
+        if self.diff_menu.is_some() {
+            if let MouseEventKind::Down(_) = m.kind {
+                self.diff_menu_click(m.column, m.row);
+            }
+            return;
+        }
         // A module dock row's menu (docs/52) owns the mouse while open.
         if self.dock_menu.is_some() {
             if let MouseEventKind::Down(_) = m.kind {
@@ -928,6 +976,8 @@ impl App {
                 self.open_agent_menu(AgentTarget::Live(*id), c, r); // live agent → Close
             } else if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_agent_menu(AgentTarget::Session(*i), c, r); // session → Resume/Close
+            } else if let Some((row, _)) = self.diff_row_rects.iter().find(|(_, rect)| hit(*rect)) {
+                self.open_diff_menu(*row, c, r);
             } else if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_file_menu(*i, c, r); // FILES-dock row → new/rename/delete (docs/38)
             } else if let Some((dock, row_i, _)) = self
@@ -945,6 +995,26 @@ impl App {
             }
             return;
         }
+        // Once `n` arms annotation mode, the source press owns the complete
+        // left-button gesture. Dragging extends the range on the same diff
+        // side; releasing opens the inline editor. A press/release without
+        // movement naturally creates a one-line note.
+        if matches!(m.kind, MouseEventKind::Drag(MouseButton::Left))
+            && self.diff_note_drag.is_some()
+        {
+            if let Some((pane, row, side)) = self.diff_source_hit_at(m.column, m.row) {
+                self.drag_diff_source(pane, row, side);
+            }
+            return;
+        }
+        if matches!(m.kind, MouseEventKind::Up(MouseButton::Left)) && self.diff_note_drag.is_some()
+        {
+            if let Some((pane, row, side)) = self.diff_source_hit_at(m.column, m.row) {
+                self.drag_diff_source(pane, row, side);
+            }
+            self.finish_diff_source_drag();
+            return;
+        }
         // ── pane text selection: drag to select, release auto-copies (OSC 52) ──
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -960,6 +1030,20 @@ impl App {
                 // never conflicts. RESIZE-2 = drag the divider directly;
                 // RESIZE-5 = `Ctrl`+drag inside a pane grabs the nearest divider.
                 if self.begin_resize(m.column, m.row) {
+                    return;
+                }
+                // Saved DIFF note cards own their full visible rectangle. Open
+                // the exact clicked note in the existing inline editor before
+                // source selection or terminal mouse forwarding can claim it.
+                if let Some((pane, note_id)) = self.diff_note_hit_at(m.column, m.row) {
+                    self.edit_diff_note(pane, &note_id);
+                    return;
+                }
+                // Native DIFF rows own their source cells. Select the exact
+                // stack identity and old/new side before any terminal mouse
+                // forwarding or generic text selection can claim the click.
+                if let Some((pane, row, side)) = self.diff_source_hit_at(m.column, m.row) {
+                    self.press_diff_source(pane, row, side);
                     return;
                 }
                 if m.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1138,7 +1222,11 @@ impl App {
                 return;
             }
             if hit(self.files_area) {
-                self.file_tree.scroll = step(self.file_tree.scroll);
+                if self.files_mode == crate::diff::FilesMode::Diff {
+                    self.diff_scroll_by(if scroll < 0 { -1 } else { 1 });
+                } else {
+                    self.file_tree.scroll = step(self.file_tree.scroll);
+                }
                 return;
             }
             // Wheel over a git tab scrolls its active view (docs/17).
@@ -1169,9 +1257,24 @@ impl App {
                 .map(|(id, rect)| (*id, *rect))
             {
                 let viewport = rect.height.saturating_sub(1) as usize;
-                if let Some(crate::app::ViewKind::File(v)) = self.views.get_mut(&id) {
-                    let text_w = view_text_w(v, rect.width);
-                    v.scroll_by(scroll, viewport, text_w);
+                match self.views.get_mut(&id) {
+                    Some(crate::app::ViewKind::File(v)) => {
+                        let text_w = view_text_w(v, rect.width);
+                        v.scroll_by(scroll, viewport, text_w);
+                    }
+                    Some(crate::app::ViewKind::Diff(v)) => {
+                        let rows = v.stack_rows.len().max(v.split_rows.len());
+                        if scroll < 0 {
+                            v.scroll = v.scroll.saturating_sub(3);
+                        } else {
+                            v.scroll = v
+                                .scroll
+                                .saturating_add(3)
+                                .min(rows.saturating_sub(viewport));
+                        }
+                        v.selected = v.scroll;
+                    }
+                    None => {}
                 }
                 return;
             }
@@ -1334,6 +1437,20 @@ impl App {
         if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
             self.resume_session(i);
+            return;
+        }
+        if let Some((mode, _)) = self.files_mode_rects.iter().find(|(_, rect)| hit(*rect)) {
+            self.set_files_mode(*mode);
+            return;
+        }
+        if let Some((row, _)) = self.diff_row_rects.iter().find(|(_, rect)| hit(*rect)) {
+            let row = *row;
+            let target = if m.modifiers.contains(KeyModifiers::SHIFT) {
+                crate::app::files::OpenTarget::Pane
+            } else {
+                crate::app::files::OpenTarget::Preview
+            };
+            self.diff_row_activate(row, target);
             return;
         }
         // Clicking a FILES row expands/collapses a folder or opens a file (docs/38).
@@ -2191,6 +2308,12 @@ impl App {
             }
             return true;
         }
+        if self.diff_menu.is_some() {
+            if key.code == KeyCode::Esc {
+                self.diff_menu = None;
+            }
+            return true;
+        }
         if self.dock_menu.is_some() {
             if key.code == KeyCode::Esc {
                 self.dock_menu = None;
@@ -2314,8 +2437,10 @@ impl App {
                 // A focused file view (docs/38 FILE-3) consumes keys itself
                 // (scroll / wrap / close) — they never reach a PTY.
                 let focus = self.layout().focus;
-                if self.views.contains_key(&focus) {
-                    return self.handle_file_key(focus, key);
+                match self.views.get(&focus) {
+                    Some(crate::app::ViewKind::File(_)) => return self.handle_file_key(focus, key),
+                    Some(crate::app::ViewKind::Diff(_)) => return self.handle_diff_key(focus, key),
+                    None => {}
                 }
                 // `Shift+↑` / `Shift+PageUp` enter keyboard scroll mode (no prefix,
                 // works on a stock Mac keyboard). From there plain keys navigate.

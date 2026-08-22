@@ -265,7 +265,7 @@ pub(super) fn draw_tabbar(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
 /// The text a tab shows, before any padding — what its width is measured from.
 ///
 /// A git tab is labeled `⎇ git`, the orchestration board `◇ orch`, Mission
-/// Control `⠶ ctrl` (a braille 2×2 "four squares"); a user-named pane tab
+/// Control `⦿ ctrl`; a user-named pane tab
 /// (docs/28) shows its name, a single file-view leaf (docs/38) `■ name`, and
 /// everything else its number.
 fn tab_label(ws: &crate::app::Workspace, app: &App, i: usize) -> String {
@@ -281,7 +281,7 @@ fn tab_label(ws: &crate::app::Workspace, app: &App, i: usize) -> String {
     } else if tb.is_orch() {
         "◇ orch".to_string()
     } else if tb.is_mission() {
-        "⠶ ctrl".to_string()
+        "⦿ ctrl".to_string()
     } else {
         (i + 1).to_string()
     }
@@ -310,12 +310,22 @@ fn file_tab_name(tab: &crate::app::Tab, app: &App) -> Option<String> {
         return None;
     }
     let id = leaves[0];
-    let path = match app.views.get(&id) {
-        Some(crate::app::ViewKind::File(v)) => &v.path,
-        _ => app.editor_files.get(&id)?,
-    };
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    Some(format!("■ {name}"))
+    match app.views.get(&id) {
+        Some(crate::app::ViewKind::File(v)) => {
+            let name = v.path.file_name()?.to_string_lossy().into_owned();
+            Some(format!("■ {name}"))
+        }
+        Some(crate::app::ViewKind::Diff(v)) => Some(format!(
+            "{} {}",
+            crate::diff::DIFF_GLYPH,
+            v.key.display_path()
+        )),
+        None => {
+            let path = app.editor_files.get(&id)?;
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some(format!("■ {name}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -555,6 +565,18 @@ mod close_button_tests {
     use crate::app::App;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn mission_control_uses_the_bullseye_tab_icon() {
+        let _env = crate::persist::test_env("mission-tab-icon");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.open_mission_control(app.active_ws);
+
+        let active = app.ws().active_tab;
+        assert_eq!(super::tab_label(app.ws(), &app, active), "⦿ ctrl");
+        assert_eq!(unicode_width::UnicodeWidthStr::width("⦿"), 1);
+    }
 
     /// The dashboard tabs are *views*, not pane trees, but they are still tabs a
     /// user opens and wants gone — so the active one must carry the same `✕` a

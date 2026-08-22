@@ -36,12 +36,12 @@ impl SettingsTab {
 
     pub fn icon(self) -> &'static str {
         match self {
-            SettingsTab::General => "◈",
+            SettingsTab::General => "◆",
             SettingsTab::Theme => "◑",
-            SettingsTab::Layout => "▦",
+            SettingsTab::Layout => "▣",
             SettingsTab::Keys => "⌨",
             SettingsTab::Modules => "❏",
-            SettingsTab::Integrations => "⌁",
+            SettingsTab::Integrations => "☆",
             SettingsTab::Language => "⊕",
         }
     }
@@ -88,6 +88,13 @@ pub enum LayoutRow {
     PaneTitles,
     PaneTitlePath,
     ResumeWs,
+    DiffLayout,
+    DiffWrap,
+    DiffContext,
+    DiffLineNumbers,
+    DiffMarkers,
+    DiffColors,
+    DiffLiveRefresh,
     #[cfg(windows)]
     Shell,
     LeftVisible,
@@ -165,6 +172,13 @@ impl App {
         ];
         #[cfg(windows)]
         v.push(LayoutRow::Shell);
+        v.push(LayoutRow::DiffLayout);
+        v.push(LayoutRow::DiffWrap);
+        v.push(LayoutRow::DiffContext);
+        v.push(LayoutRow::DiffLineNumbers);
+        v.push(LayoutRow::DiffMarkers);
+        v.push(LayoutRow::DiffColors);
+        v.push(LayoutRow::DiffLiveRefresh);
         v.push(LayoutRow::LeftVisible);
         v.push(LayoutRow::RightVisible);
         v.push(LayoutRow::RightWidth);
@@ -191,18 +205,21 @@ impl App {
             .unwrap_or(usize::MAX)
     }
 
+    pub fn diff_section_start(&self) -> usize {
+        self.layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::DiffLayout))
+            .unwrap_or(usize::MAX)
+    }
+
     /// Index of the first dock-section row (where the `── Docks ──` divider goes).
     pub fn dock_section_start(&self) -> usize {
         // Keep in step with `layout_rows`: the pane-layout rows before the docks
         // section (sidebar width, gaps, scrollback, titles, resume, +shell).
-        #[cfg(windows)]
-        {
-            7
-        }
-        #[cfg(not(windows))]
-        {
-            6
-        }
+        self.layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::LeftVisible))
+            .unwrap_or(usize::MAX)
     }
 
     /// Open Settings on the **first** tab (General). Switching to Theme still
@@ -383,6 +400,7 @@ impl App {
                     self.layout_rows().get(i),
                     Some(LayoutRow::SidebarWidth)
                         | Some(LayoutRow::RightWidth)
+                        | Some(LayoutRow::DiffContext)
                         | Some(LayoutRow::Dock(_))
                         | Some(LayoutRow::Bar(_))
                 ),
@@ -886,6 +904,56 @@ impl App {
                     !self.config.layout.resume_in_new_workspace;
                 config::save(&self.config);
             }
+            LayoutRow::DiffLayout => {
+                self.config.layout.diff_layout = if delta < 0 {
+                    match self.config.layout.diff_layout {
+                        crate::diff::DiffLayoutPreference::Auto => {
+                            crate::diff::DiffLayoutPreference::Stack
+                        }
+                        crate::diff::DiffLayoutPreference::Split => {
+                            crate::diff::DiffLayoutPreference::Auto
+                        }
+                        crate::diff::DiffLayoutPreference::Stack => {
+                            crate::diff::DiffLayoutPreference::Split
+                        }
+                    }
+                } else {
+                    self.config.layout.diff_layout.cycle()
+                };
+                config::save(&self.config);
+            }
+            LayoutRow::DiffWrap => {
+                self.config.layout.diff_wrap = !self.config.layout.diff_wrap;
+                config::save(&self.config);
+            }
+            LayoutRow::DiffContext => {
+                self.config.layout.diff_context_lines =
+                    (self.config.layout.diff_context_lines as i32 + delta)
+                        .clamp(0, i32::from(crate::diff::MAX_CONTEXT_LINES))
+                        as u16;
+                config::save(&self.config);
+            }
+            LayoutRow::DiffLineNumbers => {
+                self.config.layout.diff_show_line_numbers =
+                    !self.config.layout.diff_show_line_numbers;
+                config::save(&self.config);
+            }
+            LayoutRow::DiffMarkers => {
+                self.config.layout.diff_marker_style = if delta < 0 {
+                    self.config.layout.diff_marker_style.reverse()
+                } else {
+                    self.config.layout.diff_marker_style.cycle()
+                };
+                config::save(&self.config);
+            }
+            LayoutRow::DiffColors => {
+                self.config.layout.diff_color_mode = self.config.layout.diff_color_mode.cycle();
+                config::save(&self.config);
+            }
+            LayoutRow::DiffLiveRefresh => {
+                self.config.layout.diff_live_refresh = !self.config.layout.diff_live_refresh;
+                config::save(&self.config);
+            }
             #[cfg(windows)]
             LayoutRow::Shell => self.cycle_shell(delta),
             LayoutRow::LeftVisible => {
@@ -1162,6 +1230,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn diff_marker_setting_cycles_live_and_persists() {
+        let _env = crate::persist::test_env("diff-marker-style");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        if let Some(settings) = app.settings.as_mut() {
+            settings.tab = SettingsTab::Layout;
+        }
+        let row = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::DiffMarkers))
+            .expect("the DIFF marker row is present");
+
+        assert_eq!(
+            app.config.layout.diff_marker_style,
+            crate::diff::DiffMarkerStyle::Symbols
+        );
+        app.settings_adjust(row, 1);
+        assert_eq!(
+            app.config.layout.diff_marker_style,
+            crate::diff::DiffMarkerStyle::Bars
+        );
+        assert_eq!(
+            crate::config::load().layout.diff_marker_style,
+            crate::diff::DiffMarkerStyle::Bars,
+            "the selection survives restart"
+        );
+        app.settings_adjust(row, 1);
+        assert_eq!(
+            app.config.layout.diff_marker_style,
+            crate::diff::DiffMarkerStyle::Both
+        );
+        app.settings_adjust(row, -1);
+        assert_eq!(
+            app.config.layout.diff_marker_style,
+            crate::diff::DiffMarkerStyle::Bars,
+            "reverse navigation follows the same ordering"
+        );
+    }
+
+    #[test]
+    fn diff_color_setting_cycles_live_and_persists() {
+        let _env = crate::persist::test_env("diff-color-mode");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        if let Some(settings) = app.settings.as_mut() {
+            settings.tab = SettingsTab::Layout;
+        }
+        let row = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::DiffColors))
+            .expect("the DIFF color row is present");
+
+        assert_eq!(
+            app.config.layout.diff_color_mode,
+            crate::diff::DiffColorMode::Theme
+        );
+        app.settings_adjust(row, 1);
+        assert_eq!(
+            app.config.layout.diff_color_mode,
+            crate::diff::DiffColorMode::Standard
+        );
+        assert_eq!(
+            crate::config::load().layout.diff_color_mode,
+            crate::diff::DiffColorMode::Standard,
+            "the color choice survives restart"
+        );
+        app.settings_adjust(row, -1);
+        assert_eq!(
+            app.config.layout.diff_color_mode,
+            crate::diff::DiffColorMode::Theme
+        );
+    }
+
     /// The docs/62 switch: whether resume replays each agent's own CLI options,
     /// or falls back to the plain resume command luvus used before the feature.
     ///
@@ -1305,6 +1451,20 @@ mod tests {
         );
         assert_eq!(SettingsTab::ALL[1], SettingsTab::Theme, "before Theme");
         assert_eq!(SettingsTab::ALL.len(), 7, "still seven tabs");
+    }
+
+    #[test]
+    fn settings_tab_icons_have_consistent_terminal_width() {
+        assert_eq!(SettingsTab::General.icon(), "◆");
+        assert_eq!(SettingsTab::Layout.icon(), "▣");
+        assert_eq!(SettingsTab::Integrations.icon(), "☆");
+        for tab in SettingsTab::ALL {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(tab.icon()),
+                1,
+                "{tab:?} icon must occupy one terminal column"
+            );
+        }
     }
 
     /// The General tab's "Open files with" slider cycles read-only → each detected

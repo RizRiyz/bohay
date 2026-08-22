@@ -46,6 +46,7 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.get` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
+| diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | modules | `module.list` · `module.info` · `module.link` · `module.unlink` · `module.enable` · `module.disable` · `module.action.list` · `module.action.invoke` · `module.pane.open` · `module.pane.focus` · `module.pane.close` · `module.config_dir` · `module.settings.list` · `module.settings.get` · `module.settings.set` · `module.log.list` |
@@ -154,6 +155,127 @@ when false, the current workspace, tab, pane focus, and zoom state are preserved
 Unsupported agents return `unsupported_agent`; a supported agent whose session
 ID cannot be resolved returns `session_unknown`; and PTY launch failure returns
 `spawn_failed`. Validation completes before a new pane is spawned.
+
+## DIFF review
+
+DIFF methods are additive and read Git state without mutating the repository.
+Paths resolve inside the active workspace. When one path exists in more than
+one layer, callers must pass `layer` instead of accepting an ambiguous result.
+
+| Method | Params | Result |
+|---|---|---|
+| `diff.refresh` | `{}` | completes one shared FILES/DIFF status refresh and returns its generation |
+| `diff.list` | `{layer?}` | exact staged, worktree, untracked, and conflict rows |
+| `diff.open` | `{path?, layer?, view?, placement?}` | opens a native preview, pane, or tab |
+| `diff.get` | `{path, layer?, include_patch?}` | bounded semantic hunks; line text is omitted by default |
+| `diff.navigate` | `{pane?, action}` | moves an open native DIFF view |
+| `diff.note.add` | `{file, layer?, old_line? or new_line?, end_line?, body, kind?}` | one local note |
+| `diff.note.apply` | `{notes:[...]}` | validates and creates the whole batch or creates nothing |
+| `diff.note.list` | `{file?, state?}` | local notes and delivery metadata |
+| `diff.note.edit` | `{id, body}` | revised note |
+| `diff.note.resolve` | `{id}` | resolved note |
+| `diff.note.reopen` | `{id}` | reopened note |
+| `diff.note.remove` | `{id}` | removes only the local note |
+| `diff.note.send` | `{to, ids? , all_open?}` | sends one bounded grouped message to one live agent |
+
+`layer` is `staged`, `worktree`, `untracked`, or `conflict`. `view` is `auto`,
+`split`, or `stack`; `placement` is `preview`, `pane`, or `tab`. A note kind is
+`question`, `issue`, `suggestion`, or `praise`. Notes are anchored to old or new
+Git source lines, not rendered rows.
+
+### Results and identifiers
+
+`diff.list` returns `result.files`. Each file includes `path`, `old_path`,
+`layer`, `status`, `additions`, `deletions`, `binary`, unresolved `notes`, review
+state, and a fingerprint. Addition and deletion counts can be `null` until the
+file is loaded. If a path appears in multiple layers, all later calls for that
+path must include `layer`.
+
+`diff.get` returns file metadata, aggregate counts, truncation metadata, and
+semantic hunks. Every hunk includes its ID, old/new start lines, and header.
+Without `include_patch:true`, `lines` is `null`. With it, every line carries its
+kind, old/new source numbers where applicable, and sanitized text.
+
+`diff.open` returns the created or reused `pane` ID. Note mutations return the
+complete note under `result.note`; its `id` is used by edit, resolve, reopen,
+remove, and send. `diff.note.list` returns those objects under `result.notes`.
+
+### Navigate an open view
+
+`diff.navigate` accepts these exact actions:
+
+| Action | Behavior |
+|---|---|
+| `next`, `next_line` | next source row |
+| `previous`, `previous_line` | previous source row |
+| `next_file`, `previous_file` | next or previous changed file |
+| `next_hunk`, `previous_hunk` | next or previous hunk |
+| `next_note`, `previous_note` | next or previous local note |
+| `top`, `bottom` | first or last row |
+
+Pass the pane returned by `diff.open`. An omitted pane follows the normal API
+focus rules, but fails if that target is not a native DIFF view.
+
+```json
+→ {"id":"1","method":"diff.open","params":{"path":"src/app.rs","layer":"worktree","placement":"tab","view":"split"}}
+← {"id":"1","result":{"type":"diff_open","pane":"7","path":"src/app.rs","layer":"worktree"}}
+
+→ {"id":"2","method":"diff.navigate","params":{"pane":"7","action":"next_hunk"}}
+← {"id":"2","result":{"type":"ok","pane":"7"}}
+```
+
+### Create notes atomically
+
+One note requires exactly one positive `old_line` or `new_line`. `end_line`
+extends that anchor on the same side and cannot precede the start. Every source
+line in the range must exist in the loaded bounded diff. Luvus derives and
+stores bounded context from the actual source; clients cannot provide or forge
+anchor context.
+
+`diff.note.apply` accepts the same fields as `diff.note.add` for every array
+item. It validates every path, layer, kind, body, source range, capacity limit,
+and anchor before writing anything. One invalid item rejects the whole request.
+
+```json
+→ {
+  "id": "notes-1",
+  "method": "diff.note.apply",
+  "params": {
+    "notes": [
+      {
+        "file": "src/app.rs",
+        "layer": "worktree",
+        "new_line": 120,
+        "end_line": 123,
+        "kind": "suggestion",
+        "body": "Extract this validation"
+      },
+      {
+        "file": "src/cli.rs",
+        "layer": "staged",
+        "old_line": 88,
+        "body": "Is this fallback still required?"
+      }
+    ]
+  }
+}
+← {"id":"notes-1","result":{"type":"diff_notes_applied","notes":[{"id":"n1","path":"src/app.rs","state":"open"},{"id":"n2","path":"src/cli.rs","state":"open"}]}}
+```
+
+Note filters accept only `open`, `resolved`, `outdated`, or `orphaned`. Note
+bodies are non-empty plain text, limited to 8 KiB, and reject unsupported
+control characters. Removal deletes only local review data. Sending requires a
+live agent target and records delivery only after its PTY accepts the bounded
+message. `all_open:true` selects all open notes; otherwise pass note IDs in
+`ids`.
+
+`include_patch:true` remains subject to the 4 MiB raw patch, 20,000-row, and
+16 KiB logical-line limits. Control sequences are stripped before content can
+reach the renderer or API. `diff.note.send` uses the same live-agent validation
+as `agent.send`; a shell or exited pane is rejected, and a failed input enqueue
+does not record delivery.
+
+See [DIFF Review](/docs/guides/diff/) for the interactive flow.
 
 ## Themes
 

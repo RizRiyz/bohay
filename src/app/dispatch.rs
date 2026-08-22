@@ -1775,6 +1775,423 @@ impl App {
                 self.close_pane(id);
                 Ok(json!({"type":"ok"}))
             }
+            // ── DIFF review (docs/88) ────────────────────────────────────
+            "diff.refresh" => {
+                self.refresh_diff_snapshot_sync().map_err(diff_err)?;
+                let generation = self
+                    .diff
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.generation)
+                    .unwrap_or_default();
+                Ok(json!({"type":"ok","refresh":"complete","generation":generation}))
+            }
+            "diff.list" => {
+                self.refresh_diff_snapshot_sync().map_err(diff_err)?;
+                let layer = p
+                    .get("layer")
+                    .and_then(|value| value.as_str())
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let snapshot = self
+                    .diff
+                    .snapshot
+                    .as_ref()
+                    .ok_or_else(|| diff_err("DIFF is not ready".to_string()))?;
+                let files: Vec<Value> = snapshot
+                    .files
+                    .iter()
+                    .filter(|file| layer.as_ref().is_none_or(|layer| &file.key.layer == layer))
+                    .map(diff_file_json)
+                    .collect();
+                Ok(json!({
+                    "type":"diff_list",
+                    "repo": snapshot.repo_root,
+                    "branch": snapshot.branch,
+                    "generation": snapshot.generation,
+                    "fingerprint": snapshot.fingerprint,
+                    "omitted": snapshot.omitted_files,
+                    "files": files,
+                }))
+            }
+            "diff.open" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                let target = match p
+                    .get("placement")
+                    .or_else(|| p.get("target"))
+                    .and_then(|v| v.as_str())
+                {
+                    Some("tab") => crate::app::files::OpenTarget::Tab,
+                    Some("pane") => crate::app::files::OpenTarget::Pane,
+                    Some("preview") | None => crate::app::files::OpenTarget::Preview,
+                    Some(_) => {
+                        return Err(diff_err(
+                            "placement must be preview, pane, or tab".to_string(),
+                        ))
+                    }
+                };
+                let preference = match p.get("view").and_then(Value::as_str) {
+                    None => None,
+                    Some("auto") => Some(crate::diff::DiffLayoutPreference::Auto),
+                    Some("split") => Some(crate::diff::DiffLayoutPreference::Split),
+                    Some("stack") => Some(crate::diff::DiffLayoutPreference::Stack),
+                    Some(_) => {
+                        return Err(diff_err("view must be auto, split, or stack".to_string()))
+                    }
+                };
+                let layer = p
+                    .get("layer")
+                    .and_then(|value| value.as_str())
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let raw = p.get("path").and_then(|value| value.as_str()).unwrap_or("");
+                let key = if raw.is_empty() {
+                    self.diff
+                        .selected_file()
+                        .or_else(|| {
+                            self.diff
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.files.first())
+                        })
+                        .map(|file| file.key.clone())
+                        .ok_or_else(|| diff_err("there are no changed files".to_string()))?
+                } else {
+                    self.diff_file_for_path(raw, layer.as_ref())
+                        .map_err(diff_err)?
+                        .key
+                };
+                self.open_diff_view(key.clone(), target);
+                let id = self
+                    .diff_view_showing(&key)
+                    .ok_or_else(|| diff_err("failed to open diff".to_string()))?;
+                if let (Some(preference), Some(crate::app::ViewKind::Diff(view))) =
+                    (preference, self.views.get_mut(&id))
+                {
+                    view.preference = preference;
+                }
+                Ok(
+                    json!({"type":"diff_open","pane":id.0.to_string(),"path":key.display_path(),"layer":key.layer.label()}),
+                )
+            }
+            "diff.get" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                let raw = req_str(p, "path")?;
+                let layer = p
+                    .get("layer")
+                    .and_then(|value| value.as_str())
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let file = self
+                    .diff_file_for_path(raw, layer.as_ref())
+                    .map_err(diff_err)?;
+                let diff = self.load_diff_file_sync(&file).map_err(diff_err)?;
+                let include_patch = p
+                    .get("include_patch")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let hunks: Vec<Value> = diff
+                    .hunks
+                    .iter()
+                    .map(|hunk| {
+                        json!({
+                            "id":hunk.id,
+                            "old_start":hunk.old_start,
+                            "new_start":hunk.new_start,
+                            "header":hunk.header,
+                            "lines": if include_patch {
+                                serde_json::to_value(&hunk.lines).unwrap_or(Value::Null)
+                            } else {
+                                Value::Null
+                            },
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "type":"diff",
+                    "file":diff_file_json(&file),
+                    "additions":diff.additions,
+                    "deletions":diff.deletions,
+                    "binary":diff.binary,
+                    "truncated":diff.truncated,
+                    "omitted_lines":diff.omitted_lines,
+                    "hunks":hunks,
+                }))
+            }
+            "diff.navigate" => {
+                let id = self.resolve_pane(p).unwrap_or_else(|| self.layout().focus);
+                let action = req_str(p, "action")?;
+                let key = match action {
+                    "next" | "next_line" => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    "previous" | "previous_line" => KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                    "next_file" => KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE),
+                    "previous_file" => KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE),
+                    "next_hunk" => KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE),
+                    "previous_hunk" => KeyEvent::new(KeyCode::Char('{'), KeyModifiers::NONE),
+                    "next_note" => KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE),
+                    "previous_note" => KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE),
+                    "top" => KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                    "bottom" => KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+                    _ => {
+                        return Err(diff_err(
+                            "action must target a line, file, hunk, note, top, or bottom"
+                                .to_string(),
+                        ))
+                    }
+                };
+                if !self.handle_diff_key(id, key) {
+                    return Err(diff_err("target is not an open DIFF view".to_string()));
+                }
+                Ok(json!({"type":"ok","pane":id.0.to_string()}))
+            }
+            "diff.note.list" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let state = p
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map(parse_note_state)
+                    .transpose()?;
+                let path = p
+                    .get("file")
+                    .or_else(|| p.get("path"))
+                    .and_then(Value::as_str);
+                let notes: Vec<Value> = self
+                    .diff
+                    .notes
+                    .iter()
+                    .filter(|note| state.is_none_or(|state| note.state == state))
+                    .filter(|note| {
+                        path.is_none_or(|path| note.anchor.diff_key.display_path() == path)
+                    })
+                    .map(note_json)
+                    .collect();
+                Ok(json!({"type":"diff_notes","notes":notes}))
+            }
+            "diff.note.apply" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let items = p
+                    .get("notes")
+                    .and_then(Value::as_array)
+                    .filter(|items| !items.is_empty())
+                    .ok_or_else(|| diff_err("notes must be a non-empty array".to_string()))?;
+                if self.diff.notes.len().saturating_add(items.len()) > crate::diff::NOTE_CAP {
+                    return Err(diff_err(format!(
+                        "review note limit is {}",
+                        crate::diff::NOTE_CAP
+                    )));
+                }
+                let mut notes = Vec::with_capacity(items.len());
+                for item in items {
+                    let raw = item
+                        .get("file")
+                        .or_else(|| item.get("path"))
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| diff_err("every note needs a file".to_string()))?;
+                    let layer = item
+                        .get("layer")
+                        .and_then(Value::as_str)
+                        .map(parse_diff_layer)
+                        .transpose()?;
+                    let file = self
+                        .diff_file_for_path(raw, layer.as_ref())
+                        .map_err(diff_err)?;
+                    let old = diff_line_param(item, "old_line")?;
+                    let new = diff_line_param(item, "new_line")?;
+                    let (side, start) = match (old, new) {
+                        (Some(line), None) => (crate::diff::DiffSide::Old, line),
+                        (None, Some(line)) => (crate::diff::DiffSide::New, line),
+                        _ => {
+                            return Err(diff_err(
+                                "every note needs exactly one old_line or new_line".to_string(),
+                            ))
+                        }
+                    };
+                    let end = diff_line_param(item, "end_line")?.unwrap_or(start);
+                    let diff = self.load_diff_file_sync(&file).map_err(diff_err)?;
+                    let context = crate::diff::notes::anchor_context(&diff, side, start, end)
+                        .map_err(diff_err)?;
+                    let context_sha256 = crate::diff::notes::context_hash(&context);
+                    let context: String = context.chars().take(512).collect();
+                    let body = item
+                        .get("body")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| diff_err("every note needs a body".to_string()))?
+                        .to_string();
+                    let kind = parse_note_kind(
+                        item.get("kind").and_then(Value::as_str).unwrap_or("issue"),
+                    )?;
+                    let key = file.key;
+                    let now = crate::diff::notes::now_ms();
+                    notes.push(crate::diff::ReviewNote {
+                        id: crate::diff::notes::note_id(),
+                        review_id: crate::diff::notes::review_id(&key),
+                        author: "external".to_string(),
+                        kind,
+                        body,
+                        anchor: crate::diff::notes::NoteAnchor {
+                            diff_key: key,
+                            side,
+                            start_line: start,
+                            end_line: end,
+                            context_sha256,
+                            context,
+                        },
+                        state: crate::diff::NoteState::Open,
+                        deliveries: Vec::new(),
+                        revision: 1,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    });
+                }
+                crate::diff::notes::save_batch_new(&notes).map_err(diff_err)?;
+                self.diff.notes.extend(notes.iter().cloned());
+                self.refresh_diff_note_counts();
+                Ok(json!({
+                    "type":"diff_notes_applied",
+                    "notes":notes.iter().map(note_json).collect::<Vec<_>>()
+                }))
+            }
+            "diff.note.add" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let raw = p
+                    .get("file")
+                    .or_else(|| p.get("path"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| diff_err("file is required".to_string()))?;
+                let layer = p
+                    .get("layer")
+                    .and_then(Value::as_str)
+                    .map(parse_diff_layer)
+                    .transpose()?;
+                let file = self
+                    .diff_file_for_path(raw, layer.as_ref())
+                    .map_err(diff_err)?;
+                let (side, start) = match (
+                    diff_line_param(p, "old_line")?,
+                    diff_line_param(p, "new_line")?,
+                ) {
+                    (Some(line), None) => (crate::diff::DiffSide::Old, line),
+                    (None, Some(line)) => (crate::diff::DiffSide::New, line),
+                    _ => {
+                        return Err(diff_err(
+                            "pass exactly one of old_line or new_line".to_string(),
+                        ))
+                    }
+                };
+                let end = diff_line_param(p, "end_line")?.unwrap_or(start);
+                let diff = self.load_diff_file_sync(&file).map_err(diff_err)?;
+                let context = crate::diff::notes::anchor_context(&diff, side, start, end)
+                    .map_err(diff_err)?;
+                let context_sha256 = crate::diff::notes::context_hash(&context);
+                let context: String = context.chars().take(512).collect();
+                let body = req_str(p, "body")?.to_string();
+                let kind =
+                    parse_note_kind(p.get("kind").and_then(Value::as_str).unwrap_or("issue"))?;
+                let key = file.key;
+                let now = crate::diff::notes::now_ms();
+                let note = crate::diff::ReviewNote {
+                    id: crate::diff::notes::note_id(),
+                    review_id: crate::diff::notes::review_id(&key),
+                    author: "external".to_string(),
+                    kind,
+                    body,
+                    anchor: crate::diff::notes::NoteAnchor {
+                        diff_key: key,
+                        side,
+                        start_line: start,
+                        end_line: end,
+                        context_sha256,
+                        context,
+                    },
+                    state: crate::diff::NoteState::Open,
+                    deliveries: Vec::new(),
+                    revision: 1,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                };
+                crate::diff::notes::save(&note, None).map_err(diff_err)?;
+                self.apply_diff_note_saved(note.clone(), Ok(()));
+                Ok(json!({"type":"diff_note","note":note_json(&note)}))
+            }
+            "diff.note.edit" | "diff.note.resolve" | "diff.note.reopen" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let id = req_str(p, "id")?;
+                let note = self
+                    .diff
+                    .notes
+                    .iter()
+                    .find(|note| note.id == id)
+                    .cloned()
+                    .ok_or_else(|| diff_err("review note not found".to_string()))?;
+                let mut updated = note.clone();
+                match method {
+                    "diff.note.edit" => updated.body = req_str(p, "body")?.to_string(),
+                    "diff.note.resolve" => updated.state = crate::diff::NoteState::Resolved,
+                    "diff.note.reopen" => updated.state = crate::diff::NoteState::Open,
+                    _ => unreachable!(),
+                }
+                updated.revision = updated.revision.saturating_add(1);
+                updated.updated_at_ms = crate::diff::notes::now_ms();
+                crate::diff::notes::save(&updated, Some(note.revision)).map_err(diff_err)?;
+                self.apply_diff_note_saved(updated.clone(), Ok(()));
+                Ok(json!({"type":"diff_note","note":note_json(&updated)}))
+            }
+            "diff.note.remove" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let id = req_str(p, "id")?;
+                let note = self
+                    .diff
+                    .notes
+                    .iter()
+                    .find(|note| note.id == id)
+                    .cloned()
+                    .ok_or_else(|| diff_err("review note not found".to_string()))?;
+                crate::diff::notes::remove(&note, Some(note.revision)).map_err(diff_err)?;
+                self.apply_diff_note_removed(id.to_string(), Ok(()));
+                Ok(json!({"type":"ok","removed":id}))
+            }
+            "diff.note.send" => {
+                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_notes_sync().map_err(diff_err)?;
+                let target = req_str(p, "to")?;
+                let all_open = p.get("all_open").and_then(Value::as_bool).unwrap_or(false);
+                let ids: Vec<&str> = p
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let selected: Vec<crate::diff::ReviewNote> = self
+                    .diff
+                    .notes
+                    .iter()
+                    .filter(|note| {
+                        if all_open {
+                            note.state == crate::diff::NoteState::Open
+                        } else {
+                            ids.contains(&note.id.as_str())
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                if selected.is_empty() {
+                    return Err(diff_err("select at least one review note".to_string()));
+                }
+                let params = json!({"target":target});
+                let pane_id = self.resolve_agent_target(&params)?;
+                let selected_ids: Vec<String> =
+                    selected.iter().map(|note| note.id.clone()).collect();
+                let count = self
+                    .deliver_diff_notes(pane_id, target, &selected_ids)
+                    .map_err(diff_err)?;
+                Ok(
+                    json!({"type":"diff_note_send","pane":pane_id.0.to_string(),"target":target,"count":count}),
+                )
+            }
             // ── git (docs/17) — fast local-git reads + open the git tab ──
             "git.status" => {
                 let cwd = self.git_workspace_cwd(p);
@@ -2255,7 +2672,7 @@ impl App {
 
     /// Whether `pane` currently hosts a recognised agent (detection) or a bound
     /// agent session — the same test `agent.list` uses to decide what is an agent.
-    fn is_agent_pane(&self, pane: PaneId) -> bool {
+    pub(crate) fn is_agent_pane(&self, pane: PaneId) -> bool {
         self.status
             .get(&pane)
             .is_some_and(|s| self.manifests.is_agent(&s.agent) || s.agent_session.is_some())
@@ -2492,6 +2909,104 @@ fn git_err(e: String) -> (String, String) {
     ("git_error".to_string(), e)
 }
 
+fn diff_err(e: String) -> (String, String) {
+    ("diff_error".to_string(), e)
+}
+
+fn parse_diff_layer(value: &str) -> Result<crate::diff::DiffLayer, (String, String)> {
+    match value {
+        "staged" => Ok(crate::diff::DiffLayer::Staged),
+        "worktree" | "unstaged" => Ok(crate::diff::DiffLayer::Worktree),
+        "untracked" => Ok(crate::diff::DiffLayer::Untracked),
+        "conflict" => Ok(crate::diff::DiffLayer::Conflict),
+        _ => Err(diff_err(
+            "layer must be staged, worktree, untracked, or conflict".to_string(),
+        )),
+    }
+}
+
+fn diff_file_json(file: &crate::diff::DiffFile) -> Value {
+    json!({
+        "path":file.key.display_path(),
+        "path_raw_hex":file.key.new_path.as_ref().or(file.key.old_path.as_ref()).map(|path| path.raw_hex.as_str()),
+        "old_path":file.key.old_path.as_ref().map(|path| path.display.as_str()),
+        "old_path_raw_hex":file.key.old_path.as_ref().map(|path| path.raw_hex.as_str()),
+        "layer":file.key.layer.label(),
+        "status":file.status.badge(),
+        "additions":file.additions,
+        "deletions":file.deletions,
+        "binary":file.binary,
+        "notes":file.unresolved_notes,
+        "viewed":file.viewed(),
+        "modified_since_review":file.modified_since_review(),
+        "fingerprint":file.fingerprint,
+    })
+}
+
+fn parse_note_kind(value: &str) -> Result<crate::diff::NoteKind, (String, String)> {
+    match value {
+        "question" => Ok(crate::diff::NoteKind::Question),
+        "issue" => Ok(crate::diff::NoteKind::Issue),
+        "suggestion" => Ok(crate::diff::NoteKind::Suggestion),
+        "praise" => Ok(crate::diff::NoteKind::Praise),
+        _ => Err(diff_err(
+            "note kind must be question, issue, suggestion, or praise".to_string(),
+        )),
+    }
+}
+
+fn parse_note_state(value: &str) -> Result<crate::diff::NoteState, (String, String)> {
+    match value {
+        "open" => Ok(crate::diff::NoteState::Open),
+        "resolved" => Ok(crate::diff::NoteState::Resolved),
+        "outdated" => Ok(crate::diff::NoteState::Outdated),
+        "orphaned" => Ok(crate::diff::NoteState::Orphaned),
+        _ => Err(diff_err(
+            "note state must be open, resolved, outdated, or orphaned".to_string(),
+        )),
+    }
+}
+
+fn diff_line_param(value: &Value, key: &str) -> Result<Option<u32>, (String, String)> {
+    let Some(raw) = value.get(key) else {
+        return Ok(None);
+    };
+    let number = raw
+        .as_u64()
+        .filter(|number| *number > 0 && *number <= u32::MAX as u64)
+        .ok_or_else(|| diff_err(format!("{key} must be a positive line number")))?;
+    Ok(Some(number as u32))
+}
+
+fn note_state_label(state: crate::diff::NoteState) -> &'static str {
+    match state {
+        crate::diff::NoteState::Open => "open",
+        crate::diff::NoteState::Resolved => "resolved",
+        crate::diff::NoteState::Outdated => "outdated",
+        crate::diff::NoteState::Orphaned => "orphaned",
+    }
+}
+
+fn note_json(note: &crate::diff::ReviewNote) -> Value {
+    json!({
+        "id":note.id,
+        "review":note.review_id,
+        "author":note.author,
+        "kind":note.kind.label(),
+        "body":note.body,
+        "state":note_state_label(note.state),
+        "path":note.anchor.diff_key.display_path(),
+        "layer":note.anchor.diff_key.layer.label(),
+        "side":note.anchor.side.label(),
+        "start_line":note.anchor.start_line,
+        "end_line":note.anchor.end_line,
+        "revision":note.revision,
+        "deliveries":note.deliveries,
+        "created_at_ms":note.created_at_ms,
+        "updated_at_ms":note.updated_at_ms,
+    })
+}
+
 /// Required `path` string param → a `PathBuf`.
 fn param_path(p: &Value) -> Result<PathBuf, (String, String)> {
     p.get("path")
@@ -2637,6 +3152,137 @@ fn state_str(s: State) -> &'static str {
 mod tests {
     use super::*;
     use crate::app::App;
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn diff_api_validates_anchors_and_preserves_atomic_note_lifecycle() {
+        let _env = crate::persist::test_env("diff-api");
+        let repo = std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q"]);
+        run_git(&repo, &["config", "user.name", "Luvus Test"]);
+        run_git(&repo, &["config", "user.email", "luvus@example.invalid"]);
+        std::fs::write(repo.join("file.txt"), "old line\nstable\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-q", "-m", "base"]);
+        std::fs::write(repo.join("file.txt"), "new line\nstable\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[0].cwd = repo;
+
+        let refreshed = app.dispatch("diff.refresh", &json!({})).unwrap();
+        assert_eq!(refreshed["refresh"], "complete");
+        let listed = app
+            .dispatch("diff.list", &json!({"layer":"worktree"}))
+            .unwrap();
+        assert_eq!(listed["files"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["files"][0]["path"], "file.txt");
+
+        let loaded = app
+            .dispatch(
+                "diff.get",
+                &json!({"path":"file.txt","layer":"worktree","include_patch":true}),
+            )
+            .unwrap();
+        assert_eq!(loaded["additions"], 1);
+        assert_eq!(loaded["deletions"], 1);
+        assert!(loaded["hunks"][0]["lines"].is_array());
+
+        let opened = app
+            .dispatch(
+                "diff.open",
+                &json!({"path":"file.txt","layer":"worktree","placement":"tab","view":"stack"}),
+            )
+            .unwrap();
+        let pane = opened["pane"].as_str().unwrap();
+        assert!(app
+            .dispatch("diff.navigate", &json!({"pane":pane,"action":"next_line"}))
+            .is_ok());
+
+        let invalid_state = app
+            .dispatch("diff.note.list", &json!({"state":"unknown"}))
+            .expect_err("unknown note states must not silently produce an empty list");
+        assert_eq!(invalid_state.0, "diff_error");
+
+        let empty_send = app
+            .dispatch("diff.note.send", &json!({"to":"missing-agent","ids":[]}))
+            .expect_err("empty review selection must fail before target resolution");
+        assert_eq!(empty_send.0, "diff_error");
+        assert_eq!(empty_send.1, "select at least one review note");
+
+        let invalid_anchor = app
+            .dispatch(
+                "diff.note.add",
+                &json!({"file":"file.txt","layer":"worktree","new_line":99,"body":"missing"}),
+            )
+            .expect_err("a note must reference a source line in the loaded diff");
+        assert_eq!(invalid_anchor.0, "diff_error");
+        assert!(app.diff.notes.is_empty());
+
+        let added = app
+            .dispatch(
+                "diff.note.add",
+                &json!({"file":"file.txt","layer":"worktree","new_line":1,"body":"check this"}),
+            )
+            .unwrap();
+        let note_id = added["note"]["id"].as_str().unwrap().to_string();
+        assert_eq!(app.diff.notes[0].anchor.context, "new line");
+        assert_ne!(
+            app.diff.notes[0].anchor.context_sha256,
+            crate::diff::notes::context_hash("")
+        );
+        let open = app
+            .dispatch("diff.note.list", &json!({"state":"open"}))
+            .unwrap();
+        assert_eq!(open["notes"].as_array().unwrap().len(), 1);
+
+        let edited = app
+            .dispatch("diff.note.edit", &json!({"id":note_id,"body":"updated"}))
+            .unwrap();
+        assert_eq!(edited["note"]["body"], "updated");
+        let resolved = app
+            .dispatch("diff.note.resolve", &json!({"id":note_id}))
+            .unwrap();
+        assert_eq!(resolved["note"]["state"], "resolved");
+        let reopened = app
+            .dispatch("diff.note.reopen", &json!({"id":note_id}))
+            .unwrap();
+        assert_eq!(reopened["note"]["state"], "open");
+        app.dispatch("diff.note.remove", &json!({"id":note_id}))
+            .unwrap();
+        assert!(app.diff.notes.is_empty());
+
+        let batch = app
+            .dispatch(
+                "diff.note.apply",
+                &json!({"notes":[
+                    {"file":"file.txt","layer":"worktree","new_line":1,"body":"valid"},
+                    {"file":"file.txt","layer":"worktree","new_line":99,"body":"invalid"}
+                ]}),
+            )
+            .expect_err("one invalid anchor must reject the whole batch");
+        assert_eq!(batch.0, "diff_error");
+        assert!(app.diff.notes.is_empty());
+        assert!(crate::diff::notes::load(
+            &app.diff.snapshot.as_ref().unwrap().repo_id,
+            app.diff.loaded_review.as_ref().unwrap()
+        )
+        .unwrap()
+        .is_empty());
+    }
 
     #[test]
     fn theme_api_lists_validates_and_applies_registry_entries() {

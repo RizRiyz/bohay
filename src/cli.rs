@@ -25,6 +25,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "module"
                 | "theme"
                 | "git"
+                | "diff"
                 | "files"
                 | "worktree"
                 | "task"
@@ -55,6 +56,7 @@ Commands:
   agent        Start, fork, message, inspect, and resume coding agents
   files        Browse and open workspace files
   git          Inspect repository state and open the Git UI
+  diff         Review Git diffs, notes, and agent feedback
   worktree     Create, open, list, and remove Git worktrees
   task         Coordinate work across multiple coding agents
   lease        Reserve file paths for active tasks
@@ -221,6 +223,20 @@ git:
   files open <path> [--target pane|tab|preview]   open a file in a view
   files reveal <path>        expand the tree to a path
   files refresh              re-read the tree from disk
+
+diff review:
+  diff list [--layer staged|worktree|untracked|conflict]   list exact diff layers
+  diff open [<path>] [--layer <layer>] [--view auto|split|stack]
+                             [--placement preview|pane|tab]
+  diff get <path> [--layer <layer>] [--include-patch]   inspect a bounded semantic diff
+  diff refresh               refresh the shared FILES and DIFF index
+  diff note add --file <path> (--old-line N|--new-line N) --body <text>
+                             [--end-line N] [--kind question|issue|suggestion|praise]
+  diff note list [--file <path>] [--state open|resolved|outdated|orphaned]
+  diff note edit <id> --body <text>
+  diff note resolve|reopen <id>
+  diff note remove <id> --yes
+  diff note send --to <agent> [<id>...] [--all-open]
 
 worktrees:
   worktree list              list the current repo's worktrees
@@ -430,6 +446,7 @@ fn help_topic_has_subcommands(topic: &str) -> bool {
             | "agent"
             | "files"
             | "git"
+            | "diff"
             | "worktree"
             | "task"
             | "lease"
@@ -449,7 +466,9 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
     match topic {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "worktree" | "task"
         | "lease" | "module" | "theme" | "bar" | "ui" | "session" | "server" | "integration"
-        | "skill" | "wait" | "search" | "events" | "ping" | "doctor" | "attach" => Some(topic),
+        | "diff" | "skill" | "wait" | "search" | "events" | "ping" | "doctor" | "attach" => {
+            Some(topic)
+        }
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -527,11 +546,15 @@ fn write_topic_help(
         ),
         "git" => (
             "luvus git <status|branches|log|open> [args]",
-            detailed_section("git:\n", "\nworktrees:\n"),
+            detailed_section("git:\n", "\ndiff review:\n"),
         ),
         "files" => (
             "luvus files <tree|open|reveal|refresh> [args]",
-            detailed_section("git:\n", "\nworktrees:\n"),
+            detailed_section("git:\n", "\ndiff review:\n"),
+        ),
+        "diff" => (
+            "luvus diff <list|open|get|refresh|note> [args]",
+            detailed_section("diff review:\n", "\nworktrees:\n"),
         ),
         "worktree" => (
             "luvus worktree <command> [args]",
@@ -2708,6 +2731,207 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
         }
         ("module", _) => ("module.list".into(), json!({})),
 
+        ("diff", "refresh") => {
+            if !rest.is_empty() {
+                return Err(anyhow!("usage: luvus diff refresh"));
+            }
+            ("diff.refresh".into(), json!({}))
+        }
+        ("diff", "" | "list") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(layer) = flag(args, "--layer") {
+                obj.insert("layer".into(), json!(layer));
+            }
+            ("diff.list".into(), Value::Object(obj))
+        }
+        ("diff", "open") => {
+            let mut obj = serde_json::Map::new();
+            if let Some(path) = rest.first().filter(|value| !value.starts_with("--")) {
+                obj.insert("path".into(), json!(path));
+            }
+            if let Some(layer) = flag(args, "--layer") {
+                obj.insert("layer".into(), json!(layer));
+            }
+            if let Some(view) = flag(args, "--view") {
+                if !matches!(view.as_str(), "auto" | "split" | "stack") {
+                    return Err(anyhow!("--view must be auto, split, or stack"));
+                }
+                obj.insert("view".into(), json!(view));
+            }
+            if let Some(placement) = flag(args, "--placement") {
+                if !matches!(placement.as_str(), "preview" | "pane" | "tab") {
+                    return Err(anyhow!("--placement must be preview, pane, or tab"));
+                }
+                obj.insert("placement".into(), json!(placement));
+            }
+            ("diff.open".into(), Value::Object(obj))
+        }
+        ("diff", "get") => {
+            let path = rest
+                .first()
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| {
+                    anyhow!("usage: luvus diff get <path> [--layer <layer>] [--include-patch]")
+                })?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("path".into(), json!(path));
+            if let Some(layer) = flag(args, "--layer") {
+                obj.insert("layer".into(), json!(layer));
+            }
+            if args.iter().any(|arg| arg == "--include-patch") {
+                obj.insert("include_patch".into(), json!(true));
+            }
+            ("diff.get".into(), Value::Object(obj))
+        }
+        ("diff", "note") => {
+            let sub = rest.first().map(String::as_str).unwrap_or("list");
+            let positionals: Vec<&String> = {
+                let mut values = Vec::new();
+                let mut index = 1;
+                while index < rest.len() {
+                    match rest[index].as_str() {
+                        "--yes" if sub == "remove" => index += 1,
+                        "--all-open" if sub == "send" => index += 1,
+                        flag if matches!(
+                            (sub, flag),
+                            ("list", "--file" | "--state")
+                                | (
+                                    "add",
+                                    "--file"
+                                        | "--body"
+                                        | "--old-line"
+                                        | "--new-line"
+                                        | "--end-line"
+                                        | "--layer"
+                                        | "--kind"
+                                )
+                                | ("edit", "--body")
+                                | ("send", "--to")
+                        ) =>
+                        {
+                            if rest.get(index + 1).is_none() {
+                                return Err(anyhow!("{} requires a value", rest[index]));
+                            }
+                            index += 2;
+                        }
+                        flag if flag.starts_with("--") => {
+                            return Err(anyhow!("unknown diff note option `{flag}`"));
+                        }
+                        _ => {
+                            values.push(&rest[index]);
+                            index += 1;
+                        }
+                    }
+                }
+                values
+            };
+            let line_flag = |name: &str| -> Result<Option<u64>> {
+                flag(args, name)
+                    .map(|value| {
+                        value
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|line| *line > 0 && *line <= u32::MAX as u64)
+                            .ok_or_else(|| anyhow!("{name} must be a positive line number"))
+                    })
+                    .transpose()
+            };
+            let mut obj = serde_json::Map::new();
+            match sub {
+                "list" => {
+                    if let Some(path) = flag(args, "--file") {
+                        obj.insert("file".into(), json!(path));
+                    }
+                    if let Some(state) = flag(args, "--state") {
+                        if !matches!(
+                            state.as_str(),
+                            "open" | "resolved" | "outdated" | "orphaned"
+                        ) {
+                            return Err(anyhow!(
+                                "--state must be open, resolved, outdated, or orphaned"
+                            ));
+                        }
+                        obj.insert("state".into(), json!(state));
+                    }
+                    ("diff.note.list".into(), Value::Object(obj))
+                }
+                "add" => {
+                    let file = flag(args, "--file").ok_or_else(|| anyhow!("--file is required"))?;
+                    let body = flag(args, "--body").ok_or_else(|| anyhow!("--body is required"))?;
+                    obj.insert("file".into(), json!(file));
+                    obj.insert("body".into(), json!(body));
+                    if let Some(line) = line_flag("--old-line")? {
+                        obj.insert("old_line".into(), json!(line));
+                    }
+                    if let Some(line) = line_flag("--new-line")? {
+                        obj.insert("new_line".into(), json!(line));
+                    }
+                    if let Some(line) = line_flag("--end-line")? {
+                        obj.insert("end_line".into(), json!(line));
+                    }
+                    if let Some(layer) = flag(args, "--layer") {
+                        obj.insert("layer".into(), json!(layer));
+                    }
+                    if let Some(kind) = flag(args, "--kind") {
+                        obj.insert("kind".into(), json!(kind));
+                    }
+                    ("diff.note.add".into(), Value::Object(obj))
+                }
+                "edit" => {
+                    let id = positionals
+                        .first()
+                        .ok_or_else(|| anyhow!("note id is required"))?;
+                    let body = flag(args, "--body").ok_or_else(|| anyhow!("--body is required"))?;
+                    obj.insert("id".into(), json!(id));
+                    obj.insert("body".into(), json!(body));
+                    ("diff.note.edit".into(), Value::Object(obj))
+                }
+                "resolve" | "reopen" => {
+                    let id = positionals
+                        .first()
+                        .ok_or_else(|| anyhow!("note id is required"))?;
+                    obj.insert("id".into(), json!(id));
+                    (format!("diff.note.{sub}"), Value::Object(obj))
+                }
+                "remove" => {
+                    if !args.iter().any(|arg| arg == "--yes") {
+                        return Err(anyhow!("diff note remove requires --yes"));
+                    }
+                    let id = positionals
+                        .first()
+                        .ok_or_else(|| anyhow!("note id is required"))?;
+                    obj.insert("id".into(), json!(id));
+                    ("diff.note.remove".into(), Value::Object(obj))
+                }
+                "send" => {
+                    let target = flag(args, "--to").ok_or_else(|| anyhow!("--to is required"))?;
+                    obj.insert("to".into(), json!(target));
+                    let all_open = args.iter().any(|arg| arg == "--all-open");
+                    if all_open {
+                        obj.insert("all_open".into(), json!(true));
+                    }
+                    let ids: Vec<_> = positionals.into_iter().cloned().collect();
+                    if ids.is_empty() && !all_open {
+                        return Err(anyhow!(
+                            "diff note send needs at least one note id or --all-open"
+                        ));
+                    }
+                    obj.insert("ids".into(), json!(ids));
+                    ("diff.note.send".into(), Value::Object(obj))
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "usage: luvus diff note add|list|edit|resolve|reopen|remove|send"
+                    ))
+                }
+            }
+        }
+        ("diff", other) => {
+            return Err(anyhow!(
+                "unknown diff command `{other}`. Try `luvus help diff`."
+            ))
+        }
+
         ("git", "branches") => ("git.branches".into(), json!({})),
         ("git", "log") => {
             let mut obj = serde_json::Map::new();
@@ -3131,6 +3355,73 @@ mod tests {
             "luvus agent fork 7 --name one --name two",
             "luvus agent fork 7 --no-focus --no-focus",
             "luvus agent fork 7 --down",
+        ] {
+            assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn maps_diff_review_commands() {
+        assert!(is_cli(&argv("luvus diff list")));
+        let (method, params) = parse(&argv("luvus diff list --layer staged")).unwrap();
+        assert_eq!(method, "diff.list");
+        assert_eq!(params, json!({"layer":"staged"}));
+
+        let (method, params) = parse(&argv(
+            "luvus diff open src/lib.rs --layer worktree --view split --placement pane",
+        ))
+        .unwrap();
+        assert_eq!(method, "diff.open");
+        assert_eq!(params["path"], "src/lib.rs");
+        assert_eq!(params["view"], "split");
+        assert_eq!(params["placement"], "pane");
+
+        let (method, params) = parse(&argv("luvus diff get src/lib.rs --include-patch")).unwrap();
+        assert_eq!(method, "diff.get");
+        assert_eq!(params, json!({"path":"src/lib.rs","include_patch":true}));
+
+        let (method, params) = parse(&argv(
+            "luvus diff note add --file src/lib.rs --new-line 12 --end-line 14 --body check",
+        ))
+        .unwrap();
+        assert_eq!(method, "diff.note.add");
+        assert_eq!(params["new_line"], 12);
+        assert_eq!(params["end_line"], 14);
+
+        let (method, params) = parse(&argv("luvus diff note edit --body updated n1")).unwrap();
+        assert_eq!(method, "diff.note.edit");
+        assert_eq!(params, json!({"id":"n1","body":"updated"}));
+
+        let (method, params) = parse(&argv("luvus diff note remove --yes n1")).unwrap();
+        assert_eq!(method, "diff.note.remove");
+        assert_eq!(params, json!({"id":"n1"}));
+
+        let (method, params) = parse(&argv("luvus diff note send --to reviewer n1 n2")).unwrap();
+        assert_eq!(method, "diff.note.send");
+        assert_eq!(params["to"], "reviewer");
+        assert_eq!(params["ids"], json!(["n1", "n2"]));
+
+        let (method, params) = parse(&argv("luvus diff note send same --to same")).unwrap();
+        assert_eq!(method, "diff.note.send");
+        assert_eq!(params["to"], "same");
+        assert_eq!(params["ids"], json!(["same"]));
+
+        let (method, params) =
+            parse(&argv("luvus diff note send --to reviewer --all-open")).unwrap();
+        assert_eq!(method, "diff.note.send");
+        assert_eq!(params["all_open"], true);
+        assert_eq!(params["ids"], json!([]));
+
+        for bad in [
+            "luvus diff open src/lib.rs --view columns",
+            "luvus diff open src/lib.rs --placement replace",
+            "luvus diff note add --file src/lib.rs --new-line zero --body check",
+            "luvus diff note list --state unknown",
+            "luvus diff note remove n1",
+            "luvus diff note send n1",
+            "luvus diff note send --to reviewer",
+            "luvus diff note edit n1 --state open --body check",
+            "luvus diff note edit n1 --body",
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }

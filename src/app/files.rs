@@ -33,13 +33,30 @@ impl App {
     /// there is nothing to do (a few `HashSet` checks), and a no-op when the dock
     /// isn't mounted.
     pub fn ensure_file_tree(&mut self) {
-        if self.sidebars.side_of(&DockKind::Files).is_none() {
+        let dock_visible = self.sidebars.side_of(&DockKind::Files).is_some();
+        let diff_visible = self
+            .layout()
+            .leaves()
+            .into_iter()
+            .any(|id| matches!(self.views.get(&id), Some(ViewKind::Diff(_))));
+        if !dock_visible && !diff_visible {
             return;
         }
         let cwd = self.ws().cwd.clone();
         self.file_tree.set_root(cwd);
-        self.load_pending_dirs();
-        self.rescan_file_tree();
+        let dirty_views: Vec<_> = self
+            .layout()
+            .leaves()
+            .into_iter()
+            .filter(|id| matches!(self.views.get(id), Some(ViewKind::Diff(view)) if view.dirty))
+            .collect();
+        for id in dirty_views {
+            self.schedule_diff_read(id);
+        }
+        if dock_visible {
+            self.load_pending_dirs();
+            self.rescan_file_tree();
+        }
         self.refresh_git_status();
     }
 
@@ -68,24 +85,10 @@ impl App {
         });
     }
 
-    /// Refresh the FILES-dock git tint (docs/38 FILE-6) off the loop, at most
-    /// every 2s and never piling up. `git status` can be slow on a huge repo, so
-    /// it runs on a worker thread and posts `FileGitStatus` back.
+    /// Refresh the shared FILES tint and DIFF index off the loop (docs/88).
+    /// One structured status scan preserves the existing two-second cadence.
     fn refresh_git_status(&mut self) {
-        if self.git_status_inflight
-            || std::time::Instant::now().duration_since(self.last_git_status_at)
-                < std::time::Duration::from_secs(2)
-        {
-            return;
-        }
-        self.last_git_status_at = std::time::Instant::now();
-        self.git_status_inflight = true;
-        let root = self.file_tree.root().to_path_buf();
-        let tx = self.app_tx.clone();
-        std::thread::spawn(move || {
-            let map = crate::git::local::tree_status(&root);
-            let _ = tx.send(AppEvent::FileGitStatus(map));
-        });
+        self.refresh_diff_status(false);
     }
 
     /// Resolve a possibly-relative path (from the API/CLI) against the active
@@ -107,10 +110,12 @@ impl App {
             return;
         }
         let mut stale = Vec::new();
-        for (id, ViewKind::File(v)) in self.views.iter() {
-            let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
-            if disk.is_some() && disk != v.mtime {
-                stale.push((*id, v.path.clone(), disk));
+        for (id, view) in self.views.iter() {
+            if let ViewKind::File(v) = view {
+                let disk = std::fs::metadata(&v.path).and_then(|m| m.modified()).ok();
+                if disk.is_some() && disk != v.mtime {
+                    stale.push((*id, v.path.clone(), disk));
+                }
             }
         }
         for (id, path, mtime) in stale {
@@ -485,14 +490,19 @@ impl App {
 
     /// The leaf id of an open view already showing `path`, if any.
     fn view_showing(&self, path: &std::path::Path) -> Option<PaneId> {
-        self.views
+        self.ws()
+            .tabs
             .iter()
-            .find_map(|(id, ViewKind::File(v))| (v.path == path).then_some(*id))
+            .flat_map(|tab| tab.layout.leaves())
+            .find(
+                |id| matches!(self.views.get(id), Some(ViewKind::File(view)) if view.path == path),
+            )
     }
 
     /// Open `path` in a native file view (docs/38 FILE-3). `Preview` reuses the
-    /// one preview pane; `Pane` splits a fresh permanent pane; `Tab` opens a new
-    /// tab. The file is read on a worker thread and applied via `FileRead`.
+    /// one preview pane in the active workspace; `Pane` splits a fresh permanent
+    /// pane; `Tab` opens a new tab. The file is read on a worker thread and
+    /// applied via `FileRead`.
     pub fn open_file_view(&mut self, path: PathBuf, target: OpenTarget) {
         // Already open? Focus that view instead of opening a duplicate.
         if let Some(id) = self.view_showing(&path) {
@@ -501,7 +511,7 @@ impl App {
         }
         // Reuse the live preview pane: just swap its content.
         if target == OpenTarget::Preview {
-            if let Some(id) = self.preview_view.filter(|id| self.views.contains_key(id)) {
+            if let Some(id) = self.active_preview_view() {
                 self.set_view_file(id, path);
                 self.focus_pane_global(id);
                 return;
@@ -523,7 +533,7 @@ impl App {
             }
         }
         if target == OpenTarget::Preview {
-            self.preview_view = Some(id);
+            self.preview_views.insert(id);
         }
         self.schedule_file_read(id, path);
         self.mode = Mode::Normal;
@@ -565,6 +575,7 @@ impl App {
                 crate::files::FileLoad::Text(lines) => Some(lines.join("\n")),
                 _ => None,
             },
+            Some(ViewKind::Diff(_)) => None,
             None => return,
         };
         match text {
@@ -824,6 +835,18 @@ mod tests {
         assert!(text.contains("README.md"), "a file row drawn");
         // Collapsed: src's child is not visible yet.
         assert!(!text.contains("mod.rs"), "child hidden while collapsed");
+        let header_y = app.files_mode_rects[0].1.y;
+        let first_row_y = app
+            .file_tree_rects
+            .iter()
+            .map(|(_, rect)| rect.y)
+            .min()
+            .expect("the file list has rows");
+        assert_eq!(
+            first_row_y,
+            header_y + 1,
+            "the list starts directly below FILES/DIFF without an identity row"
+        );
 
         // Click the `src` row (find its rect) and re-render.
         let (idx, rect) = app
@@ -1031,7 +1054,10 @@ mod tests {
         // queued first wins. Pump until the one we need arrives.
         pump_until_file_read(&rx, &mut app, vid);
         assert_eq!(
-            app.views.get(&vid).map(|ViewKind::File(v)| v.line_count()),
+            app.views.get(&vid).and_then(|view| match view {
+                ViewKind::File(view) => Some(view.line_count()),
+                ViewKind::Diff(_) => None,
+            }),
             Some(1),
             "initial content is one line"
         );
@@ -1250,7 +1276,10 @@ mod tests {
         let paths: Vec<_> = restored
             .views
             .values()
-            .map(|ViewKind::File(v)| v.path.clone())
+            .filter_map(|view| match view {
+                ViewKind::File(view) => Some(view.path.clone()),
+                ViewKind::Diff(_) => None,
+            })
             .collect();
         assert_eq!(paths, vec![file], "the file view was rebuilt on restore");
 

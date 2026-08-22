@@ -10,6 +10,7 @@ mod cli;
 mod compat;
 mod config;
 mod detect;
+mod diff;
 mod event;
 mod files;
 mod git;

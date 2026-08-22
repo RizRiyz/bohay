@@ -10,7 +10,7 @@ applies live and persists to `~/.luvus/config.json`.
 |---|---|
 | **General** | **Open files with** (read-only or an editor you have installed, see [Browsing & Opening Files](/docs/guides/files/)), then a **Notify** section: **sound on done** and **sound on blocked**, both off by default, plus a **Test sound** row to hear it first |
 | **Theme** | 17 bundled palettes, installed community/local themes, and the client-derived **Terminal** theme, previewed live as you move; installed rows include a right-aligned remove action |
-| **Layout** | pane gaps, pane titles, resume-into-workspace behavior, sidebar docks, and `[Top] [Bottom] [Off]` placement for every [Luvus Bar](/docs/guides/bar/) widget |
+| **Layout** | pane gaps, pane titles, resume-into-workspace behavior, sidebar docks, DIFF layout and limits, and `[Top] [Bottom] [Off]` placement for every [Luvus Bar](/docs/guides/bar/) widget |
 | **Keys** | every command's binding: click one, press the new key (`⌫` resets to default) |
 | **Modules** | installed extensions: enable/disable, action counts, load warnings |
 | **Integrations** | install/uninstall the per-agent session hook (Claude · Copilot · Codex · opencode · Kimi · Grok) |
@@ -36,6 +36,11 @@ The **Layout** tab, below its `── Docks ──` divider, is where you move t
 sidebar, the right sidebar, or off, and toggle or size each side. The full
 walkthrough is in
 [Panes, Tabs & Workspaces](/docs/guides/layout/#two-sidebars-and-docks).
+
+The `── DIFF ──` section chooses Auto, Split, or Stack layout, line wrapping,
+Git context lines, source line numbers, change markers, theme or standard
+red/green change colors, and live refresh. See
+[DIFF Review](/docs/guides/diff/) for the review workflow and its safety caps.
 
 Keybinding notes: arrows and `hjkl` both work for focus, `Tab`/`Shift+Tab`
 cycle tabs, and every prefix command is remappable, including the vim aliases.

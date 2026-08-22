@@ -27,8 +27,20 @@ and each socket to **0600** at every start, never left to the umask.
   the agent's config, and uninstall removes exactly those and nothing else.
 - **Git-tab actions** validate refs before anything reaches your shell, so a
   hostile branch name from a cloned repo can't smuggle shell metacharacters.
+- **DIFF review** invokes Git with explicit arguments, disables pagers, external
+  diff drivers, text conversion, color, and submodule recursion, and strips
+  terminal controls from displayed code. It has no staging, discard, commit,
+  push, or GitHub-publishing action.
 - **Orchestration workers** start only on your explicit action, and merges
   happen in an isolated worktree, never your checkout.
+
+## Local review data
+
+DIFF notes and viewed fingerprints live in the owner-only Luvus state root,
+under hashed repository and worktree identities. They never write into the
+repository. Note bodies, parsed patches, and agent handoffs are bounded. Source
+context is explicitly framed as untrusted review data before it is sent to an
+agent, and sending requires an explicit target and action.
 
 ## Remote
 

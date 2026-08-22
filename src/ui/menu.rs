@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::app::{
-    AgentMenuItem, FileMenuItem, ModuleMenuAction, PaneMenuItem, TabMenuItem, WsMenuItem,
+    AgentMenuItem, DiffMenuItem, FileMenuItem, ModuleMenuAction, PaneMenuItem, TabMenuItem,
+    WsMenuItem,
 };
 use crate::i18n::Catalog;
 use ratatui::widgets::{Borders, Clear};
@@ -395,6 +396,36 @@ pub(super) fn draw_file_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t:
         .collect();
     let rects = render_popup(f, area, anchor, &rows, app.hover, t);
     if let Some(menu) = app.file_menu.as_mut() {
+        menu.items = items.into_iter().zip(rects).collect();
+    }
+}
+
+pub(super) fn draw_diff_menu(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
+    let Some(menu) = app.diff_menu.as_ref() else {
+        return;
+    };
+    let items = [
+        DiffMenuItem::OpenPreview,
+        DiffMenuItem::OpenPane,
+        DiffMenuItem::OpenTab,
+        DiffMenuItem::CopyPath,
+    ];
+    let rows: Vec<MenuRow> = items
+        .iter()
+        .map(|item| MenuRow {
+            text: match item {
+                DiffMenuItem::OpenPreview => "Open Preview",
+                DiffMenuItem::OpenPane => "Open in Pane",
+                DiffMenuItem::OpenTab => "Open in Tab",
+                DiffMenuItem::CopyPath => "Copy Path",
+            }
+            .to_string(),
+            divider: false,
+            destructive: false,
+        })
+        .collect();
+    let rects = render_popup(f, area, menu.anchor, &rows, app.hover, t);
+    if let Some(menu) = app.diff_menu.as_mut() {
         menu.items = items.into_iter().zip(rects).collect();
     }
 }

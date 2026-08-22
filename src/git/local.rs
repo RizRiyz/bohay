@@ -837,6 +837,7 @@ impl FileStatus {
     }
 }
 
+#[cfg(test)]
 fn classify_code(code: &str) -> FileStatus {
     let b = code.as_bytes();
     let (x, y) = (b[0] as char, b[1] as char);
@@ -859,6 +860,7 @@ fn classify_code(code: &str) -> FileStatus {
 /// absolute path -> status, plus each ancestor directory (within `root`) marked
 /// `DirDirty` so a folder shows it *contains* changes. Empty when `root` is not
 /// a repo or `git` is missing — so a non-repo tree just renders untinted.
+#[cfg(test)]
 pub fn tree_status(root: &Path) -> std::collections::HashMap<PathBuf, FileStatus> {
     use std::collections::HashMap;
     let mut map: HashMap<PathBuf, FileStatus> = HashMap::new();

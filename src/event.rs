@@ -70,8 +70,39 @@ pub enum AppEvent {
         path: std::path::PathBuf,
         entries: Vec<crate::files::Entry>,
     },
-    /// The file-tree git-status scan finished (docs/38 FILE-6): path -> status.
-    FileGitStatus(std::collections::HashMap<std::path::PathBuf, crate::git::local::FileStatus>),
+    /// One structured Git status scan feeds FILES tint and DIFF (docs/88).
+    DiffStatus {
+        token: u64,
+        visible_root: std::path::PathBuf,
+        result: Result<crate::diff::DiffSnapshot, String>,
+    },
+    /// One selected file's bounded diff finished loading off the app loop.
+    DiffLoaded {
+        id: PaneId,
+        token: u64,
+        result: Result<crate::diff::LoadedDiff, String>,
+    },
+    DiffNotesLoaded {
+        review_id: String,
+        result: Result<
+            (
+                Vec<crate::diff::ReviewNote>,
+                crate::diff::notes::ReviewProgress,
+            ),
+            String,
+        >,
+    },
+    DiffNoteSaved {
+        note: crate::diff::ReviewNote,
+        result: Result<(), String>,
+    },
+    DiffNoteRemoved {
+        id: String,
+        result: Result<(), String>,
+    },
+    DiffProgressSaved {
+        result: Result<(), String>,
+    },
     /// A file-view read finished (docs/38 FILE-3): applied to the view leaf `id`.
     FileRead {
         id: PaneId,

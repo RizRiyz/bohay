@@ -317,6 +317,7 @@ fn draw_content(
             // visible (docs/29), so a long registry of plugin docks stays reachable.
             let rows = app.layout_rows();
             let dock_start = app.dock_section_start();
+            let diff_start = app.diff_section_start();
             let bar_start = app.bar_section_start();
             let l = &app.config.layout;
             // Visual sequence: control rows plus a blank + divider before the docks.
@@ -327,6 +328,10 @@ fn draw_content(
             }
             let mut vis = Vec::new();
             for i in 0..rows.len() {
+                if i == diff_start {
+                    vis.push(V::Blank);
+                    vis.push(V::Divider(cat.tab_diff));
+                }
                 if i == dock_start {
                     vis.push(V::Blank);
                     vis.push(V::Divider(cat.tab_docks));
@@ -453,6 +458,92 @@ fn draw_content(
                             cursor,
                             cat.set_resume_workspace,
                             toggle(l.resume_in_new_workspace, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::DiffLayout => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_diff_layout,
+                            picker(app.config.layout.diff_layout.as_str(), t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::DiffWrap => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_diff_wrap,
+                            toggle(app.config.layout.diff_wrap, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::DiffContext => {
+                        let row = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_diff_context,
+                            app.config.layout.diff_context_lines.to_string(),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, row));
+                    }
+                    LayoutRow::DiffLineNumbers => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_diff_line_numbers,
+                            toggle(app.config.layout.diff_show_line_numbers, t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::DiffMarkers => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_diff_markers,
+                            picker(app.config.layout.diff_marker_style.as_str(), t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::DiffColors => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_diff_colors,
+                            picker(app.config.layout.diff_color_mode.as_str(), t),
+                            t,
+                        ));
+                    }
+                    LayoutRow::DiffLiveRefresh => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_diff_live_refresh,
+                            toggle(app.config.layout.diff_live_refresh, t),
                             t,
                         ));
                     }
@@ -1311,7 +1402,6 @@ fn bar_row(
 }
 
 /// A `‹ value ›` picker display (cycled by click / keys; no arrow hit-rects).
-#[cfg(windows)]
 fn picker(value: &str, t: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled("‹ ", Style::new().fg(t.overlay1)),

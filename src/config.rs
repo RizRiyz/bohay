@@ -223,6 +223,23 @@ pub struct LayoutConfig {
     /// Persisted so the choice sticks across restarts.
     #[serde(default = "yes")]
     pub files_show_hidden: bool,
+    /// Native DIFF review display defaults (docs/88).
+    #[serde(default)]
+    pub diff_layout: crate::diff::DiffLayoutPreference,
+    #[serde(default)]
+    pub diff_wrap: bool,
+    #[serde(default = "default_diff_context_lines")]
+    pub diff_context_lines: u16,
+    #[serde(default = "yes")]
+    pub diff_show_line_numbers: bool,
+    #[serde(default)]
+    pub diff_marker_style: crate::diff::DiffMarkerStyle,
+    /// Whether changed rows use semantic colors from the active theme or the
+    /// familiar fixed red/green review palette.
+    #[serde(default)]
+    pub diff_color_mode: crate::diff::DiffColorMode,
+    #[serde(default = "yes")]
+    pub diff_live_refresh: bool,
     /// Terminal width (columns) below which the touch/compact layout kicks in
     /// (docs/18): one zoomed pane, sidebars hidden, the `≡` switcher. Configurable
     /// because phone terminals in landscape often sit right around the default;
@@ -241,6 +258,10 @@ pub struct LayoutConfig {
 
 fn default_compact_width() -> u16 {
     crate::app::COMPACT_WIDTH
+}
+
+fn default_diff_context_lines() -> u16 {
+    3
 }
 
 fn default_shift_enter() -> String {
@@ -393,6 +414,13 @@ impl Default for LayoutConfig {
             scrollback_bytes: Some(SCROLLBACK_BYTES_DEFAULT),
             scrollback: default_scrollback(),
             files_show_hidden: true,
+            diff_layout: crate::diff::DiffLayoutPreference::Auto,
+            diff_wrap: false,
+            diff_context_lines: default_diff_context_lines(),
+            diff_show_line_numbers: true,
+            diff_marker_style: crate::diff::DiffMarkerStyle::Symbols,
+            diff_color_mode: crate::diff::DiffColorMode::Theme,
+            diff_live_refresh: true,
             compact_width: default_compact_width(),
             shift_enter: default_shift_enter(),
         }
@@ -434,6 +462,15 @@ impl Config {
             .unwrap_or(SHIFT_ENTER_CHOICES[0].2)
     }
 
+    /// Git context lines used by native DIFF reads. Hand-edited configuration
+    /// is bounded here as well as on load so no caller can construct an
+    /// unbounded `git diff --unified` argument.
+    pub fn diff_context_lines(&self) -> u16 {
+        self.layout
+            .diff_context_lines
+            .min(crate::diff::MAX_CONTEXT_LINES)
+    }
+
     /// Clamp the persisted sidebar width into the supported range.
     pub fn sidebar_width(&self) -> u16 {
         self.sidebar_width
@@ -458,7 +495,7 @@ pub fn load() -> Config {
     fs::read_to_string(config_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .map(migrate_scrollback)
+        .map(normalize_config)
         .unwrap_or_default()
 }
 
@@ -466,10 +503,14 @@ pub fn load() -> Config {
 /// old default becomes today's 10 MiB default; custom values retain their rough
 /// relative size using the previous measured 5,000 lines at 120 columns ≈ 10
 /// MiB relationship.
-fn migrate_scrollback(mut cfg: Config) -> Config {
+fn normalize_config(mut cfg: Config) -> Config {
     if cfg.layout.scrollback_bytes.is_none() {
         cfg.layout.scrollback_bytes = Some(legacy_scrollback_bytes(cfg.layout.scrollback));
     }
+    cfg.layout.diff_context_lines = cfg
+        .layout
+        .diff_context_lines
+        .min(crate::diff::MAX_CONTEXT_LINES);
     cfg
 }
 

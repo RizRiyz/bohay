@@ -144,6 +144,20 @@ git:
   files reveal <path>        expand the tree to a path
   files refresh              re-read the tree from disk
 
+diff review:
+  diff list [--layer staged|worktree|untracked|conflict]   list exact diff layers
+  diff open [<path>] [--layer <layer>] [--view auto|split|stack]
+                             [--placement preview|pane|tab]
+  diff get <path> [--layer <layer>] [--include-patch]   inspect a bounded semantic diff
+  diff refresh               refresh the shared FILES and DIFF index
+  diff note add --file <path> (--old-line N|--new-line N) --body <text>
+                             [--end-line N] [--kind question|issue|suggestion|praise]
+  diff note list [--file <path>] [--state open|resolved|outdated|orphaned]
+  diff note edit <id> --body <text>
+  diff note resolve|reopen <id>
+  diff note remove <id> --yes
+  diff note send --to <agent> [<id>...] [--all-open]
+
 worktrees:
   worktree list              list the current repo's worktrees
   worktree create <branch>   create a worktree + workspace for <branch>

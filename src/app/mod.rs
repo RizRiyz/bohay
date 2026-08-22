@@ -24,6 +24,7 @@ use crate::ui::theme::{State, Theme};
 
 mod board;
 pub use board::agent_choices;
+pub(crate) mod diff;
 mod dispatch;
 pub(crate) mod files;
 mod git;
@@ -119,6 +120,7 @@ impl DockKind {
 /// (docs/30) can add its own variant later without another seam.
 pub enum ViewKind {
     File(crate::files::FileView),
+    Diff(Box<crate::diff::DiffView>),
 }
 
 /// Which sidebar a dock lives in (docs/29).
@@ -549,6 +551,22 @@ pub struct FileMenu {
     /// opened), so `OpenWith(i)` resolves stably even if the cache changes. Empty
     /// for a folder (open actions are file-only).
     pub editors: Vec<(String, String)>,
+}
+
+/// A right-click menu for one exact DIFF list entry. The key is snapshotted so
+/// an asynchronous status refresh cannot retarget the user's action.
+pub struct DiffMenu {
+    pub key: crate::diff::DiffKey,
+    pub anchor: (u16, u16),
+    pub items: Vec<(DiffMenuItem, Rect)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DiffMenuItem {
+    OpenPreview,
+    OpenPane,
+    OpenTab,
+    CopyPath,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1380,6 +1398,21 @@ pub struct App {
     pub file_tree: crate::files::FileTree,
     pub files_area: Rect,
     pub file_tree_rects: Vec<(usize, Rect)>,
+    /// FILES/DIFF header controls and DIFF list rows (docs/88).
+    pub files_mode: crate::diff::FilesMode,
+    pub files_mode_rects: Vec<(crate::diff::FilesMode, Rect)>,
+    pub diff_row_rects: Vec<(usize, Rect)>,
+    /// Visible source rows inside native DIFF panes. A click selects the exact
+    /// stack-row identity and old/new side before note actions run.
+    pub diff_source_rects: Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
+    /// Visible saved-note cards inside native DIFF panes. A left click opens
+    /// that exact note in the inline editor.
+    pub diff_note_rects: Vec<(PaneId, String, Rect)>,
+    /// Pane currently owning a mouse drag that selects an annotation range.
+    pub diff_note_drag: Option<PaneId>,
+    pub diff: crate::diff::DiffState,
+    pub diff_agent_picker: Option<crate::diff::DiffAgentPicker>,
+    pub diff_menu: Option<DiffMenu>,
     /// Working-tree git status per path, for tinting the FILES dock (docs/38).
     /// Refreshed off-loop; empty when the tree root isn't a repo.
     pub file_git_status: HashMap<PathBuf, crate::git::local::FileStatus>,
@@ -1430,9 +1463,10 @@ pub struct App {
     /// persisted — after a restart the pane is no longer that editor, so the
     /// label must not survive it. Untracked in `drop_leaf_runtime`.
     pub editor_files: HashMap<PaneId, PathBuf>,
-    /// The reused single-click **preview** file pane, if one is open — clicking
-    /// another file replaces its content instead of spawning a second pane.
-    pub preview_view: Option<PaneId>,
+    /// Reused single-click **preview** panes. Each workspace may own one so
+    /// browsing FILES or DIFF never focuses and replaces another workspace's
+    /// preview.
+    pub preview_views: HashSet<PaneId>,
     /// AGENTS list filter: `true` shows only live (active) agents; `false`
     /// (the default) also shows the resumable session history.
     pub agents_active_only: bool,
@@ -1721,9 +1755,18 @@ impl App {
             },
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
+            files_mode: crate::diff::FilesMode::Files,
+            files_mode_rects: Vec::new(),
+            diff_row_rects: Vec::new(),
+            diff_source_rects: Vec::new(),
+            diff_note_rects: Vec::new(),
+            diff_note_drag: None,
+            diff: crate::diff::DiffState::default(),
+            diff_agent_picker: None,
+            diff_menu: None,
             views: HashMap::new(),
             editor_files: HashMap::new(),
-            preview_view: None,
+            preview_views: HashSet::new(),
             file_git_status: HashMap::new(),
             git_status_inflight: false,
             last_git_status_at: Instant::now()
@@ -1897,6 +1940,54 @@ impl App {
                         std::thread::spawn(move || {
                             let load = crate::files::read_file(&p);
                             let _ = tx.send(crate::event::AppEvent::FileRead { id, load });
+                        });
+                        remap.insert(*raw, id);
+                        continue;
+                    }
+                    // A DIFF leaf restores only its specification and display
+                    // state. Current patch content is fetched again off-loop.
+                    if let Some(spec) = &ps.diff {
+                        let context_lines = spec.context_lines.min(crate::diff::MAX_CONTEXT_LINES);
+                        let mut view = crate::diff::DiffView::new(
+                            spec.root.clone(),
+                            spec.key.clone(),
+                            spec.preference,
+                            context_lines,
+                            spec.show_line_numbers,
+                            spec.wrap,
+                        );
+                        view.request_token = 1;
+                        view.scroll = spec.scroll;
+                        view.selected = spec.selected;
+                        view.selected_side = spec.selected_side;
+                        view.horizontal = spec.horizontal;
+                        views.insert(id, ViewKind::Diff(Box::new(view)));
+                        let tx = app_tx.clone();
+                        let root = spec.root.clone();
+                        let file = crate::diff::DiffFile {
+                            key: spec.key.clone(),
+                            status: spec.status,
+                            additions: None,
+                            deletions: None,
+                            binary: false,
+                            unresolved_notes: 0,
+                            viewed_fingerprint: None,
+                            fingerprint: String::new(),
+                        };
+                        let context = context_lines;
+                        std::thread::spawn(move || {
+                            let result =
+                                crate::diff::git::load_diff(&root, &file, context).map(|diff| {
+                                    crate::diff::LoadedDiff {
+                                        diff,
+                                        reconciled_notes: Vec::new(),
+                                    }
+                                });
+                            let _ = tx.send(crate::event::AppEvent::DiffLoaded {
+                                id,
+                                token: 1,
+                                result,
+                            });
                         });
                         remap.insert(*raw, id);
                         continue;
@@ -2161,9 +2252,18 @@ impl App {
             },
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
+            files_mode: crate::diff::FilesMode::Files,
+            files_mode_rects: Vec::new(),
+            diff_row_rects: Vec::new(),
+            diff_source_rects: Vec::new(),
+            diff_note_rects: Vec::new(),
+            diff_note_drag: None,
+            diff: crate::diff::DiffState::default(),
+            diff_agent_picker: None,
+            diff_menu: None,
             views,
             editor_files: HashMap::new(),
-            preview_view: None,
+            preview_views: HashSet::new(),
             file_git_status: HashMap::new(),
             git_status_inflight: false,
             last_git_status_at: Instant::now()
@@ -4312,6 +4412,16 @@ impl App {
             .find(|ws| ws.tabs.iter().any(|t| t.layout.leaves().contains(&id)))
     }
 
+    /// The reusable preview owned by the active workspace, if it is still a
+    /// live native view. Preview identity is workspace-scoped: focusing a
+    /// preview must never change the active workspace as a side effect.
+    fn active_preview_view(&self) -> Option<PaneId> {
+        let workspace = self.ws();
+        self.preview_views.iter().copied().find(|id| {
+            self.views.contains_key(id) && workspace.tabs.iter().any(|tab| tab.layout.contains(*id))
+        })
+    }
+
     fn focus_pane_global(&mut self, id: PaneId) {
         let changed = self.layout().focus != id;
         let mut found = None;
@@ -4610,9 +4720,7 @@ impl App {
         self.cancel_output_waits(id);
         self.editor_files.remove(&id); // untrack an editor pane's file (docs/38)
         self.module_panes.remove(&id); // untrack a module pane (MOD-2)
-        if self.preview_view == Some(id) {
-            self.preview_view = None; // forget it as the reused preview pane
-        }
+        self.preview_views.remove(&id); // forget a closed reusable preview pane
         if self.scroll_pane == Some(id) {
             self.scroll_pane = None; // don't leave scroll mode pointing at a dead pane
         }

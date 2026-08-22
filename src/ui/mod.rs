@@ -59,6 +59,7 @@ mod board;
 mod borders;
 pub(crate) mod changelog;
 mod cmdinfo;
+mod diff;
 mod files;
 mod git;
 mod help;
@@ -139,6 +140,10 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     let agent_rects = std::mem::take(&mut app.agent_rects);
     let session_rects = std::mem::take(&mut app.session_rects);
     let file_tree_rects = std::mem::take(&mut app.file_tree_rects);
+    let files_mode_rects = std::mem::take(&mut app.files_mode_rects);
+    let diff_row_rects = std::mem::take(&mut app.diff_row_rects);
+    let diff_source_rects = std::mem::take(&mut app.diff_source_rects);
+    let diff_note_rects = std::mem::take(&mut app.diff_note_rects);
     let module_dock_rects = std::mem::take(&mut app.module_dock_rects);
     let picker_rects = std::mem::take(&mut app.picker_rects);
     let settings_tab_rects = std::mem::take(&mut app.settings_tab_rects);
@@ -181,6 +186,10 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
         .map(|menu| std::mem::take(&mut menu.items));
     let file_menu_items = app
         .file_menu
+        .as_mut()
+        .map(|menu| std::mem::take(&mut menu.items));
+    let diff_menu_items = app
+        .diff_menu
         .as_mut()
         .map(|menu| std::mem::take(&mut menu.items));
     let dock_menu_rects = app
@@ -250,6 +259,10 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
     app.agent_rects = agent_rects;
     app.session_rects = session_rects;
     app.file_tree_rects = file_tree_rects;
+    app.files_mode_rects = files_mode_rects;
+    app.diff_row_rects = diff_row_rects;
+    app.diff_source_rects = diff_source_rects;
+    app.diff_note_rects = diff_note_rects;
     app.module_dock_rects = module_dock_rects;
     app.picker_rects = picker_rects;
     app.settings_tab_rects = settings_tab_rects;
@@ -288,6 +301,9 @@ pub fn render_projection(f: &mut RenderTarget, app: &mut App) {
         menu.items = items;
     }
     if let (Some(items), Some(menu)) = (file_menu_items, app.file_menu.as_mut()) {
+        menu.items = items;
+    }
+    if let (Some(items), Some(menu)) = (diff_menu_items, app.diff_menu.as_mut()) {
         menu.items = items;
     }
     if let (Some(rects), Some(menu)) = (dock_menu_rects, app.dock_menu.as_mut()) {
@@ -476,6 +492,10 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // file instead of switching workspace (docs/29 + docs/38).
     app.files_area = Rect::ZERO;
     app.file_tree_rects.clear();
+    app.files_mode_rects.clear();
+    app.diff_row_rects.clear();
+    app.diff_source_rects.clear();
+    app.diff_note_rects.clear();
     let mut ws_rects = Vec::new();
     let mut agent_rects = Vec::new();
     let mut session_rects = Vec::new();
@@ -698,6 +718,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     if app.file_menu.is_some() {
         menu::draw_file_menu(f, area, app, &t);
     }
+    if app.diff_menu.is_some() {
+        menu::draw_diff_menu(f, area, app, &t);
+    }
     // A module dock row's own context menu (docs/52).
     if app.dock_menu.is_some() {
         menu::draw_dock_menu(f, area, app, &t);
@@ -794,6 +817,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         || app.pane_menu.is_some()
         || app.agent_menu.is_some()
         || app.file_menu.is_some()
+        || app.diff_menu.is_some()
         || app.dock_menu.is_some()
         || app.file_prompt.is_some()
         || app.file_delete.is_some()
