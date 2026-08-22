@@ -2881,6 +2881,84 @@ mod tests {
         assert!(app.pending_diff_api.is_empty());
     }
 
+    #[test]
+    fn closing_one_workspace_fails_only_its_parked_files_and_diff_requests() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let closed_root = app.ws().cwd.clone();
+        let open_root = closed_root.join("still-open");
+        app.workspaces.push(crate::app::Workspace {
+            name: "still-open".into(),
+            cwd: open_root.clone(),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![crate::app::Tab::panes(crate::layout::TileLayout::new(
+                crate::ids::PaneId::alloc(),
+            ))],
+            active_tab: 0,
+            pinned: false,
+        });
+
+        let request = |id: &str, method: &str| {
+            let (reply, response) = std::sync::mpsc::channel();
+            (
+                crate::ipc::api::ApiRequest {
+                    id: id.into(),
+                    method: method.into(),
+                    params: serde_json::Value::Null,
+                    reply,
+                },
+                response,
+            )
+        };
+        let (closed_files, closed_files_rx) = request("closed-files", "files.tree");
+        let (open_files, open_files_rx) = request("open-files", "files.tree");
+        app.pending_file_tree_api
+            .push((closed_root.clone(), closed_files));
+        app.pending_file_tree_api
+            .push((open_root.clone(), open_files));
+        let (closed_diff, closed_diff_rx) = request("closed-diff", "diff.list");
+        let (open_diff, open_diff_rx) = request("open-diff", "diff.list");
+        app.pending_diff_api
+            .push((closed_root.clone(), closed_diff));
+        app.pending_diff_api.push((open_root.clone(), open_diff));
+
+        app.close_workspace(0);
+
+        let closed_files = closed_files_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("closed workspace FILES request failed immediately");
+        assert!(closed_files.contains("files_error"));
+        assert!(closed_files.contains("workspace closed"));
+        let closed_diff = closed_diff_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("closed workspace DIFF request failed immediately");
+        assert!(closed_diff.contains("diff_error"));
+        assert!(closed_diff.contains("workspace closed"));
+
+        assert!(matches!(
+            open_files_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            open_diff_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(app.pending_file_tree_api.len(), 1);
+        assert!(crate::platform::same_path(
+            &app.pending_file_tree_api[0].0,
+            &open_root
+        ));
+        assert_eq!(app.pending_diff_api.len(), 1);
+        assert!(crate::platform::same_path(
+            &app.pending_diff_api[0].0,
+            &open_root
+        ));
+        assert_eq!(app.workspaces.len(), 1);
+        assert!(crate::platform::same_path(&app.ws().cwd, &open_root));
+    }
+
     // Agents treat Enter as "submit" and Shift+Enter as "new line". A terminal
     // sends a bare CR for both, so luvus asks for the disambiguating keyboard
     // protocol and forwards the modified form as `ESC CR` — the sequence agent

@@ -65,8 +65,26 @@ impl App {
         }
     }
 
-    /// Fail every parked DIFF request when its workspace disappears before the
-    /// status worker can complete it.
+    /// Fail parked DIFF requests for one workspace while preserving requests
+    /// targeting other open workspace roots.
+    pub(crate) fn fail_pending_diff_api_for_root(&mut self, closed_root: &Path, message: &str) {
+        let mut pending = std::mem::take(&mut self.pending_diff_api);
+        for (root, req) in pending.drain(..) {
+            if crate::platform::same_path(&root, closed_root) {
+                let _ = req.reply.send(
+                    serde_json::json!({"id":req.id,"error":{
+                        "code":"diff_error",
+                        "message":message
+                    }})
+                    .to_string(),
+                );
+            } else {
+                self.pending_diff_api.push((root, req));
+            }
+        }
+    }
+
+    /// Fail every parked DIFF request when no workspace remains.
     pub(crate) fn fail_pending_diff_api(&mut self, message: &str) {
         for (_, req) in self.pending_diff_api.drain(..) {
             let _ = req.reply.send(

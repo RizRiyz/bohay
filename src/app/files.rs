@@ -103,8 +103,26 @@ impl App {
         }
     }
 
-    /// Fail every parked FILES request when its workspace can no longer
-    /// produce a directory result, such as when the final workspace closes.
+    /// Fail parked FILES requests for one workspace while preserving requests
+    /// whose directory workers still belong to another open workspace.
+    pub(crate) fn fail_pending_files_api_for_root(&mut self, closed_root: &Path, message: &str) {
+        let mut pending = std::mem::take(&mut self.pending_file_tree_api);
+        for (root, req) in pending.drain(..) {
+            if crate::platform::same_path(&root, closed_root) {
+                let _ = req.reply.send(
+                    serde_json::json!({"id":req.id,"error":{
+                        "code":"files_error",
+                        "message":message
+                    }})
+                    .to_string(),
+                );
+            } else {
+                self.pending_file_tree_api.push((root, req));
+            }
+        }
+    }
+
+    /// Fail every parked FILES request when no workspace remains.
     pub(crate) fn fail_pending_files_api(&mut self, message: &str) {
         for (_, req) in self.pending_file_tree_api.drain(..) {
             let _ = req.reply.send(

@@ -4793,6 +4793,17 @@ impl App {
 
     fn close_active_ws(&mut self) {
         if self.active_ws < self.workspaces.len() {
+            if self.workspaces.len() > 1 {
+                let closed_root = self.workspaces[self.active_ws].cwd.clone();
+                self.fail_pending_files_api_for_root(
+                    &closed_root,
+                    "workspace closed while FILES was loading",
+                );
+                self.fail_pending_diff_api_for_root(
+                    &closed_root,
+                    "workspace closed while DIFF was refreshing",
+                );
+            }
             self.workspaces.remove(self.active_ws);
         }
         if self.workspaces.is_empty() {
@@ -4832,6 +4843,17 @@ impl App {
     fn close_workspace(&mut self, index: usize) {
         if index >= self.workspaces.len() {
             return;
+        }
+        if self.workspaces.len() > 1 {
+            let closed_root = self.workspaces[index].cwd.clone();
+            self.fail_pending_files_api_for_root(
+                &closed_root,
+                "workspace closed while FILES was loading",
+            );
+            self.fail_pending_diff_api_for_root(
+                &closed_root,
+                "workspace closed while DIFF was refreshing",
+            );
         }
         let ids: Vec<PaneId> = self.workspaces[index]
             .tabs
