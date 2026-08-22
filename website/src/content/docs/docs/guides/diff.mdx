@@ -130,7 +130,10 @@ luvus diff list --layer worktree | jq '.result.files[] | {path, status, addition
 ```
 
 `diff list` returns staged, worktree, untracked, and conflict entries as
-separate changes. A path can therefore appear more than once. Pass `--layer`
+separate changes. Its first call waits for one off-loop status scan; later calls
+return the latest shared FILES/DIFF snapshot immediately and refresh it in the
+background when due. Run `diff refresh` first when a script must wait for a new
+scan. A path can therefore appear more than once. Pass `--layer`
 to `open`, `get`, and `note add` whenever the path is present in multiple
 layers. Paths resolve from the active workspace and must remain inside its Git
 repository. Counts can be `null` in the lightweight list until that file's

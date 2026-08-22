@@ -62,6 +62,60 @@ impl App {
         self.refresh_git_status();
     }
 
+    /// Park a first `files.tree` call until its root listing has returned from
+    /// the filesystem worker. Cached trees answer inline; no directory I/O is
+    /// ever moved onto the app loop just to make the CLI deterministic.
+    pub(crate) fn prepare_files_api(
+        &mut self,
+        req: crate::ipc::api::ApiRequest,
+    ) -> Option<crate::ipc::api::ApiRequest> {
+        if req.method != "files.tree" {
+            return Some(req);
+        }
+        self.prepare_file_tree_api(false);
+        if self.file_tree.root_loaded() {
+            return Some(req);
+        }
+        self.pending_file_tree_api
+            .push((self.ws().cwd.clone(), req));
+        None
+    }
+
+    pub(crate) fn finish_pending_files_api(&mut self, completed: &Path) {
+        let active_root = self.ws().cwd.clone();
+        let root_loaded = self.file_tree.root_loaded();
+        let mut pending = std::mem::take(&mut self.pending_file_tree_api);
+        for (root, req) in pending.drain(..) {
+            if !crate::platform::same_path(&root, &active_root) {
+                let _ = req.reply.send(
+                    serde_json::json!({"id":req.id,"error":{
+                        "code":"files_error",
+                        "message":"active workspace changed while FILES was loading"
+                    }})
+                    .to_string(),
+                );
+            } else if root_loaded && crate::platform::same_path(completed, &root) {
+                let response = self.handle_api(&req);
+                let _ = req.reply.send(response);
+            } else {
+                self.pending_file_tree_api.push((root, req));
+            }
+        }
+    }
+
+    /// Root and schedule the FILES tree for an explicit API request even when
+    /// the dock is hidden. Periodic upkeep deliberately sleeps while no FILES or
+    /// DIFF surface is visible, but `files.tree` and `files.refresh` must not
+    /// depend on a client attaching after server restore.
+    pub(crate) fn prepare_file_tree_api(&mut self, invalidate: bool) {
+        let root = self.ws().cwd.clone();
+        self.file_tree.set_root(root);
+        if invalidate {
+            self.file_tree.invalidate();
+        }
+        self.load_pending_dirs();
+    }
+
     /// Re-read the directories currently on screen so files created or removed
     /// outside luvus (by an agent, a terminal command, another process) appear.
     /// Gated to ~1.5s and never descends into collapsed folders, so it stays
@@ -1356,6 +1410,84 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn hidden_files_api_re_roots_and_reloads_after_restore() {
+        let _env = crate::persist::test_env("files-api-restore");
+        let root = std::env::temp_dir().join(format!("luvus-far-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("restored.txt"), b"restored\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars
+            .left
+            .docks
+            .retain(|dock| dock != &DockKind::Files);
+        app.sidebars
+            .right
+            .docks
+            .retain(|dock| dock != &DockKind::Files);
+        let snapshot = crate::persist::snapshot(&app);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut restored = App::from_snapshot(snapshot, tx).expect("restore");
+        assert!(
+            restored.sidebars.side_of(&DockKind::Files).is_none(),
+            "the regression requires a hidden FILES dock"
+        );
+        assert!(restored.file_tree.root().as_os_str().is_empty());
+
+        let request_tree = |id: &str, app: &mut App| -> std::sync::mpsc::Receiver<String> {
+            let (reply, response) = std::sync::mpsc::channel();
+            app.handle_event(AppEvent::Api(crate::ipc::api::ApiRequest {
+                id: id.to_string(),
+                method: "files.tree".to_string(),
+                params: serde_json::json!({}),
+                reply,
+            }));
+            response
+        };
+
+        let first = request_tree("first", &mut restored);
+        assert!(
+            first
+                .recv_timeout(std::time::Duration::from_millis(10))
+                .is_err(),
+            "the first tree waits for its off-loop root read"
+        );
+        pump_until_dir_read(&rx, &mut restored, &root);
+        let loaded: serde_json::Value = serde_json::from_str(
+            &first
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("first populated tree"),
+        )
+        .unwrap();
+        assert_eq!(loaded["result"]["root"], root.to_string_lossy().as_ref());
+        assert!(loaded["result"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["name"] == "restored.txt")));
+
+        restored
+            .dispatch("files.refresh", &serde_json::json!({}))
+            .unwrap();
+        let refreshed = request_tree("refreshed", &mut restored);
+        pump_until_dir_read(&rx, &mut restored, &root);
+        let refreshed: serde_json::Value = serde_json::from_str(
+            &refreshed
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("refreshed populated tree"),
+        )
+        .unwrap();
+        assert_eq!(refreshed["result"]["root"], root.to_string_lossy().as_ref());
+        assert!(refreshed["result"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["name"] == "restored.txt")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn file_view_frees_content_on_close() {
         let _env = crate::persist::test_env("file-mem-free");

@@ -1786,7 +1786,7 @@ impl App {
             }
             // ── DIFF review (docs/88) ────────────────────────────────────
             "diff.refresh" => {
-                self.refresh_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 let generation = self
                     .diff
                     .snapshot
@@ -1796,7 +1796,7 @@ impl App {
                 Ok(json!({"type":"ok","refresh":"complete","generation":generation}))
             }
             "diff.list" => {
-                self.refresh_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 let layer = p
                     .get("layer")
                     .and_then(|value| value.as_str())
@@ -1820,11 +1820,12 @@ impl App {
                     "generation": snapshot.generation,
                     "fingerprint": snapshot.fingerprint,
                     "omitted": snapshot.omitted_files,
+                    "refreshing": self.diff.status_inflight,
                     "files": files,
                 }))
             }
             "diff.open" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 let target = match p
                     .get("placement")
                     .or_else(|| p.get("target"))
@@ -1884,7 +1885,7 @@ impl App {
                 )
             }
             "diff.get" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 let raw = req_str(p, "path")?;
                 let layer = p
                     .get("layer")
@@ -1954,7 +1955,7 @@ impl App {
                 Ok(json!({"type":"ok","pane":id.0.to_string()}))
             }
             "diff.note.list" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 self.ensure_diff_notes_sync().map_err(diff_err)?;
                 let state = p
                     .get("state")
@@ -1978,7 +1979,7 @@ impl App {
                 Ok(json!({"type":"diff_notes","notes":notes}))
             }
             "diff.note.apply" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 self.ensure_diff_notes_sync().map_err(diff_err)?;
                 let items = p
                     .get("notes")
@@ -2063,7 +2064,7 @@ impl App {
                 }))
             }
             "diff.note.add" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 self.ensure_diff_notes_sync().map_err(diff_err)?;
                 let raw = p
                     .get("file")
@@ -2126,7 +2127,7 @@ impl App {
                 Ok(json!({"type":"diff_note","note":note_json(&note)}))
             }
             "diff.note.edit" | "diff.note.resolve" | "diff.note.reopen" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 self.ensure_diff_notes_sync().map_err(diff_err)?;
                 let id = req_str(p, "id")?;
                 let note = self
@@ -2150,7 +2151,7 @@ impl App {
                 Ok(json!({"type":"diff_note","note":note_json(&updated)}))
             }
             "diff.note.remove" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 self.ensure_diff_notes_sync().map_err(diff_err)?;
                 let id = req_str(p, "id")?;
                 let note = self
@@ -2165,7 +2166,7 @@ impl App {
                 Ok(json!({"type":"ok","removed":id}))
             }
             "diff.note.send" => {
-                self.ensure_diff_snapshot_sync().map_err(diff_err)?;
+                self.ensure_diff_snapshot().map_err(diff_err)?;
                 self.ensure_diff_notes_sync().map_err(diff_err)?;
                 let target = req_str(p, "to")?;
                 let all_open = p.get("all_open").and_then(Value::as_bool).unwrap_or(false);
@@ -2259,6 +2260,7 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "files.tree" => {
+                self.prepare_file_tree_api(false);
                 let rows: Vec<Value> = self
                     .file_tree
                     .visible_rows()
@@ -2289,7 +2291,7 @@ impl App {
                 Ok(json!({"type":"ok"}))
             }
             "files.refresh" => {
-                self.file_tree.invalidate();
+                self.prepare_file_tree_api(true);
                 Ok(json!({"type":"ok"}))
             }
             // ── worktrees (docs/18 WT-3) ──
@@ -3192,6 +3194,10 @@ mod tests {
         let mut app = App::new(100, 30, tx).unwrap();
         app.workspaces[0].cwd = repo;
 
+        let token = 1;
+        app.diff.status_generation = token;
+        let snapshot = crate::diff::git::scan(&app.workspaces[0].cwd, token).unwrap();
+        assert!(app.apply_diff_status(token, app.workspaces[0].cwd.clone(), Ok(snapshot)));
         let refreshed = app.dispatch("diff.refresh", &json!({})).unwrap();
         assert_eq!(refreshed["refresh"], "complete");
         let listed = app

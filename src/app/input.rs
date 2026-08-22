@@ -156,6 +156,27 @@ fn extract_rows_selection(
 }
 
 impl App {
+    fn handle_api_request(&mut self, req: crate::ipc::api::ApiRequest) -> bool {
+        if req.method == "search.query" {
+            self.start_search_api(req);
+            return true;
+        }
+        if req.method == "search.activate" {
+            let response = self.handle_search_activate(&req);
+            let _ = req.reply.send(response);
+            return true;
+        }
+        let Some(req) = self.prepare_files_api(req) else {
+            return true;
+        };
+        let Some(req) = self.prepare_diff_api(req) else {
+            return true;
+        };
+        let response = self.handle_api(&req);
+        let _ = req.reply.send(response);
+        true
+    }
+
     fn handle_theme_reloaded(
         &mut self,
         id: String,
@@ -315,20 +336,7 @@ impl App {
             // Control-API requests arrive on the event channel so the loop wakes
             // for them immediately (docs/81). Answer inline: like the old
             // server-side drain, an answered request counts as activity.
-            AppEvent::Api(req) => {
-                if req.method == "search.query" {
-                    self.start_search_api(req);
-                    return true;
-                }
-                if req.method == "search.activate" {
-                    let response = self.handle_search_activate(&req);
-                    let _ = req.reply.send(response);
-                    return true;
-                }
-                let resp = self.handle_api(&req);
-                let _ = req.reply.send(resp);
-                true
-            }
+            AppEvent::Api(req) => self.handle_api_request(req),
             AppEvent::ThemeReloaded {
                 id,
                 registry,
@@ -394,14 +402,19 @@ impl App {
                 self.active_is_mission()
             }
             AppEvent::DirRead { path, entries } => {
-                self.file_tree.apply_dir(path, entries);
+                self.file_tree.apply_dir(path.clone(), entries);
+                self.finish_pending_files_api(&path);
                 true
             }
             AppEvent::DiffStatus {
                 token,
                 visible_root,
                 result,
-            } => self.apply_diff_status(token, visible_root, result),
+            } => {
+                let changed = self.apply_diff_status(token, visible_root, result);
+                self.finish_pending_diff_api();
+                changed
+            }
             AppEvent::DiffLoaded { id, token, result } => self.apply_diff_loaded(id, token, result),
             AppEvent::DiffNotesLoaded { review_id, result } => {
                 self.apply_diff_notes_loaded(review_id, result)

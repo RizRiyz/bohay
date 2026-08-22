@@ -20,7 +20,11 @@ in the workspace even when its folder has never been expanded here. Press
 Git ignore rules when Git is available, skips `.git`, and never follows
 directory symlinks.
 
-Folders expand and collapse in place. Names are tinted by git status as you
+Folders expand and collapse in place. `luvus files tree` and
+`luvus files refresh` also work while the dock is hidden or immediately after a
+server restore; directory reads stay off the app loop.
+
+Names are tinted by git status as you
 work: amber for modified, green for added or untracked, coral for deleted or
 conflicted, mint for renamed, with a letter badge and a mark on any folder that
 contains changes. Files created outside luvus, by an agent or a command in a

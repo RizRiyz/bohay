@@ -46,6 +46,7 @@ printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.luvus/luvus.so
 | panes | `pane.list` · `pane.split` · `pane.move` · `pane.focus` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.close` · `attach.pane` |
 | agents | `agent.list` · `agent.get` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
+| files | `files.tree` · `files.open` · `files.reveal` · `files.refresh` |
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
@@ -220,6 +221,15 @@ Unsupported agents return `unsupported_agent`; a supported agent whose session
 ID cannot be resolved returns `session_unknown`; and PTY launch failure returns
 `spawn_failed`. Validation completes before a new pane is spawned.
 
+## Files
+
+`files.tree` returns the active workspace root and its currently expanded rows.
+When the root has not been loaded yet, including immediately after server
+restore with the FILES dock hidden, the request waits for one off-loop directory
+read rather than returning an empty root. `files.refresh` invalidates the cached
+listings and schedules that same worker immediately; it does not require a TUI
+client or visible dock.
+
 ## DIFF review
 
 DIFF methods are additive and read Git state without mutating the repository.
@@ -229,7 +239,7 @@ one layer, callers must pass `layer` instead of accepting an ambiguous result.
 | Method | Params | Result |
 |---|---|---|
 | `diff.refresh` | `{}` | completes one shared FILES/DIFF status refresh and returns its generation |
-| `diff.list` | `{layer?}` | exact staged, worktree, untracked, and conflict rows |
+| `diff.list` | `{layer?}` | cached staged, worktree, untracked, and conflict rows; schedules a bounded background refresh |
 | `diff.open` | `{path?, layer?, view?, placement?}` | opens a native preview, pane, or tab |
 | `diff.get` | `{path, layer?, include_patch?}` | bounded semantic hunks; line text is omitted by default |
 | `diff.navigate` | `{pane?, action}` | moves an open native DIFF view |
@@ -249,9 +259,13 @@ Git source lines, not rendered rows.
 
 ### Results and identifiers
 
-`diff.list` returns `result.files`. Each file includes `path`, `old_path`,
-`layer`, `status`, `additions`, `deletions`, `binary`, unresolved `notes`, review
-state, and a fingerprint. Addition and deletion counts can be `null` until the
+`diff.list` returns `result.files` from the latest shared FILES/DIFF snapshot and
+never runs Git on the app loop. On first use it waits for one off-loop scan. A
+later call returns the cache immediately and may schedule a cadence-gated
+background refresh; `result.refreshing` reports whether that refresh is in
+flight. Call `diff.refresh` when the caller must wait for a newly completed
+scan. Each file includes `path`, `old_path`, `layer`, `status`, `additions`,
+`deletions`, `binary`, unresolved `notes`, review state, and a fingerprint. Addition and deletion counts can be `null` until the
 file is loaded. If a path appears in multiple layers, all later calls for that
 path must include `layer`.
 

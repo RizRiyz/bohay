@@ -1400,6 +1400,9 @@ pub struct App {
     /// The FILES dock (docs/38): the tree model, its scroll region, and the
     /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
     pub file_tree: crate::files::FileTree,
+    /// `files.tree` callers waiting for the off-loop root directory read.
+    /// The targeted root prevents a workspace switch from redirecting a reply.
+    pending_file_tree_api: Vec<(PathBuf, crate::ipc::api::ApiRequest)>,
     pub files_area: Rect,
     pub file_tree_rects: Vec<(usize, Rect)>,
     /// FILES/DIFF header controls and DIFF list rows (docs/88).
@@ -1417,6 +1420,10 @@ pub struct App {
     pub diff: crate::diff::DiffState,
     pub diff_agent_picker: Option<crate::diff::DiffAgentPicker>,
     pub diff_menu: Option<DiffMenu>,
+    /// API requests waiting for the shared off-loop FILES/DIFF status scan.
+    /// Each retains the workspace root it targeted so a later workspace switch
+    /// cannot redirect a parked mutation or read into a different repository.
+    pending_diff_api: Vec<(PathBuf, crate::ipc::api::ApiRequest)>,
     /// Working-tree git status per path, for tinting the FILES dock (docs/38).
     /// Refreshed off-loop; empty when the tree root isn't a repo.
     pub file_git_status: HashMap<PathBuf, crate::git::local::FileStatus>,
@@ -1761,6 +1768,7 @@ impl App {
                 t.show_hidden = files_show_hidden;
                 t
             },
+            pending_file_tree_api: Vec::new(),
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
             files_mode: crate::diff::FilesMode::Files,
@@ -1772,6 +1780,7 @@ impl App {
             diff: crate::diff::DiffState::default(),
             diff_agent_picker: None,
             diff_menu: None,
+            pending_diff_api: Vec::new(),
             views: HashMap::new(),
             editor_files: HashMap::new(),
             recent_files: VecDeque::new(),
@@ -2260,6 +2269,7 @@ impl App {
                 t.show_hidden = files_show_hidden;
                 t
             },
+            pending_file_tree_api: Vec::new(),
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
             files_mode: crate::diff::FilesMode::Files,
@@ -2271,6 +2281,7 @@ impl App {
             diff: crate::diff::DiffState::default(),
             diff_agent_picker: None,
             diff_menu: None,
+            pending_diff_api: Vec::new(),
             views,
             editor_files: HashMap::new(),
             recent_files: VecDeque::new(),

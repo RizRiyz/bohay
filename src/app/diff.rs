@@ -14,31 +14,66 @@ use crate::layout::{Axis, TileLayout};
 use super::files::OpenTarget;
 
 impl App {
-    pub(crate) fn ensure_diff_snapshot_sync(&mut self) -> Result<(), String> {
-        let root = self.ws().cwd.clone();
-        let current_root = self
-            .diff
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.visible_root.as_path());
-        if current_root.is_some_and(|existing| crate::platform::same_path(existing, &root)) {
-            return Ok(());
+    /// Route API methods that need repository status through the same off-loop
+    /// scan used by FILES and the interactive DIFF dock. A cached `diff.list`
+    /// answers immediately and merely schedules a cadence-gated refresh;
+    /// first-use methods and explicit `diff.refresh` park their reply until the
+    /// worker result returns to the single writer.
+    pub(crate) fn prepare_diff_api(
+        &mut self,
+        req: crate::ipc::api::ApiRequest,
+    ) -> Option<crate::ipc::api::ApiRequest> {
+        if !req.method.starts_with("diff.") || req.method == "diff.navigate" {
+            return Some(req);
         }
-        self.diff.status_generation = self.diff.status_generation.wrapping_add(1);
-        let token = self.diff.status_generation;
-        let snapshot = crate::diff::git::scan(&root, token)?;
-        let visible_root = root;
-        self.apply_diff_status(token, visible_root, Ok(snapshot));
-        Ok(())
+        let refresh = req.method == "diff.refresh";
+        let ready = self.diff_snapshot_matches_active_workspace();
+        if ready && !refresh {
+            if req.method == "diff.list" {
+                self.refresh_diff_status(false);
+            }
+            return Some(req);
+        }
+        let root = self.ws().cwd.clone();
+        self.pending_diff_api.push((root, req));
+        self.refresh_diff_status(true);
+        None
     }
 
-    pub(crate) fn refresh_diff_snapshot_sync(&mut self) -> Result<(), String> {
-        let root = self.ws().cwd.clone();
-        self.diff.status_generation = self.diff.status_generation.wrapping_add(1);
-        let token = self.diff.status_generation;
-        let snapshot = crate::diff::git::scan(&root, token)?;
-        self.apply_diff_status(token, root, Ok(snapshot));
-        Ok(())
+    /// Complete parked DIFF API calls only after the accepted status result has
+    /// been applied. Requests targeting a workspace that lost focus while Git
+    /// was running fail closed instead of being redirected to the new root.
+    pub(crate) fn finish_pending_diff_api(&mut self) {
+        let active_root = self.ws().cwd.clone();
+        let scan_complete = !self.diff.status_inflight;
+        let mut pending = std::mem::take(&mut self.pending_diff_api);
+        for (root, req) in pending.drain(..) {
+            if !crate::platform::same_path(&root, &active_root) {
+                let _ = req.reply.send(
+                    serde_json::json!({"id":req.id,"error":{
+                        "code":"diff_error",
+                        "message":"active workspace changed while DIFF was refreshing"
+                    }})
+                    .to_string(),
+                );
+            } else if scan_complete {
+                let response = self.handle_api(&req);
+                let _ = req.reply.send(response);
+            } else {
+                self.pending_diff_api.push((root, req));
+            }
+        }
+    }
+
+    pub(crate) fn ensure_diff_snapshot(&self) -> Result<(), String> {
+        if self.diff_snapshot_matches_active_workspace() {
+            return Ok(());
+        }
+        Err(self
+            .diff
+            .error
+            .clone()
+            .unwrap_or_else(|| "DIFF is not ready".to_string()))
     }
 
     pub(crate) fn ensure_diff_notes_sync(&mut self) -> Result<(), String> {
@@ -1738,6 +1773,19 @@ mod tests {
         RepoPath,
     };
 
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn install_snapshot(app: &mut App) -> DiffKey {
         let path = RepoPath::from_path(Path::new("src/lib.rs")).unwrap();
         let key = DiffKey {
@@ -1813,6 +1861,76 @@ mod tests {
             pinned: false,
         });
         app.workspaces.len() - 1
+    }
+
+    #[test]
+    fn diff_api_status_scan_is_off_loop_and_cached_lists_answer_immediately() {
+        let _env = crate::persist::test_env("diff-api-off-loop");
+        let repo = PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q"]);
+        run_git(&repo, &["config", "user.name", "Luvus Test"]);
+        run_git(&repo, &["config", "user.email", "luvus@example.invalid"]);
+        std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-q", "-m", "base"]);
+        std::fs::write(repo.join("file.txt"), "changed\n").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[0].cwd = repo;
+        let (reply, response) = std::sync::mpsc::channel();
+        let request = crate::ipc::api::ApiRequest {
+            id: "first-list".to_string(),
+            method: "diff.list".to_string(),
+            params: serde_json::json!({}),
+            reply,
+        };
+
+        assert!(
+            app.prepare_diff_api(request).is_none(),
+            "first list is parked"
+        );
+        assert!(app.diff.status_inflight, "the worker scan is in flight");
+        assert!(
+            response
+                .recv_timeout(std::time::Duration::from_millis(10))
+                .is_err(),
+            "the reply waits for the app loop to apply the worker result"
+        );
+        assert!(app.dispatch("ping", &serde_json::json!({})).is_ok());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let event = rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .expect("status worker event");
+            let completed = matches!(&event, AppEvent::DiffStatus { .. });
+            app.handle_event(event);
+            if completed {
+                break;
+            }
+        }
+        let first: serde_json::Value = serde_json::from_str(
+            &response
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("parked list response"),
+        )
+        .unwrap();
+        assert_eq!(first["result"]["files"][0]["path"], "file.txt");
+        assert_eq!(first["result"]["refreshing"], false);
+
+        let (reply, _response) = std::sync::mpsc::channel();
+        let cached = crate::ipc::api::ApiRequest {
+            id: "cached-list".to_string(),
+            method: "diff.list".to_string(),
+            params: serde_json::json!({}),
+            reply,
+        };
+        assert!(
+            app.prepare_diff_api(cached).is_some(),
+            "a matching cached snapshot never waits on Git"
+        );
     }
 
     #[test]
