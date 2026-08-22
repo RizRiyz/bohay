@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::format::{validate_id, ThemeFile, MAX_FILE_BYTES};
@@ -14,6 +14,8 @@ use super::registry::{is_reserved_id, validate_standalone, ThemeRegistry};
 pub const COMMUNITY_PREFIX: &str = "community/";
 const COMMUNITY_RAW_ROOT: &str =
     "https://raw.githubusercontent.com/RizRiyz/luvus/main/community/themes";
+const GITHUB_API_ROOT: &str = "https://api.github.com/repos";
+const MAX_GITHUB_INDEX_BYTES: usize = 64 * 1024;
 static NEXT_TMP: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
@@ -23,6 +25,30 @@ pub struct InstalledTheme {
     pub path: PathBuf,
     pub source: String,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubContent {
+    name: String,
+    path: String,
+    #[serde(rename = "type")]
+    kind: String,
+    size: u64,
+    download_url: Option<String>,
+    html_url: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GitHubSource {
+    Repository {
+        owner: String,
+        repository: String,
+        canonical: String,
+    },
+    File {
+        download: String,
+        canonical: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +193,19 @@ fn acquire(source: &str) -> Result<(Vec<u8>, String, bool)> {
         return Ok((fetch_https(&url)?, url, true));
     }
     if source.starts_with("https://") {
+        if let Some(github) = parse_github_source(source)? {
+            return match github {
+                GitHubSource::Repository {
+                    owner,
+                    repository,
+                    canonical,
+                } => acquire_github_repository(&owner, &repository, &canonical),
+                GitHubSource::File {
+                    download,
+                    canonical,
+                } => Ok((fetch_https(&download)?, canonical, true)),
+            };
+        }
         return Ok((fetch_https(source)?, source.to_string(), true));
     }
     if source.contains("://") {
@@ -188,15 +227,136 @@ fn acquire(source: &str) -> Result<(Vec<u8>, String, bool)> {
     Ok((bytes, source, false))
 }
 
+fn parse_github_source(source: &str) -> Result<Option<GitHubSource>> {
+    let rest = if let Some(rest) = source.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = source.strip_prefix("https://www.github.com/") {
+        rest
+    } else {
+        return Ok(None);
+    };
+    if rest.contains(['?', '#']) {
+        bail!("GitHub theme URLs cannot contain a query or fragment");
+    }
+    let rest = rest.trim_end_matches('/');
+    let parts: Vec<_> = rest.split('/').collect();
+    if parts.iter().any(|part| part.is_empty()) || parts.len() < 2 {
+        bail!("GitHub theme source must be a repository or a .toml file URL");
+    }
+    let owner = parts[0];
+    let repository = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
+    validate_github_segment(owner, "owner")?;
+    validate_github_segment(repository, "repository")?;
+    let canonical_repo = format!("https://github.com/{owner}/{repository}");
+    if parts.len() == 2 {
+        return Ok(Some(GitHubSource::Repository {
+            owner: owner.to_string(),
+            repository: repository.to_string(),
+            canonical: canonical_repo,
+        }));
+    }
+    if parts.len() >= 5 && parts[2] == "blob" {
+        let git_ref = parts[3];
+        validate_github_segment(git_ref, "ref")?;
+        let path = parts[4..].join("/");
+        if !path.ends_with(".toml") {
+            bail!("GitHub theme file URL must point to a .toml file");
+        }
+        return Ok(Some(GitHubSource::File {
+            download: format!(
+                "https://raw.githubusercontent.com/{owner}/{repository}/{git_ref}/{path}"
+            ),
+            canonical: format!("{canonical_repo}/blob/{git_ref}/{path}"),
+        }));
+    }
+    bail!("GitHub theme source must be a repository URL or a /blob/<ref>/<path>.toml URL")
+}
+
+fn validate_github_segment(value: &str, label: &str) -> Result<()> {
+    if value.is_empty()
+        || matches!(value, "." | "..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("invalid GitHub {label}");
+    }
+    Ok(())
+}
+
+fn acquire_github_repository(
+    owner: &str,
+    repository: &str,
+    canonical: &str,
+) -> Result<(Vec<u8>, String, bool)> {
+    let api = format!("{GITHUB_API_ROOT}/{owner}/{repository}/contents");
+    let listing = fetch_https_bounded(
+        &api,
+        MAX_GITHUB_INDEX_BYTES,
+        "application/vnd.github+json",
+        "GitHub repository listing",
+    )?;
+    let entries: Vec<GitHubContent> = serde_json::from_slice(&listing).with_context(|| {
+        format!("{canonical} must be a public GitHub repository with files at its root")
+    })?;
+    let selected = select_github_theme(entries)?;
+    let download = selected
+        .download_url
+        .filter(|url| url.starts_with("https://raw.githubusercontent.com/"))
+        .ok_or_else(|| anyhow!("GitHub did not provide a safe HTTPS download URL"))?;
+    let source = selected
+        .html_url
+        .filter(|url| url.starts_with("https://github.com/"))
+        .unwrap_or_else(|| format!("{canonical}#{}", selected.path));
+    Ok((fetch_https(&download)?, source, true))
+}
+
+fn select_github_theme(entries: Vec<GitHubContent>) -> Result<GitHubContent> {
+    let mut themes: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| entry.kind == "file" && entry.name.ends_with(".toml"))
+        .collect();
+    match themes.len() {
+        0 => bail!("GitHub theme repository must contain one root-level .toml file"),
+        1 => {}
+        _ => {
+            themes.sort_by(|a, b| a.name.cmp(&b.name));
+            bail!(
+                "GitHub theme repository contains multiple root-level .toml files: {}; install a specific GitHub /blob/ URL instead",
+                themes
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    let selected = themes.pop().expect("one GitHub theme");
+    if selected.size > MAX_FILE_BYTES as u64 {
+        bail!("theme file exceeds the {MAX_FILE_BYTES}-byte limit");
+    }
+    Ok(selected)
+}
+
 fn fetch_https(url: &str) -> Result<Vec<u8>> {
+    fetch_https_bounded(
+        url,
+        MAX_FILE_BYTES,
+        "application/toml,text/plain",
+        "theme download",
+    )
+}
+
+fn fetch_https_bounded(url: &str, limit: usize, accept: &str, label: &str) -> Result<Vec<u8>> {
     if !url.starts_with("https://")
         || url
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
     {
-        bail!("invalid HTTPS theme URL");
+        bail!("invalid HTTPS URL for {label}");
     }
-    let max = MAX_FILE_BYTES.to_string();
+    let max = limit.to_string();
+    let accept_header = format!("Accept: {accept}");
     let curl = [
         "--fail",
         "--silent",
@@ -211,15 +371,16 @@ fn fetch_https(url: &str) -> Result<Vec<u8>> {
         "--max-filesize",
         max.as_str(),
         "--header",
-        "Accept: application/toml,text/plain",
+        accept_header.as_str(),
         "--header",
         "User-Agent: luvus",
         url,
     ];
-    if let Some(bytes) = try_fetch("curl", &curl)? {
+    if let Some(bytes) = try_fetch("curl", &curl, limit, label)? {
         return Ok(bytes);
     }
-    let quota = format!("--quota={MAX_FILE_BYTES}");
+    let quota = format!("--quota={limit}");
+    let wget_accept = format!("--header=Accept: {accept}");
     let wget = [
         "-q",
         "-O",
@@ -228,17 +389,17 @@ fn fetch_https(url: &str) -> Result<Vec<u8>> {
         "--tries=1",
         "--https-only",
         quota.as_str(),
-        "--header=Accept: application/toml,text/plain",
+        wget_accept.as_str(),
         "--header=User-Agent: luvus",
         url,
     ];
-    if let Some(bytes) = try_fetch("wget", &wget)? {
+    if let Some(bytes) = try_fetch("wget", &wget, limit, label)? {
         return Ok(bytes);
     }
     bail!("need curl or wget to download themes")
 }
 
-fn try_fetch(program: &str, args: &[&str]) -> Result<Option<Vec<u8>>> {
+fn try_fetch(program: &str, args: &[&str], limit: usize, label: &str) -> Result<Option<Vec<u8>>> {
     let mut child = match Command::new(program)
         .args(args)
         .stdout(Stdio::piped())
@@ -263,14 +424,12 @@ fn try_fetch(program: &str, args: &[&str]) -> Result<Option<Vec<u8>>> {
         bytes
     });
     let mut bytes = Vec::new();
-    stdout
-        .take((MAX_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_FILE_BYTES {
+    stdout.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
         let _ = child.kill();
         let _ = child.wait();
         let _ = errors.join();
-        bail!("theme download exceeds the {MAX_FILE_BYTES}-byte limit");
+        bail!("{label} exceeds the {limit}-byte limit");
     }
     let status = child.wait()?;
     let errors = errors.join().unwrap_or_default();
@@ -496,6 +655,73 @@ mod tests {
         for bad in ["../escape", "two words", "a/b"] {
             assert!(community_url(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn github_repository_and_file_urls_are_unambiguous() {
+        assert_eq!(
+            parse_github_source("https://github.com/example/theme-repo").unwrap(),
+            Some(GitHubSource::Repository {
+                owner: "example".into(),
+                repository: "theme-repo".into(),
+                canonical: "https://github.com/example/theme-repo".into(),
+            })
+        );
+        assert_eq!(
+            parse_github_source(
+                "https://github.com/example/theme-repo/blob/main/aurora/theme.toml"
+            )
+            .unwrap(),
+            Some(GitHubSource::File {
+                download:
+                    "https://raw.githubusercontent.com/example/theme-repo/main/aurora/theme.toml"
+                        .into(),
+                canonical: "https://github.com/example/theme-repo/blob/main/aurora/theme.toml"
+                    .into(),
+            })
+        );
+        assert_eq!(
+            parse_github_source("https://example.com/theme.toml").unwrap(),
+            None
+        );
+        for bad in [
+            "https://github.com/example/theme-repo/issues",
+            "https://github.com/example/theme-repo/blob/main/README.md",
+            "https://github.com/example/theme-repo?tab=readme",
+        ] {
+            assert!(parse_github_source(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn github_repository_requires_exactly_one_bounded_root_theme() {
+        let entry = |name: &str, kind: &str, size: u64| GitHubContent {
+            name: name.into(),
+            path: name.into(),
+            kind: kind.into(),
+            size,
+            download_url: Some(format!(
+                "https://raw.githubusercontent.com/example/repo/main/{name}"
+            )),
+            html_url: Some(format!("https://github.com/example/repo/blob/main/{name}")),
+        };
+        let selected = select_github_theme(vec![
+            entry("README.md", "file", 100),
+            entry("theme-name.toml", "file", 1_024),
+            entry("examples", "dir", 0),
+        ])
+        .unwrap();
+        assert_eq!(selected.name, "theme-name.toml");
+        assert!(select_github_theme(vec![entry("README.md", "file", 100)]).is_err());
+        assert!(select_github_theme(vec![
+            entry("one.toml", "file", 100),
+            entry("two.toml", "file", 100),
+        ])
+        .is_err());
+        assert!(select_github_theme(vec![
+            entry("large.toml", "file", MAX_FILE_BYTES as u64 + 1,)
+        ])
+        .is_err());
     }
 
     #[test]

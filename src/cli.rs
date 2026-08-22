@@ -168,7 +168,7 @@ themes:
   theme path                print/create the shared themes directory
   theme init <id> [--extends <id>]   write an editable TOML starter
   theme validate <path> [--strict] [--json]   validate without installing
-  theme install <source> [--yes]     install a local file, HTTPS URL, or community/<id>
+  theme install <source> [--yes]     install a local file, HTTPS URL, GitHub repo, or community/<id>
   theme use <id>            select and persist a registered theme
   theme uninstall <id>      remove an inactive local theme
   theme reload              rescan installed themes in the selected server
@@ -900,7 +900,9 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
                 .get(1)
                 .filter(|arg| !arg.starts_with('-'))
                 .ok_or_else(|| {
-                    anyhow!("usage: luvus theme install <path|https-url|community/id> [--yes]")
+                    anyhow!(
+                        "usage: luvus theme install <path|https-url|github-repo|community/id> [--yes]"
+                    )
                 })?;
             if args
                 .iter()
@@ -908,7 +910,7 @@ fn theme_cmd(args: &[String]) -> Result<i32> {
                 .any(|arg| !matches!(arg.as_str(), "--yes" | "-y"))
             {
                 return Err(anyhow!(
-                    "usage: luvus theme install <path|https-url|community/id> [--yes]"
+                    "usage: luvus theme install <path|https-url|github-repo|community/id> [--yes]"
                 ));
             }
             let yes = args

@@ -39,14 +39,26 @@ non-interactive terminal, confirm deliberately:
 luvus theme install community/aurora-circuit --yes
 ```
 
-You can also install a local file or an explicit HTTPS URL:
+You can also install a local file, an explicit HTTPS file URL, or a public
+GitHub repository containing exactly one root-level `*.toml` theme file. A
+README and subdirectories are ignored:
 
 ```sh
 luvus theme install ./team-theme.toml
 luvus theme install https://example.com/luvus/team-theme.toml --yes
+luvus theme install https://github.com/example/luvus-theme --yes
 ```
 
-Remote sources must use HTTPS and are capped at 64 KiB. Installation validates
+Normal GitHub file pages are accepted too:
+
+```sh
+luvus theme install https://github.com/example/themes/blob/main/team-theme.toml --yes
+```
+
+Luvus reads the bounded GitHub root listing and downloads only the selected
+TOML file; it does not clone the repository or execute its contents. A repository
+with no root theme or multiple root TOML files is rejected. Remote sources must
+use HTTPS and theme files are capped at 64 KiB. Installation validates
 before an atomic replacement, records the source and SHA-256 digest beside the
 theme, and preserves the previous installed file if replacement fails.
 
