@@ -21,7 +21,9 @@ fn agent_hook_script(agent: &str) -> String {
 # on the hook's event name so modules and API clients get precise transitions.
 [ -n "$LUVUS_ENV" ] || exit 0
 [ -n "$LUVUS_SOCKET_PATH" ] || exit 0
-command -v luvus >/dev/null 2>&1 || exit 0
+luvus_bin="${{LUVUS_BIN_PATH:-}}"
+[ -n "$luvus_bin" ] && [ -x "$luvus_bin" ] || luvus_bin="$(command -v luvus 2>/dev/null || true)"
+[ -n "$luvus_bin" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 input="$(cat)"
 evt="$(printf '%s' "$input" | python3 -c 'import sys,json
@@ -34,14 +36,14 @@ case "$evt" in
 try:
     d=json.load(sys.stdin); print((d.get("message") or "")[:200])
 except Exception: print("")' 2>/dev/null)"
-    luvus pane report-event --agent {agent} --kind "$evt" --message "$msg" >/dev/null 2>&1
+    "$luvus_bin" pane report-event --agent {agent} --kind "$evt" --message "$msg" >/dev/null 2>&1
     ;;
   *)
     sid="$(printf '%s' "$input" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin); print(d.get("session_id") or d.get("sessionId") or d.get("id") or "")
 except Exception: print("")' 2>/dev/null)"
-    [ -n "$sid" ] && luvus pane report --agent {agent} --session "$sid" >/dev/null 2>&1
+    [ -n "$sid" ] && "$luvus_bin" pane report --agent {agent} --session "$sid" >/dev/null 2>&1
     ;;
 esac
 exit 0
@@ -176,7 +178,7 @@ fn opencode_plugin_path() -> PathBuf {
 
 /// Where + how an agent's shell hook is configured (docs/23). `file` is the JSON
 /// config file inside `dir`; `event` is the hook key; `matcher` is an optional
-/// group matcher (Codex wants `startup|resume`).
+/// group matcher (Codex reports `startup` and `resume` SessionStart sources).
 struct HookSpec {
     dir: PathBuf,
     file: &'static str,
@@ -787,6 +789,10 @@ mod tests {
         let luvus: Vec<&Value> = groups.iter().filter(|g| group_mentions_luvus(g)).collect();
         assert_eq!(luvus.len(), 1);
         assert_eq!(luvus[0]["matcher"].as_str(), Some("startup|resume"));
+        assert!(
+            script.contains("LUVUS_BIN_PATH"),
+            "the hook uses the exact server binary even when PATH is stale"
+        );
         assert!(is_installed("codex"));
 
         std::env::remove_var("CODEX_HOME");

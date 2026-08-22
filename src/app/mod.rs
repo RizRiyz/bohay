@@ -2013,10 +2013,9 @@ impl App {
                     // Resume the native agent session captured at save time (a
                     // precise hook report, or one discovered from the agent's
                     // on-disk store keyed by cwd — see `persist::snapshot`).
-                    // Preferably the shell *starts* on the resume command, so
-                    // the pane opens straight into the resuming agent (nothing
-                    // visibly typed); an unrecognised shell family falls back
-                    // to typing the command after spawn.
+                    // PowerShell can start directly on the resume command.
+                    // POSIX and unrecognised shells start normally and receive
+                    // it through the PTY after interactive profile setup.
                     // Re-apply the launch flags captured at save time (docs/62),
                     // unless Settings → General turns that off.
                     let resume = ps.agent_session.as_ref().and_then(|(agent, sid)| {
@@ -2711,9 +2710,9 @@ impl App {
         Some(id)
     }
 
-    /// `spawn_into`, but the shell starts on the `resume` command (falling back
-    /// to typing it into the prompt when the shell family isn't recognised) —
-    /// a resumed session opens straight into its agent.
+    /// `spawn_into`, but queues an agent resume/fork command. POSIX and custom
+    /// shells receive it through a normal interactive PTY so profile-managed
+    /// executables are available; PowerShell can launch it directly.
     fn spawn_resume_pane(&mut self, cwd: PathBuf, resume: &str) -> Option<PaneId> {
         let id = PaneId::alloc();
         let shell = crate::platform::resolve_shell(&self.config.shell);
@@ -2809,12 +2808,12 @@ impl App {
             .get(&pane)
             .map(|p| p.cwd.clone())
             .ok_or(AgentForkError::PaneNotFound)?;
-        let sid = st
-            .agent_session
-            .as_ref()
-            .map(|s| s.session_id.clone())
-            .or_else(|| crate::agent::latest_session(&agent, &cwd));
-        let sid = sid.ok_or(AgentForkError::SessionUnknown)?;
+        let sid = crate::agent::fork_session_id(
+            &agent,
+            st.agent_session.as_ref().map(|s| s.session_id.as_str()),
+            &cwd,
+        )
+        .ok_or(AgentForkError::SessionUnknown)?;
         let fork =
             crate::agent::fork_command(&agent, &sid).ok_or(AgentForkError::UnsupportedAgent)?;
 
